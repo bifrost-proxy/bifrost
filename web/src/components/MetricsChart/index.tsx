@@ -1,5 +1,6 @@
 import ReactECharts from 'echarts-for-react';
 import type { MetricsSnapshot } from '../../types';
+import { useI18n } from '../../i18n';
 
 interface MetricsChartProps {
   data: MetricsSnapshot[];
@@ -8,6 +9,9 @@ interface MetricsChartProps {
 }
 
 export default function MetricsChart({ data, type, height = 200 }: MetricsChartProps) {
+  const { t } = useI18n();
+  const sentLabel = t('traffic.metrics.sent');
+  const receivedLabel = t('traffic.metrics.received');
   const timestamps = data.map(d => new Date(d.timestamp).toLocaleTimeString());
 
   const getOption = () => {
@@ -33,7 +37,7 @@ export default function MetricsChart({ data, type, height = 200 }: MetricsChartP
           xAxis: { type: 'category', data: timestamps },
           yAxis: { type: 'value', axisLabel: { formatter: (v: number) => `${(v / 1024 / 1024).toFixed(0)}MB` } },
           series: [{
-            name: 'Memory',
+            name: t('traffic.metrics.memory'),
             type: 'line',
             smooth: true,
             data: data.map(d => d.memory_used),
@@ -62,18 +66,18 @@ export default function MetricsChart({ data, type, height = 200 }: MetricsChartP
           tooltip: { trigger: 'axis', formatter: (params: { seriesName: string; value: number }[]) => {
             return params.map(p => `${p.seriesName}: ${formatBytes(p.value)}/s`).join('<br/>');
           }},
-          legend: { data: ['Sent', 'Received'] },
+          legend: { data: [sentLabel, receivedLabel] },
           xAxis: { type: 'category', data: timestamps },
           yAxis: { type: 'value', axisLabel: { formatter: (v: number) => `${formatBytes(v)}/s` } },
           series: [
             {
-              name: 'Sent',
+              name: sentLabel,
               type: 'line',
               smooth: true,
               data: data.map(d => d.bytes_sent_rate),
             },
             {
-              name: 'Received',
+              name: receivedLabel,
               type: 'line',
               smooth: true,
               data: data.map(d => d.bytes_received_rate),
@@ -88,7 +92,7 @@ export default function MetricsChart({ data, type, height = 200 }: MetricsChartP
           xAxis: { type: 'category', data: timestamps },
           yAxis: { type: 'value' },
           series: [{
-            name: 'Connections',
+            name: t('traffic.metrics.connections'),
             type: 'line',
             smooth: true,
             data: data.map(d => d.active_connections),

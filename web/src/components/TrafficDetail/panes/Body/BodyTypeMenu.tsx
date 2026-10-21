@@ -5,6 +5,7 @@ import type { MenuProps } from 'antd';
 import { DisplayFormat } from '../../../../types';
 import type { RecordContentType } from '../../../../types';
 import { shouldDisableJsonStructuredView } from '../../helper/contentType';
+import { useI18n } from '../../../../i18n';
 
 interface BodyTypeMenuProps {
   value: string;
@@ -19,6 +20,7 @@ export const BodyTypeMenu = ({
   contentType,
   data,
 }: BodyTypeMenuProps) => {
+  const { t } = useI18n();
   const disableJsonStructuredView = shouldDisableJsonStructuredView(contentType, data);
 
   const menuItems = useMemo<MenuProps['items']>(() => {
@@ -30,7 +32,7 @@ export const BodyTypeMenu = ({
         label: (
           <Space>
             {value === DisplayFormat.Media && <CheckOutlined />}
-            Media
+            {t('trafficDetail.bodyType.media')}
           </Space>
         ),
       });
@@ -44,9 +46,11 @@ export const BodyTypeMenu = ({
             {value === DisplayFormat.HighLight && <CheckOutlined />}
             {contentType === 'JSON'
               ? disableJsonStructuredView
-                ? 'Text'
+                ? t('trafficDetail.bodyType.text')
                 : 'JSON'
-              : contentType}
+              : contentType === 'Other'
+                ? t('trafficDetail.bodyType.other')
+                : contentType}
           </Space>
         ),
       });
@@ -58,7 +62,7 @@ export const BodyTypeMenu = ({
         label: (
           <Space>
             {value === DisplayFormat.Tree && <CheckOutlined />}
-            Tree
+            {t('trafficDetail.bodyType.tree')}
           </Space>
         ),
       });
@@ -75,26 +79,30 @@ export const BodyTypeMenu = ({
     });
 
     return items;
-  }, [contentType, disableJsonStructuredView, value]);
+  }, [contentType, disableJsonStructuredView, value, t]);
 
   const activeLabel = useMemo(() => {
     switch (value) {
       case DisplayFormat.HighLight:
         return contentType === 'JSON'
           ? disableJsonStructuredView
-            ? 'Text'
+            ? t('trafficDetail.bodyType.text')
             : 'JSON'
-          : contentType;
+          : contentType === 'Other'
+            ? t('trafficDetail.bodyType.other')
+            : contentType;
       case DisplayFormat.Hex:
         return 'Hex';
       case DisplayFormat.Tree:
-        return disableJsonStructuredView ? 'Text' : 'Tree';
+        return disableJsonStructuredView
+          ? t('trafficDetail.bodyType.text')
+          : t('trafficDetail.bodyType.tree');
       case DisplayFormat.Media:
-        return 'Media';
+        return t('trafficDetail.bodyType.media');
       default:
-        return 'View';
+        return t('trafficDetail.bodyType.view');
     }
-  }, [value, contentType, disableJsonStructuredView]);
+  }, [value, contentType, disableJsonStructuredView, t]);
 
   const handleClick: MenuProps['onClick'] = ({ key }) => {
     onChange(key);

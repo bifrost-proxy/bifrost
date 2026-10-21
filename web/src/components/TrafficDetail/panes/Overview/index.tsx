@@ -23,6 +23,7 @@ import {
 import { useLiveNow } from "../../../../hooks/useLiveNow";
 import { useMarkSearch } from "../../hooks/useMarkSearch";
 import AppIcon from "../../../AppIcon";
+import { useI18n, type TFunction } from "../../../../i18n";
 
 const { Text, Paragraph } = Typography;
 
@@ -84,10 +85,11 @@ const shouldUseSocketSize = (record: TrafficRecord): boolean => {
 };
 
 const RuleCard = ({ rule, index }: { rule: MatchedRule; index: number }) => {
+  const { t } = useI18n();
   const { token } = theme.useToken();
   const source = rule.rule_name
     ? `${rule.rule_name}${rule.line ? `:${rule.line}` : ""}`
-    : "Unknown";
+    : t("common.unknown");
 
   return (
     <div
@@ -110,7 +112,7 @@ const RuleCard = ({ rule, index }: { rule: MatchedRule; index: number }) => {
       </div>
       <div style={{ marginBottom: 1 }}>
         <Text type="secondary" style={{ fontSize: 12 }}>
-          Protocol:{" "}
+          {t("trafficDetail.overview.ruleProtocol")}{" "}
         </Text>
         <Tag color="green" style={{ fontSize: 11 }}>
           {rule.protocol}
@@ -118,7 +120,7 @@ const RuleCard = ({ rule, index }: { rule: MatchedRule; index: number }) => {
       </div>
       <div style={{ marginBottom: 1 }}>
         <Text type="secondary" style={{ fontSize: 12 }}>
-          Pattern:{" "}
+          {t("trafficDetail.overview.rulePattern")}{" "}
         </Text>
         <Text code style={{ fontSize: 11 }}>
           {rule.pattern}
@@ -126,16 +128,16 @@ const RuleCard = ({ rule, index }: { rule: MatchedRule; index: number }) => {
       </div>
       <div style={{ marginBottom: 1 }}>
         <Text type="secondary" style={{ fontSize: 12 }}>
-          Value:{" "}
+          {t("trafficDetail.overview.ruleValue")}{" "}
         </Text>
         <Text code style={{ fontSize: 11 }}>
-          {rule.value || "(empty)"}
+          {rule.value || t("trafficDetail.overview.ruleEmpty")}
         </Text>
       </div>
       {rule.raw && (
         <div>
           <Text type="secondary" style={{ fontSize: 12 }}>
-            Raw Rule:
+            {t("trafficDetail.overview.ruleRaw")}
           </Text>
           <pre
             style={{
@@ -158,6 +160,7 @@ const RuleCard = ({ rule, index }: { rule: MatchedRule; index: number }) => {
 };
 
 const TimingBar = ({ timing }: { timing: RequestTiming }) => {
+  const { t } = useI18n();
   const { token } = theme.useToken();
   const total = timing.total_ms || 1;
   const firstByteWaitMs =
@@ -173,42 +176,42 @@ const TimingBar = ({ timing }: { timing: RequestTiming }) => {
       : timing.wait_ms;
 
   const phases = [
-    { key: "dns", label: "DNS lookup", value: timing.dns_ms, color: "#8884d8" },
+    { key: "dns", label: t("trafficDetail.overview.phaseDns"), value: timing.dns_ms, color: "#8884d8" },
     {
       key: "connect",
-      label: "Connection established",
+      label: t("trafficDetail.overview.phaseConnect"),
       value: timing.connect_ms,
       color: "#82ca9d",
     },
-    { key: "tls", label: "TLS handshake", value: timing.tls_ms, color: "#ffc658" },
-    { key: "send", label: "Request sent", value: timing.send_ms, color: "#ff7300" },
+    { key: "tls", label: t("trafficDetail.overview.phaseTls"), value: timing.tls_ms, color: "#ffc658" },
+    { key: "send", label: t("trafficDetail.overview.phaseSend"), value: timing.send_ms, color: "#ff7300" },
     {
       key: "wait",
-      label: "Waiting for first byte",
+      label: t("trafficDetail.overview.phaseWait"),
       value: firstByteWaitMs,
       color: "#00C49F",
     },
     {
       key: "receive",
-      label: "Receiving after first byte",
+      label: t("trafficDetail.overview.phaseReceive"),
       value: timing.receive_ms,
       color: "#0088FE",
     },
   ].filter((p) => p.value !== undefined && p.value > 0);
 
   const stageDetails = [
-    { key: "dns", label: "DNS lookup", value: timing.dns_ms },
-    { key: "connect", label: "Connection established", value: timing.connect_ms },
-    { key: "tls", label: "TLS handshake", value: timing.tls_ms },
-    { key: "send", label: "Request sent", value: timing.send_ms },
-    { key: "first-byte", label: "First byte to client", value: timing.first_byte_ms },
-    { key: "wait-byte", label: "Waiting for first byte", value: firstByteWaitMs },
+    { key: "dns", label: t("trafficDetail.overview.phaseDns"), value: timing.dns_ms },
+    { key: "connect", label: t("trafficDetail.overview.phaseConnect"), value: timing.connect_ms },
+    { key: "tls", label: t("trafficDetail.overview.phaseTls"), value: timing.tls_ms },
+    { key: "send", label: t("trafficDetail.overview.phaseSend"), value: timing.send_ms },
+    { key: "first-byte", label: t("trafficDetail.overview.phaseFirstByteToClient"), value: timing.first_byte_ms },
+    { key: "wait-byte", label: t("trafficDetail.overview.phaseWait"), value: firstByteWaitMs },
     {
       key: "receive",
-      label: "Receiving after first byte",
+      label: t("trafficDetail.overview.phaseReceive"),
       value: timing.receive_ms,
     },
-    { key: "total", label: "Total", value: timing.total_ms },
+    { key: "total", label: t("trafficDetail.overview.phaseTotal"), value: timing.total_ms },
   ].filter((stage) => stage.value !== undefined && stage.value > 0);
 
   return (
@@ -288,6 +291,7 @@ const SocketStatusCard = ({
   status: SocketStatus;
   isWebSocket: boolean;
 }) => {
+  const { t } = useI18n();
   const { token } = theme.useToken();
 
   return (
@@ -306,7 +310,7 @@ const SocketStatusCard = ({
           color={status.is_open ? "green" : "default"}
           style={{ fontSize: 11 }}
         >
-          {status.is_open ? "Connected" : "Closed"}
+          {status.is_open ? t("trafficDetail.overview.connected") : t("trafficDetail.overview.closed")}
         </Tag>
         <Tag color="blue" style={{ fontSize: 11 }}>
           {isWebSocket ? "WebSocket" : "SSE"}
@@ -333,28 +337,28 @@ const SocketStatusCard = ({
           labelStyle={{ fontSize: 12 }}
           contentStyle={{ fontSize: 12 }}
         >
-          <Descriptions.Item label="Send Count">
+          <Descriptions.Item label={t("trafficDetail.overview.sendCount")}>
             {status.send_count}
           </Descriptions.Item>
-          <Descriptions.Item label="Receive Count">
+          <Descriptions.Item label={t("trafficDetail.overview.receiveCount")}>
             {status.receive_count}
           </Descriptions.Item>
-          <Descriptions.Item label="Send Bytes">
+          <Descriptions.Item label={t("trafficDetail.overview.sendBytes")}>
             {formatSize(status.send_bytes)}
           </Descriptions.Item>
-          <Descriptions.Item label="Receive Bytes">
+          <Descriptions.Item label={t("trafficDetail.overview.receiveBytes")}>
             {formatSize(status.receive_bytes)}
           </Descriptions.Item>
-          <Descriptions.Item label="Frame Count">
+          <Descriptions.Item label={t("trafficDetail.overview.frameCount")}>
             {status.frame_count}
           </Descriptions.Item>
           {status.close_code !== undefined && (
-            <Descriptions.Item label="Close Code">
+            <Descriptions.Item label={t("trafficDetail.overview.closeCode")}>
               {status.close_code}
             </Descriptions.Item>
           )}
           {status.close_reason && (
-            <Descriptions.Item label="Close Reason" span={2}>
+            <Descriptions.Item label={t("trafficDetail.overview.closeReason")} span={2}>
               {status.close_reason}
             </Descriptions.Item>
           )}
@@ -382,15 +386,16 @@ type TimelineMoment = {
 const buildTimelineData = (
   record: TrafficRecord,
   durationMs: number,
+  t: TFunction,
 ): { segments: TimelineSegment[]; moments: TimelineMoment[] } => {
   const timing = record.timing;
   const isOpen = record.socket_status?.is_open === true;
   const transferLabel =
     record.is_sse || record.is_websocket || record.is_tunnel
       ? isOpen
-        ? "Streaming"
-        : "Streaming until close"
-      : "Receiving response body";
+        ? t("trafficDetail.overview.streaming")
+        : t("trafficDetail.overview.streamingUntilClose")
+      : t("trafficDetail.overview.receivingResponseBody");
   const firstByteMs = timing?.first_byte_ms;
 
   const stageCandidates: Array<{
@@ -402,35 +407,35 @@ const buildTimelineData = (
   }> = [
     {
       key: "dns",
-      label: "DNS lookup",
+      label: t("trafficDetail.overview.phaseDns"),
       value: timing?.dns_ms,
       color: "#8884d8",
-      momentLabel: "DNS resolved",
+      momentLabel: t("trafficDetail.overview.momentDnsResolved"),
     },
     {
       key: "connect",
-      label: "Connection established",
+      label: t("trafficDetail.overview.phaseConnect"),
       value: timing?.connect_ms,
       color: "#82ca9d",
-      momentLabel: "Connected",
+      momentLabel: t("trafficDetail.overview.connected"),
     },
     {
       key: "tls",
-      label: "TLS handshake",
+      label: t("trafficDetail.overview.phaseTls"),
       value: timing?.tls_ms,
       color: "#ffc658",
-      momentLabel: "TLS ready",
+      momentLabel: t("trafficDetail.overview.momentTlsReady"),
     },
     {
       key: "send",
-      label: "Request sent",
+      label: t("trafficDetail.overview.phaseSend"),
       value: timing?.send_ms,
       color: "#ff7300",
-      momentLabel: "Request sent",
+      momentLabel: t("trafficDetail.overview.phaseSend"),
     },
     {
       key: "wait",
-      label: "Waiting for first byte",
+      label: t("trafficDetail.overview.phaseWait"),
       value:
         firstByteMs !== undefined
           ? Math.max(
@@ -443,7 +448,7 @@ const buildTimelineData = (
             )
           : timing?.wait_ms,
       color: "#00C49F",
-      momentLabel: "First byte",
+      momentLabel: t("trafficDetail.overview.momentFirstByte"),
     },
   ];
 
@@ -451,7 +456,7 @@ const buildTimelineData = (
   const moments: TimelineMoment[] = [
     {
       key: "started",
-      label: "Started",
+      label: t("trafficDetail.overview.momentStarted"),
       timestamp: record.timestamp,
       offsetMs: 0,
     },
@@ -493,7 +498,7 @@ const buildTimelineData = (
   if (segments.length === 0 && durationMs > 0) {
     segments.push({
       key: "total",
-      label: "Request processing",
+      label: t("trafficDetail.overview.requestProcessing"),
       value: durationMs,
       color: "#722ed1",
     });
@@ -504,15 +509,15 @@ const buildTimelineData = (
       key: "transfer-start",
       label:
         record.is_sse || record.is_websocket || record.is_tunnel
-          ? "Stream active"
-          : "Receiving body",
+          ? t("trafficDetail.overview.momentStreamActive")
+          : t("trafficDetail.overview.momentReceivingBody"),
       timestamp: record.timestamp + transferStartMs,
       offsetMs: transferStartMs,
     });
   }
   moments.push({
     key: isOpen ? "current" : "closed",
-    label: isOpen ? "Current" : "Closed",
+    label: isOpen ? t("trafficDetail.overview.momentCurrent") : t("trafficDetail.overview.closed"),
     timestamp: record.timestamp + durationMs,
     offsetMs: durationMs,
     active: isOpen,
@@ -528,10 +533,11 @@ const TimelineBreakdown = ({
   record: TrafficRecord;
   durationMs: number;
 }) => {
+  const { t } = useI18n();
   const { token } = theme.useToken();
   const { segments, moments } = useMemo(
-    () => buildTimelineData(record, durationMs),
-    [record, durationMs],
+    () => buildTimelineData(record, durationMs, t),
+    [record, durationMs, t],
   );
   const total = Math.max(durationMs, 1);
 
@@ -630,6 +636,7 @@ const TimelineBreakdown = ({
 };
 
 export const Overview = ({ record, searchValue, onSearch }: OverviewProps) => {
+  const { t } = useI18n();
   const wrapperRef = useRef<HTMLDivElement>(null);
   const isLiveDuration = isLiveStreamingTraffic(record);
   const liveNow = useLiveNow(isLiveDuration);
@@ -643,7 +650,7 @@ export const Overview = ({ record, searchValue, onSearch }: OverviewProps) => {
     if (record.timing) {
       items.push({
         key: "timing",
-        label: <Text strong>Timing Details</Text>,
+        label: <Text strong>{t("trafficDetail.overview.timingDetails")}</Text>,
         children: <TimingBar timing={record.timing} />,
       });
     }
@@ -656,17 +663,17 @@ export const Overview = ({ record, searchValue, onSearch }: OverviewProps) => {
         ? "WebSocket"
         : record.is_sse
           ? "SSE"
-          : "Tunnel";
+          : t("trafficDetail.overview.tunnel");
       items.push({
         key: "socket",
         label: (
           <Text strong>
-            {connectionType} Status
+            {t("trafficDetail.overview.connectionStatus", { type: connectionType })}
             <Tag
               color={record.socket_status.is_open ? "green" : "default"}
               style={{ marginLeft: 8 }}
             >
-              {record.socket_status.is_open ? "Connected" : "Closed"}
+              {record.socket_status.is_open ? t("trafficDetail.overview.connected") : t("trafficDetail.overview.closed")}
             </Tag>
           </Text>
         ),
@@ -684,7 +691,7 @@ export const Overview = ({ record, searchValue, onSearch }: OverviewProps) => {
         key: "rules",
         label: (
           <Text strong>
-            Matched Rules <Tag color="blue">{record.matched_rules.length}</Tag>
+            {t("trafficDetail.overview.matchedRules")} <Tag color="blue">{record.matched_rules.length}</Tag>
           </Text>
         ),
         children: (
@@ -698,14 +705,14 @@ export const Overview = ({ record, searchValue, onSearch }: OverviewProps) => {
     }
 
     return items;
-  }, [record]);
+  }, [record, t]);
 
   const connectionType = useMemo(() => {
     if (record.is_websocket) return "WebSocket";
     if (record.is_sse) return "SSE";
-    if (record.is_tunnel) return "Tunnel";
+    if (record.is_tunnel) return t("trafficDetail.overview.tunnel");
     return null;
-  }, [record.is_websocket, record.is_sse, record.is_tunnel]);
+  }, [record.is_websocket, record.is_sse, record.is_tunnel, t]);
 
   const isH3 = record.is_h3 || record.protocol === "h3";
   const useSocketSize = shouldUseSocketSize(record);
@@ -746,7 +753,7 @@ export const Overview = ({ record, searchValue, onSearch }: OverviewProps) => {
             {record.actual_url && (
               <div style={{ marginTop: 4 }}>
                 <Tag color="orange" style={{ fontSize: 11, marginRight: 4 }}>
-                  Actual
+                  {t("trafficDetail.overview.actual")}
                 </Tag>
                 <Paragraph
                   style={{ margin: 0, maxWidth: "100%", display: "inline" }}
@@ -758,7 +765,7 @@ export const Overview = ({ record, searchValue, onSearch }: OverviewProps) => {
               </div>
             )}
           </Descriptions.Item>
-          <Descriptions.Item label="Method">
+          <Descriptions.Item label={t("trafficDetail.overview.method")}>
             <Tag color="blue">{record.method}</Tag>
             {connectionType && (
               <Tag color="purple" style={{ marginLeft: 4 }}>
@@ -771,7 +778,7 @@ export const Overview = ({ record, searchValue, onSearch }: OverviewProps) => {
               </Tag>
             )}
           </Descriptions.Item>
-          <Descriptions.Item label="Status">
+          <Descriptions.Item label={t("trafficDetail.overview.status")}>
             <Tag
               color={
                 record.status >= 400
@@ -784,32 +791,32 @@ export const Overview = ({ record, searchValue, onSearch }: OverviewProps) => {
               {record.status} {STATUS_CODES[record.status] || ""}
             </Tag>
           </Descriptions.Item>
-          <Descriptions.Item label="Protocol">
+          <Descriptions.Item label={t("trafficDetail.overview.protocol")}>
             {record.protocol}
           </Descriptions.Item>
-          <Descriptions.Item label="Proxy Port">
+          <Descriptions.Item label={t("trafficDetail.overview.proxyPort")}>
             {record.listener_port ? (
               <Tag style={{ margin: 0 }}>{record.listener_port}</Tag>
             ) : (
               "-"
             )}
           </Descriptions.Item>
-          <Descriptions.Item label="Host">
+          <Descriptions.Item label={t("trafficDetail.overview.host")}>
             {record.host}
             {record.actual_host && (
               <span style={{ marginLeft: 8 }}>
                 <Tag color="orange" style={{ fontSize: 11, marginRight: 4 }}>
-                  Actual
+                  {t("trafficDetail.overview.actual")}
                 </Tag>
                 {record.actual_host}
               </span>
             )}
           </Descriptions.Item>
-          <Descriptions.Item label="Path">{record.path}</Descriptions.Item>
-          <Descriptions.Item label="Content Type">
+          <Descriptions.Item label={t("trafficDetail.overview.path")}>{record.path}</Descriptions.Item>
+          <Descriptions.Item label={t("trafficDetail.overview.contentType")}>
             {record.content_type || "-"}
           </Descriptions.Item>
-          <Descriptions.Item label="Client">
+          <Descriptions.Item label={t("trafficDetail.overview.client")}>
             {record.client_app ? (
               <div
                 style={{
@@ -837,7 +844,7 @@ export const Overview = ({ record, searchValue, onSearch }: OverviewProps) => {
         </Descriptions>
 
         <Descriptions
-          title="Size"
+          title={t("trafficDetail.overview.size")}
           column={2}
           size="small"
           bordered
@@ -845,30 +852,30 @@ export const Overview = ({ record, searchValue, onSearch }: OverviewProps) => {
           labelStyle={{ width: 120, fontWeight: 500, fontSize: 12 }}
           contentStyle={{ fontSize: 12 }}
         >
-          <Descriptions.Item label="Request Size">
+          <Descriptions.Item label={t("trafficDetail.overview.requestSize")}>
             {useSocketSize && socketStatus
               ? formatSize(socketStatus.send_bytes)
               : formatSize(record.request_size)}
           </Descriptions.Item>
-          <Descriptions.Item label="Response Size">
+          <Descriptions.Item label={t("trafficDetail.overview.responseSize")}>
             {useSocketSize && socketStatus
               ? formatSize(socketStatus.receive_bytes)
               : formatSize(record.response_size)}
           </Descriptions.Item>
-          <Descriptions.Item label="Total Size">
+          <Descriptions.Item label={t("trafficDetail.overview.totalSize")}>
             {useSocketSize && socketStatus
               ? formatSize(
                   socketStatus.send_bytes + socketStatus.receive_bytes,
                 )
               : formatSize(record.request_size + record.response_size)}
           </Descriptions.Item>
-          <Descriptions.Item label="Duration">
+          <Descriptions.Item label={t("trafficDetail.overview.duration")}>
             {formatDurationDetailed(durationMs)}
           </Descriptions.Item>
         </Descriptions>
 
         <Descriptions
-          title="Timeline"
+          title={t("trafficDetail.overview.timeline")}
           column={1}
           size="small"
           bordered
@@ -876,15 +883,15 @@ export const Overview = ({ record, searchValue, onSearch }: OverviewProps) => {
           labelStyle={{ width: 120, fontWeight: 500, fontSize: 12 }}
           contentStyle={{ fontSize: 12 }}
         >
-          <Descriptions.Item label="Phases">
+          <Descriptions.Item label={t("trafficDetail.overview.phases")}>
             <TimelineBreakdown record={record} durationMs={durationMs} />
           </Descriptions.Item>
-          <Descriptions.Item label="Started At">
+          <Descriptions.Item label={t("trafficDetail.overview.startedAt")}>
             {dayjs(record.timestamp).format("YYYY-MM-DD HH:mm:ss.SSS")}
           </Descriptions.Item>
-          <Descriptions.Item label="Ended At">
+          <Descriptions.Item label={t("trafficDetail.overview.endedAt")}>
             {record.socket_status?.is_open
-              ? "In progress"
+              ? t("trafficDetail.overview.inProgress")
               : dayjs(record.timestamp + durationMs).format(
                   "YYYY-MM-DD HH:mm:ss.SSS",
                 )}

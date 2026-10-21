@@ -61,8 +61,11 @@ import { getSandboxConfig, updateSandboxConfig } from "../../api/config";
 import pushService from "../../services/pushService";
 import styles from "./index.module.css";
 import { configureScriptEditor } from "./scriptEditorLanguage";
+import { useI18n } from "../../i18n";
 
 const { Text } = Typography;
+
+type TFunc = ReturnType<typeof useI18n>["t"];
 
 function LogLevel({ level }: { level: ScriptLogEntry["level"] }) {
   const colors: Record<string, string> = {
@@ -132,29 +135,29 @@ function getScriptItemId(key: string) {
   return `script-item-${encodeURIComponent(key)}`;
 }
 
-function getScriptTypeLabel(type: ScriptType) {
+function getScriptTypeLabel(type: ScriptType, t: TFunc) {
   switch (type) {
     case "request":
-      return "Request";
+      return t("scripts.type.request");
     case "response":
-      return "Response";
+      return t("scripts.type.response");
     case "decode":
-      return "Decode";
+      return t("scripts.type.decode");
     case "parser":
-      return "Parser";
+      return t("scripts.type.parser");
   }
 }
 
-function getScriptTypeShortLabel(type: ScriptType) {
+function getScriptTypeShortLabel(type: ScriptType, t: TFunc) {
   switch (type) {
     case "request":
-      return "REQ";
+      return t("scripts.typeShort.request");
     case "response":
-      return "RES";
+      return t("scripts.typeShort.response");
     case "decode":
-      return "DEC";
+      return t("scripts.typeShort.decode");
     case "parser":
-      return "PAR";
+      return t("scripts.typeShort.parser");
   }
 }
 
@@ -208,6 +211,7 @@ function ScriptListPanel({
   expandedKeys: React.Key[];
   onToggleFolder: (folderKey: string) => void;
 }) {
+  const { t } = useI18n();
   const [selectedScripts, setSelectedScripts] = useState<string[]>([]);
   const lastClickedIndexRef = useRef<number | null>(null);
   const [renameTarget, setRenameTarget] = useState<{ type: ScriptType; name: string } | null>(null);
@@ -447,31 +451,31 @@ function ScriptListPanel({
         return [
           {
             key: "new-request",
-            label: "New Request Script",
+            label: t("scripts.menu.newRequestScript"),
             onClick: () => onNewScript("request"),
           },
           {
             key: "new-response",
-            label: "New Response Script",
+            label: t("scripts.menu.newResponseScript"),
             onClick: () => onNewScript("response"),
           },
           {
             key: "new-decode",
-            label: "New Decode Script",
+            label: t("scripts.menu.newDecodeScript"),
             onClick: () => onNewScript("decode"),
           },
           { type: "divider" },
           {
             key: "export-folder",
             icon: <ExportOutlined />,
-            label: `Export Folder (${scriptsInFolder.length})`,
+            label: t("scripts.menu.exportFolder", { count: scriptsInFolder.length }),
             onClick: () => onExport(scriptNames),
             disabled: scriptsInFolder.length === 0,
           },
           { type: "divider" },
           {
             key: "delete-folder",
-            label: `Delete Folder (${scriptsInFolder.length})`,
+            label: t("scripts.menu.deleteFolder", { count: scriptsInFolder.length }),
             danger: true,
             onClick: () => onDeleteFolder(folderPath),
           },
@@ -488,7 +492,7 @@ function ScriptListPanel({
         {
           key: "rename",
           icon: <EditOutlined />,
-          label: "Rename",
+          label: t("common.rename"),
           onClick: () => {
             const [type, ...nameParts] = node.key.split("/");
             setRenameTarget({ type: type as ScriptType, name: nameParts.join("/") });
@@ -500,21 +504,27 @@ function ScriptListPanel({
         {
           key: "export",
           icon: <ExportOutlined />,
-          label: `Export${bulkKeys.length > 1 ? ` (${bulkKeys.length})` : ""}`,
+          label:
+            bulkKeys.length > 1
+              ? t("scripts.menu.exportCount", { count: bulkKeys.length })
+              : t("common.export"),
           onClick: () => onExport(bulkKeys),
         },
         { type: "divider" },
         {
           key: "delete",
           icon: <DeleteOutlined />,
-          label: `Delete${bulkKeys.length > 1 ? ` (${bulkKeys.length})` : ""}`,
+          label:
+            bulkKeys.length > 1
+              ? t("scripts.menu.deleteCount", { count: bulkKeys.length })
+              : t("common.delete"),
           danger: true,
           onClick: () => {
             if (bulkKeys.length > 1) {
               Modal.confirm({
-                title: "Delete Scripts",
-                content: `Are you sure you want to delete ${bulkKeys.length} scripts?`,
-                okText: "Delete All",
+                title: t("scripts.delete.scriptsTitle"),
+                content: t("scripts.delete.scriptsContent", { count: bulkKeys.length }),
+                okText: t("scripts.delete.deleteAll"),
                 okType: "danger",
                 onOk: async () => {
                   for (const key of bulkKeys) {
@@ -522,20 +532,20 @@ function ScriptListPanel({
                     onDeleteScript(type as ScriptType, nameParts.join("/"));
                   }
                   setSelectedScripts([]);
-                  message.success(`Deleted ${bulkKeys.length} scripts`);
+                  message.success(t("scripts.delete.scriptsDone", { count: bulkKeys.length }));
                 },
               });
             } else {
               const [type, ...nameParts] = bulkKeys[0].split("/");
               const scriptName = nameParts.join("/");
               Modal.confirm({
-                title: "Delete Script",
-                content: `Are you sure you want to delete "${scriptName}"?`,
-                okText: "Delete",
+                title: t("scripts.delete.scriptTitle"),
+                content: t("scripts.delete.scriptContent", { name: scriptName }),
+                okText: t("common.delete"),
                 okType: "danger",
                 onOk: async () => {
                   onDeleteScript(type as ScriptType, scriptName);
-                  message.success("Script deleted");
+                  message.success(t("scripts.delete.scriptDone"));
                 },
               });
             }
@@ -550,6 +560,7 @@ function ScriptListPanel({
       onExport,
       onDeleteFolder,
       onDeleteScript,
+      t,
     ],
   );
 
@@ -559,29 +570,29 @@ function ScriptListPanel({
       {
         key: "request",
         icon: <FileOutlined />,
-        label: <span data-testid="scripts-create-request-item">Request Script</span>,
+        label: <span data-testid="scripts-create-request-item">{t("scripts.list.createRequest")}</span>,
         onClick: () => onNewScript("request"),
       },
       {
         key: "response",
         icon: <FileOutlined />,
-        label: <span data-testid="scripts-create-response-item">Response Script</span>,
+        label: <span data-testid="scripts-create-response-item">{t("scripts.list.createResponse")}</span>,
         onClick: () => onNewScript("response"),
       },
       {
         key: "decode",
         icon: <CodeOutlined />,
-        label: <span data-testid="scripts-create-decode-item">Decode Script</span>,
+        label: <span data-testid="scripts-create-decode-item">{t("scripts.list.createDecode")}</span>,
         onClick: () => onNewScript("decode"),
       },
       {
         key: "parser",
         icon: <CodeOutlined />,
-        label: <span data-testid="scripts-create-parser-item">Parser Script</span>,
+        label: <span data-testid="scripts-create-parser-item">{t("scripts.list.createParser")}</span>,
         onClick: () => onNewScript("parser"),
       },
     ],
-    [onNewScript],
+    [onNewScript, t],
   );
 
   const moreMenuItems = useMemo<MenuProps["items"]>(
@@ -589,39 +600,39 @@ function ScriptListPanel({
       {
         key: "sandbox",
         icon: <SettingOutlined />,
-        label: <span data-testid="scripts-more-sandbox-item">Sandbox Settings</span>,
+        label: <span data-testid="scripts-more-sandbox-item">{t("scripts.list.sandboxSettings")}</span>,
         onClick: onOpenSandboxSettings,
       },
       {
         key: "export-all",
         icon: <ExportOutlined />,
-        label: <span data-testid="scripts-more-export-all-item">Export All</span>,
+        label: <span data-testid="scripts-more-export-all-item">{t("scripts.list.exportAll")}</span>,
         disabled: !hasScripts,
         onClick: onExportAll,
       },
       {
         key: "import",
         icon: <ImportOutlined />,
-        label: <span data-testid="scripts-more-import-item">Import</span>,
+        label: <span data-testid="scripts-more-import-item">{t("common.import")}</span>,
         onClick: () => {
           hiddenImportRef.current?.querySelector("button")?.click();
         },
       },
     ],
-    [hasScripts, onExportAll, onOpenSandboxSettings],
+    [hasScripts, onExportAll, onOpenSandboxSettings, t],
   );
 
   return (
     <div className={styles.container} data-testid="scripts-list-panel">
       <div className={styles.header}>
-        <span className={styles.headerTitle}>Scripts</span>
+        <span className={styles.headerTitle}>{t("scripts.list.title")}</span>
         <div className={styles.headerActions}>
           <Dropdown
             menu={{ items: createMenuItems }}
             trigger={["click"]}
             placement="bottomRight"
           >
-            <Tooltip title="New Script">
+            <Tooltip title={t("scripts.list.newScript")}>
               <Button
                 type="text"
                 size="small"
@@ -635,7 +646,7 @@ function ScriptListPanel({
             trigger={["click"]}
             placement="bottomRight"
           >
-            <Tooltip title="More Actions">
+            <Tooltip title={t("scripts.list.moreActions")}>
               <Button
                 type="text"
                 size="small"
@@ -659,7 +670,7 @@ function ScriptListPanel({
 
       <div className={styles.searchBox}>
         <Input
-          placeholder="Search scripts..."
+          placeholder={t("scripts.list.searchPlaceholder")}
           prefix={<SearchOutlined style={{ color: "#999" }} />}
           value={searchValue}
           onChange={(e) => onSearchChange(e.target.value)}
@@ -674,7 +685,7 @@ function ScriptListPanel({
         className={styles.listContainer}
         tabIndex={0}
         role="listbox"
-        aria-label="Scripts list"
+        aria-label={t("scripts.list.ariaLabel")}
         aria-activedescendant={selectedKey ? getScriptItemId(selectedKey) : undefined}
         onKeyDown={handleListKeyDown}
       >
@@ -764,7 +775,7 @@ function ScriptListPanel({
                           color={getScriptTypeTagColor(scriptType)}
                           className={styles.scriptTag}
                         >
-                          {getScriptTypeShortLabel(scriptType)}
+                          {getScriptTypeShortLabel(scriptType, t)}
                         </Tag>
                       </div>
                     </div>
@@ -788,7 +799,7 @@ function ScriptListPanel({
             })}
             {flatNodes.length === 0 && !loading && (
               <div className={styles.empty}>
-                {searchValue ? "No matching scripts" : "No scripts yet"}
+                {searchValue ? t("scripts.list.noMatching") : t("scripts.list.empty")}
               </div>
             )}
           </div>
@@ -796,22 +807,22 @@ function ScriptListPanel({
       </div>
 
       <div className={styles.footer}>
-        <span className={styles.stats}>{allScripts.length} scripts</span>
+        <span className={styles.stats}>{t("scripts.list.count", { count: allScripts.length })}</span>
       </div>
 
       <Modal
-        title="Rename Script"
+        title={t("scripts.rename.title")}
         open={renameModalVisible}
         onOk={async () => {
           if (!renameTarget || !newName.trim()) return;
           const success = await onRenameScript(renameTarget.type, renameTarget.name, newName.trim());
           if (success) {
-            message.success("Script renamed");
+            message.success(t("scripts.rename.success"));
             setRenameModalVisible(false);
             setRenameTarget(null);
             setNewName("");
           } else {
-            message.error("Failed to rename script");
+            message.error(t("scripts.rename.failed"));
           }
         }}
         onCancel={() => {
@@ -819,8 +830,8 @@ function ScriptListPanel({
           setRenameTarget(null);
           setNewName("");
         }}
-        okText="Rename"
-        cancelText="Cancel"
+        okText={t("common.rename")}
+        cancelText={t("common.cancel")}
       >
         <Input
           value={newName}
@@ -829,15 +840,15 @@ function ScriptListPanel({
             if (!renameTarget || !newName.trim()) return;
             const success = await onRenameScript(renameTarget.type, renameTarget.name, newName.trim());
             if (success) {
-              message.success("Script renamed");
+              message.success(t("scripts.rename.success"));
               setRenameModalVisible(false);
               setRenameTarget(null);
               setNewName("");
             } else {
-              message.error("Failed to rename script");
+              message.error(t("scripts.rename.failed"));
             }
           }}
-          placeholder="Enter new name"
+          placeholder={t("scripts.rename.placeholder")}
           autoFocus
         />
       </Modal>
@@ -868,6 +879,7 @@ function EditorPanel({
   saving: boolean;
   testing: boolean;
 }) {
+  const { t } = useI18n();
   const resolvedTheme = useThemeStore((s) => s.resolvedTheme);
   const isStreamScript =
     selectedType === "response" && /\bstream\s*\./.test(editorContent);
@@ -906,7 +918,7 @@ function EditorPanel({
         }}
       >
         <div style={{ textAlign: "center", maxWidth: 560 }}>
-          <Empty description="Select a script or create a new one" />
+          <Empty description={t("scripts.editor.emptyDescription")} />
           <div
             style={{
               marginTop: 24,
@@ -917,7 +929,7 @@ function EditorPanel({
             }}
           >
             <Text strong style={{ display: "block", marginBottom: 12 }}>
-              How to use Scripts
+              {t("scripts.editor.howToUse")}
             </Text>
             <ul
               style={{
@@ -928,34 +940,35 @@ function EditorPanel({
             >
               <li style={{ marginBottom: 8 }}>
                 <Text type="secondary">
-                  <b>Request scripts</b> run before forwarding to upstream -
-                  modify method, headers, or body
+                  <b>{t("scripts.editor.help.requestLabel")}</b>{" "}
+                  {t("scripts.editor.help.requestText")}
                 </Text>
               </li>
               <li style={{ marginBottom: 8 }}>
                 <Text type="secondary">
-                  <b>Response scripts</b> run after receiving response - modify
-                  status, headers, or body
+                  <b>{t("scripts.editor.help.responseLabel")}</b>{" "}
+                  {t("scripts.editor.help.responseText")}
                 </Text>
               </li>
               <li style={{ marginBottom: 8 }}>
                 <Text type="secondary">
-                  Response scripts can also be used by{" "}
-                  <code>resStreamScript://</code> to generate or transform a
-                  true incremental SSE stream. Stream scripts must be tested
-                  through a rule and live SSE source; the ordinary Run action
-                  is disabled for stream code.
+                  {t("scripts.editor.help.streamBefore")}{" "}
+                  <code>resStreamScript://</code>{" "}
+                  {t("scripts.editor.help.streamAfter")}
                 </Text>
               </li>
               <li style={{ marginBottom: 8 }}>
                 <Text type="secondary">
-                  Use <code>log.info()</code>, <code>log.warn()</code> to debug
-                  your scripts
+                  {t("scripts.editor.help.logBefore")}{" "}
+                  <code>log.info()</code>, <code>log.warn()</code>{" "}
+                  {t("scripts.editor.help.logAfter")}
                 </Text>
               </li>
               <li style={{ marginBottom: 8 }}>
                 <Text type="secondary">
-                  Access <code>ctx.values</code> for custom configuration values
+                  {t("scripts.editor.help.valuesBefore")}{" "}
+                  <code>ctx.values</code>{" "}
+                  {t("scripts.editor.help.valuesAfter")}
                 </Text>
               </li>
             </ul>
@@ -963,15 +976,13 @@ function EditorPanel({
               strong
               style={{ display: "block", marginTop: 16, marginBottom: 8 }}
             >
-              Bind scripts to rules
+              {t("scripts.editor.bindTitle")}
             </Text>
             <Text
               type="secondary"
               style={{ display: "block", marginBottom: 8 }}
             >
-              For CLI, AI-generated, or shared rules, prefer an inline block so
-              the rule is self-contained. This page is useful for interactive
-              testing and manually maintained named scripts:
+              {t("scripts.editor.bindDescription")}
             </Text>
             <pre
               style={{
@@ -1020,13 +1031,13 @@ stream.onEvent = (event) => ({ event: event.event, data: event.data });
               fontFamily: "monospace",
             }}
           >
-            {isNewScript ? "New Script" : selectedScript.name}
+            {isNewScript ? t("scripts.list.newScript") : selectedScript.name}
           </Text>
           <Tag
             color={getScriptTypeTagColor(selectedType)}
             style={{ margin: 0 }}
           >
-            {getScriptTypeLabel(selectedType)}
+            {getScriptTypeLabel(selectedType, t)}
           </Tag>
         </Space>
         <Space size={8}>
@@ -1039,11 +1050,11 @@ stream.onEvent = (event) => ({ event: event.event, data: event.data });
             disabled={isStreamScript}
             title={
               isStreamScript
-                ? "Stream scripts are tested through a resStreamScript rule with a live SSE source"
+                ? t("scripts.editor.streamRunDisabled")
                 : undefined
             }
           >
-            Run
+            {t("scripts.editor.run")}
           </Button>
           <Button
             type="primary"
@@ -1053,7 +1064,7 @@ stream.onEvent = (event) => ({ event: event.event, data: event.data });
             loading={saving}
             data-testid="scripts-save-button"
           >
-            Save
+            {t("common.save")}
           </Button>
           {!isNewScript && (
             <Button
@@ -1063,7 +1074,7 @@ stream.onEvent = (event) => ({ event: event.event, data: event.data });
               onClick={onDelete}
               data-testid="scripts-delete-button"
             >
-              Delete
+              {t("common.delete")}
             </Button>
           )}
         </Space>
@@ -1111,6 +1122,7 @@ function TestResultPanel({
   isExpanded: boolean;
   onToggle: () => void;
 }) {
+  const { t } = useI18n();
   const resolvedTheme = useThemeStore((s) => s.resolvedTheme);
   const { token } = theme.useToken();
 
@@ -1124,7 +1136,7 @@ function TestResultPanel({
           zIndex: 10,
         }}
       >
-        <Tooltip title="Show Test Results">
+        <Tooltip title={t("scripts.test.show")}>
           <Button
             type="default"
             size="small"
@@ -1153,10 +1165,10 @@ function TestResultPanel({
                 ) : (
                   <CloseCircleOutlined style={{ color: token.colorError }} />
                 )}
-                <span>Test Result</span>
+                <span>{t("scripts.test.result")}</span>
               </>
             ) : (
-              <span>Test Results</span>
+              <span>{t("scripts.test.results")}</span>
             )}
           </Button>
         </Tooltip>
@@ -1192,13 +1204,15 @@ function TestResultPanel({
               ) : (
                 <CloseCircleOutlined style={{ color: "#ff4d4f" }} />
               )}
-              <Text strong>Test Result ({testResult.duration_ms}ms)</Text>
+              <Text strong>
+                {t("scripts.test.resultWithDuration", { duration: testResult.duration_ms })}
+              </Text>
             </>
           ) : (
-            <Text strong>Test Results</Text>
+            <Text strong>{t("scripts.test.results")}</Text>
           )}
         </div>
-        <Tooltip title="Hide Test Results">
+        <Tooltip title={t("scripts.test.hide")}>
           <Button
             type="text"
             size="small"
@@ -1219,7 +1233,7 @@ function TestResultPanel({
               color: token.colorTextSecondary,
             }}
           >
-            <Text type="secondary">Run a test to see results here</Text>
+            <Text type="secondary">{t("scripts.test.emptyHint")}</Text>
           </div>
         ) : (
           <>
@@ -1247,7 +1261,7 @@ function TestResultPanel({
 
             {testResult.decode_output && (
               <div style={{ marginBottom: 12 }}>
-                <Text strong>Decode Output:</Text>
+                <Text strong>{t("scripts.test.decodeOutput")}</Text>
                 <pre
                   style={{
                     background:
@@ -1268,7 +1282,7 @@ function TestResultPanel({
 
             {testResult.request_modifications && (
               <div style={{ marginBottom: 12 }}>
-                <Text strong>Request Modifications:</Text>
+                <Text strong>{t("scripts.test.requestModifications")}</Text>
                 <pre
                   style={{
                     background:
@@ -1289,7 +1303,7 @@ function TestResultPanel({
 
             {testResult.response_modifications && (
               <div style={{ marginBottom: 12 }}>
-                <Text strong>Response Modifications:</Text>
+                <Text strong>{t("scripts.test.responseModifications")}</Text>
                 <pre
                   style={{
                     background:
@@ -1309,7 +1323,7 @@ function TestResultPanel({
             )}
 
             <div>
-              <Text strong>Logs:</Text>
+              <Text strong>{t("scripts.test.logs")}</Text>
               {testResult.logs.length > 0 ? (
                 <div
                   style={{
@@ -1334,7 +1348,7 @@ function TestResultPanel({
                 </div>
               ) : (
                 <Text type="secondary" style={{ marginLeft: 8 }}>
-                  No logs
+                  {t("scripts.test.noLogs")}
                 </Text>
               )}
             </div>
@@ -1346,6 +1360,7 @@ function TestResultPanel({
 }
 
 export default function ScriptsPage() {
+  const { t } = useI18n();
   const [searchParams, setSearchParams] = useSearchParams();
   const {
     requestScripts,
@@ -1493,24 +1508,27 @@ export default function ScriptsPage() {
         }
       }
       if (scriptsToDelete.length === 0) {
-        message.info("No scripts in this folder");
+        message.info(t("scripts.delete.noScriptsInFolder"));
         return;
       }
 
       Modal.confirm({
-        title: "Delete Folder",
-        content: `Are you sure you want to delete folder "${folderPath}" and all ${scriptsToDelete.length} script(s) inside?`,
-        okText: "Delete All",
+        title: t("scripts.delete.folderTitle"),
+        content: t("scripts.delete.folderContent", {
+          folder: folderPath,
+          count: scriptsToDelete.length,
+        }),
+        okText: t("scripts.delete.deleteAll"),
         okType: "danger",
         onOk: async () => {
           for (const script of scriptsToDelete) {
             await deleteScript(script.type, script.name);
           }
-          message.success(`Deleted ${scriptsToDelete.length} script(s)`);
+          message.success(t("scripts.delete.folderDone", { count: scriptsToDelete.length }));
         },
       });
     },
-    [allScripts, deleteScript],
+    [allScripts, deleteScript, t],
   );
 
   const handleSave = useCallback(async () => {
@@ -1522,21 +1540,19 @@ export default function ScriptsPage() {
       const success = await saveScript(selectedType, selectedScript.name, editorContent);
       if (success) {
         await clearDesktopDocumentEdited().catch(() => undefined);
-        message.success("Script saved");
+        message.success(t("scripts.save.saved"));
       }
     }
-  }, [isNewScript, selectedScript, selectedType, editorContent, saveScript]);
+  }, [isNewScript, selectedScript, selectedType, editorContent, saveScript, t]);
 
   const handleSaveNewScript = useCallback(async () => {
     if (!newScriptName.trim()) {
-      message.error("Please enter a script name");
+      message.error(t("scripts.save.nameRequired"));
       return;
     }
     const validName = /^[a-zA-Z0-9_\-/]+$/.test(newScriptName);
     if (!validName) {
-      message.error(
-        "Script name can only contain letters, numbers, hyphens, underscores and slashes",
-      );
+      message.error(t("scripts.save.nameInvalid"));
       return;
     }
     const success = await saveScript(selectedType, newScriptName, editorContent);
@@ -1546,22 +1562,22 @@ export default function ScriptsPage() {
     setShowNameModal(false);
     setNewScriptName("");
     setIsNewScript(false);
-    message.success("Script created");
-  }, [newScriptName, selectedType, editorContent, saveScript]);
+    message.success(t("scripts.save.created"));
+  }, [newScriptName, selectedType, editorContent, saveScript, t]);
 
   const handleDelete = useCallback(async () => {
     if (!selectedScript?.name) return;
     Modal.confirm({
-      title: "Delete Script",
-      content: `Are you sure you want to delete "${selectedScript.name}"?`,
-      okText: "Delete",
+      title: t("scripts.delete.scriptTitle"),
+      content: t("scripts.delete.scriptContent", { name: selectedScript.name }),
+      okText: t("common.delete"),
       okType: "danger",
       onOk: async () => {
         await deleteScript(selectedType, selectedScript.name);
-        message.success("Script deleted");
+        message.success(t("scripts.delete.scriptDone"));
       },
     });
-  }, [selectedScript, selectedType, deleteScript]);
+  }, [selectedScript, selectedType, deleteScript, t]);
 
   const handleDeleteScript = useCallback(
     async (type: ScriptType, name: string) => {
@@ -1625,16 +1641,16 @@ export default function ScriptsPage() {
       setSandboxMaxDecodeInputBytes(cfg.limits.max_decode_input_bytes);
       setSandboxMaxDecompressOutputBytes(cfg.limits.max_decompress_output_bytes);
     } catch {
-      message.error("Failed to load Sandbox config");
+      message.error(t("scripts.sandbox.loadFailed"));
     } finally {
       setSandboxLoading(false);
     }
-  }, []);
+  }, [t]);
 
   const saveSandboxSettings = useCallback(async () => {
     const dirName = sandboxDirName.trim();
     if (!dirName) {
-      message.error("Sandbox directory cannot be empty");
+      message.error(t("scripts.sandbox.dirEmpty"));
       return;
     }
 
@@ -1661,7 +1677,7 @@ export default function ScriptsPage() {
       !maxDecodeBytes ||
       !maxDecompressBytes
     ) {
-      message.error("Numeric values must be positive integers");
+      message.error(t("scripts.sandbox.positiveInt"));
       return;
     }
 
@@ -1674,7 +1690,7 @@ export default function ScriptsPage() {
 
       const invalid = dirs.find((d) => !d.startsWith("/"));
       if (invalid) {
-        message.error(`allowed_dirs must be absolute paths: ${invalid}`);
+        message.error(t("scripts.sandbox.allowedDirsAbsolute", { dir: invalid }));
         return;
       }
 
@@ -1698,10 +1714,10 @@ export default function ScriptsPage() {
           max_decompress_output_bytes: maxDecompressBytes,
         },
       });
-      message.success("Sandbox config saved");
+      message.success(t("scripts.sandbox.saved"));
       setSandboxModalOpen(false);
     } catch {
-      message.error("Failed to save Sandbox config (check if directories are absolute paths)");
+      message.error(t("scripts.sandbox.saveFailed"));
     } finally {
       setSandboxSaving(false);
     }
@@ -1718,6 +1734,7 @@ export default function ScriptsPage() {
     sandboxMaxMemoryBytes,
     sandboxMaxDecodeInputBytes,
     sandboxMaxDecompressOutputBytes,
+    t,
   ]);
 
   const handleSearch = useCallback(
@@ -1841,41 +1858,40 @@ export default function ScriptsPage() {
       </div>
 
       <Modal
-        title="Save New Script"
+        title={t("scripts.save.newTitle")}
         open={showNameModal}
         onOk={handleSaveNewScript}
         onCancel={() => setShowNameModal(false)}
-        okText="Save"
+        okText={t("common.save")}
       >
         <Input
-          placeholder="Enter script name (e.g., api/add-auth-header)"
+          placeholder={t("scripts.save.namePlaceholder")}
           value={newScriptName}
           onChange={(e) => setNewScriptName(e.target.value)}
           onPressEnter={handleSaveNewScript}
         />
         <Text type="secondary" style={{ display: "block", marginTop: 8 }}>
-          Use "/" to create folders. Only letters, numbers, hyphens, underscores
-          and slashes are allowed.
+          {t("scripts.save.nameHint")}
         </Text>
       </Modal>
 
       <Modal
-        title="Sandbox Settings"
+        title={t("scripts.sandbox.title")}
         open={sandboxModalOpen}
         onOk={saveSandboxSettings}
         onCancel={() => setSandboxModalOpen(false)}
-        okText="Save"
+        okText={t("common.save")}
         confirmLoading={sandboxSaving}
       >
         <Spin spinning={sandboxLoading}>
           <Form layout="vertical">
-            <Form.Item label="Network Request (net.fetch) Toggle">
+            <Form.Item label={t("scripts.sandbox.netToggle")}>
               <Switch checked={sandboxEnabled} onChange={setSandboxEnabled} />
             </Form.Item>
-            <Form.Item label="Sandbox Directory (relative name under scripts, or absolute path)">
+            <Form.Item label={t("scripts.sandbox.dir")}>
               <Input value={sandboxDirName} onChange={(e) => setSandboxDirName(e.target.value)} />
             </Form.Item>
-            <Form.Item label="Allowed System Directories (allowed_dirs, one absolute path per line)">
+            <Form.Item label={t("scripts.sandbox.allowedDirs")}>
               <Input.TextArea
                 value={sandboxDirsText}
                 onChange={(e) => setSandboxDirsText(e.target.value)}
@@ -1883,28 +1899,28 @@ export default function ScriptsPage() {
                 placeholder="/Users/xxx/data\n/var/log"
               />
             </Form.Item>
-            <Form.Item label="Max File Size (file.max_bytes)">
+            <Form.Item label={t("scripts.sandbox.fileMaxBytes")}>
               <Input
                 type="number"
                 value={sandboxFileMaxBytes}
                 onChange={(e) => setSandboxFileMaxBytes(Number(e.target.value))}
               />
             </Form.Item>
-            <Form.Item label="Max Request Body Size (net.max_request_bytes)">
+            <Form.Item label={t("scripts.sandbox.netMaxRequestBytes")}>
               <Input
                 type="number"
                 value={sandboxNetMaxReqBytes}
                 onChange={(e) => setSandboxNetMaxReqBytes(Number(e.target.value))}
               />
             </Form.Item>
-            <Form.Item label="Max Response Body Size (net.max_response_bytes)">
+            <Form.Item label={t("scripts.sandbox.netMaxResponseBytes")}>
               <Input
                 type="number"
                 value={sandboxNetMaxRespBytes}
                 onChange={(e) => setSandboxNetMaxRespBytes(Number(e.target.value))}
               />
             </Form.Item>
-            <Form.Item label="Network Timeout (net.timeout_ms)">
+            <Form.Item label={t("scripts.sandbox.netTimeout")}>
               <Input
                 type="number"
                 value={sandboxNetTimeoutMs}
@@ -1912,29 +1928,29 @@ export default function ScriptsPage() {
               />
             </Form.Item>
             <Form.Item
-              label="Allow Private Network Fetch (net.allow_private_network)"
-              extra="Off by default. Enable only for scripts that must call loopback, private LAN, link-local, or metadata addresses."
+              label={t("scripts.sandbox.allowPrivateNetwork")}
+              extra={t("scripts.sandbox.allowPrivateNetworkExtra")}
             >
               <Switch
                 checked={sandboxAllowPrivateNetwork}
                 onChange={setSandboxAllowPrivateNetwork}
               />
             </Form.Item>
-            <Form.Item label="Script Timeout (limits.timeout_ms)">
+            <Form.Item label={t("scripts.sandbox.timeout")}>
               <Input
                 type="number"
                 value={sandboxTimeoutMs}
                 onChange={(e) => setSandboxTimeoutMs(Number(e.target.value))}
               />
             </Form.Item>
-            <Form.Item label="Script Max Memory (limits.max_memory_bytes)">
+            <Form.Item label={t("scripts.sandbox.maxMemory")}>
               <Input
                 type="number"
                 value={sandboxMaxMemoryBytes}
                 onChange={(e) => setSandboxMaxMemoryBytes(Number(e.target.value))}
               />
             </Form.Item>
-            <Form.Item label="Max Decode Input Size (limits.max_decode_input_bytes)">
+            <Form.Item label={t("scripts.sandbox.maxDecodeInput")}>
               <Input
                 type="number"
                 value={sandboxMaxDecodeInputBytes}
@@ -1943,7 +1959,7 @@ export default function ScriptsPage() {
                 }
               />
             </Form.Item>
-            <Form.Item label="Max HTTP Decompress Output Size (limits.max_decompress_output_bytes)">
+            <Form.Item label={t("scripts.sandbox.maxDecompressOutput")}>
               <Input
                 type="number"
                 value={sandboxMaxDecompressOutputBytes}

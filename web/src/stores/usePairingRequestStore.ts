@@ -7,6 +7,7 @@ import {
   type GrantMode,
 } from "../api/remoteInvoke";
 import { isConnectionIssueError } from "../api/client";
+import { t } from "../i18n";
 
 interface PairingRequestState {
   pendingList: PairingRequest[];
@@ -56,8 +57,11 @@ export const usePairingRequestStore = create<PairingRequestState>((set, get) => 
       );
       for (const p of newPairings) {
         showBrowserNotification(
-          "Remote Command Authorization Request",
-          `${p.caller_info.display_name || "Unknown caller"} is requesting to execute: ${p.command_summary.command_preview || p.command.command}`,
+          t("shared.pairing.notifyTitle"),
+          t("shared.pairing.notifyBody", {
+            caller: p.caller_info.display_name || t("shared.pairing.unknownCaller"),
+            command: p.command_summary.command_preview || p.command.command,
+          }),
         );
       }
 

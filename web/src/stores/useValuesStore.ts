@@ -3,6 +3,7 @@ import type { ValueItem } from '../api/values';
 import * as api from '../api';
 import { isConnectionIssueError } from '../api/client';
 import { clearDesktopDocumentEdited } from '../desktop/tauri';
+import { t } from '../i18n';
 
 const VALUES_SYNC_CHANNEL = 'bifrost-values-sync';
 const valuesSyncChannel =
@@ -229,7 +230,7 @@ export const useValuesStore = create<ValuesState>((set, get) => ({
       const { values, editingContent } = get();
       const oldValue = values.find((v) => v.name === oldName);
       if (!oldValue) {
-        set({ error: 'Value not found', loading: false });
+        set({ error: t('shared.values.notFound'), loading: false });
         return false;
       }
 

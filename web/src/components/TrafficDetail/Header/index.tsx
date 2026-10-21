@@ -12,6 +12,7 @@ import type { TrafficRecord, TrafficSummary } from "../../../types";
 import { generateCurl } from "../../../utils/curl";
 import { copyToClipboard } from "../../../utils/clipboard";
 import { useTrafficStore } from "../../../stores/useTrafficStore";
+import { useI18n } from "../../../i18n";
 
 const { Text } = Typography;
 
@@ -65,6 +66,7 @@ const SequenceSearch = memo(function SequenceSearch({
   currentSequence?: number;
   onSelect: (id: string) => void;
 }) {
+  const { t } = useI18n();
   const records = useTrafficStore((state) => state.records);
   const [searching, setSearching] = useState(false);
   const [searchValue, setSearchValue] = useState("");
@@ -76,10 +78,10 @@ const SequenceSearch = memo(function SequenceSearch({
       e.stopPropagation();
       if (currentSequence != null) {
         copyToClipboard(String(currentSequence));
-        message.success("Sequence copied");
+        message.success(t("trafficDetail.header.sequenceCopied"));
       }
     },
-    [currentSequence],
+    [currentSequence, t],
   );
 
   const options = useMemo(() => {
@@ -139,7 +141,7 @@ const SequenceSearch = memo(function SequenceSearch({
         <Input
           ref={(el) => { inputRef.current = el; }}
           size="small"
-          placeholder="Search by #seq..."
+          placeholder={t("trafficDetail.header.searchBySeq")}
           prefix={<SearchOutlined style={{ color: "#bbb" }} />}
           onBlur={handleBlur}
           onKeyDown={(e) => {
@@ -165,7 +167,7 @@ const SequenceSearch = memo(function SequenceSearch({
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
     >
-      <Tooltip title="Click to search by sequence number">
+      <Tooltip title={t("trafficDetail.header.clickToSearchSeq")}>
         <Text
           strong
           onClick={handleStartSearch}
@@ -183,7 +185,7 @@ const SequenceSearch = memo(function SequenceSearch({
         </Text>
       </Tooltip>
       {hovered && (
-        <Tooltip title="Copy sequence number">
+        <Tooltip title={t("trafficDetail.header.copySeq")}>
           <CopyOutlined
             onClick={handleCopySequence}
             style={{
@@ -210,6 +212,7 @@ const HeaderContent = memo(function HeaderContent({
   onOpenInNewWindow?: ((record: TrafficRecord) => void) | undefined;
   onSelectById?: (id: string) => void;
 }) {
+  const { t } = useI18n();
   const { method, status, url } = record;
   const statusText = STATUS_CODES[status] || "";
   const statusLabel = statusText ? `${status} ${statusText}` : String(status);
@@ -228,8 +231,8 @@ const HeaderContent = memo(function HeaderContent({
 
   const handleCopyUrl = useCallback(() => {
     copyToClipboard(url);
-    message.success("URL copied");
-  }, [url]);
+    message.success(t("trafficDetail.header.urlCopied"));
+  }, [url, t]);
 
   const handleCopyCurl = useCallback(() => {
     const curl = generateCurl({
@@ -237,12 +240,12 @@ const HeaderContent = memo(function HeaderContent({
       request_body: requestBody,
     });
     copyToClipboard(curl);
-    message.success("cURL copied");
-  }, [record, requestBody]);
+    message.success(t("trafficDetail.header.curlCopied"));
+  }, [record, requestBody, t]);
 
   const copyMenuItems: MenuProps["items"] = [
-    { key: "url", label: "Copy URL", onClick: handleCopyUrl },
-    { key: "curl", label: "Copy as cURL", onClick: handleCopyCurl },
+    { key: "url", label: t("trafficDetail.header.copyUrl"), onClick: handleCopyUrl },
+    { key: "curl", label: t("trafficDetail.header.copyAsCurl"), onClick: handleCopyCurl },
   ];
 
   const toggleExpand = useCallback(() => {
@@ -320,7 +323,13 @@ const HeaderContent = memo(function HeaderContent({
         style={{ display: "flex", alignItems: "center", gap: 4, flexShrink: 0 }}
       >
         {isOverflow && (
-          <Tooltip title={expanded ? "Collapse" : "Expand"}>
+          <Tooltip
+            title={
+              expanded
+                ? t("trafficDetail.header.collapse")
+                : t("trafficDetail.header.expand")
+            }
+          >
             {expanded ? (
               <ShrinkOutlined
                 onClick={toggleExpand}
@@ -345,7 +354,7 @@ const HeaderContent = memo(function HeaderContent({
           </Tooltip>
         )}
         {onOpenInNewWindow ? (
-          <Tooltip title="Open in new window">
+          <Tooltip title={t("trafficDetail.header.openInNewWindow")}>
             <ExportOutlined
               onClick={handleOpenInNewWindow}
               data-testid="traffic-detail-open-window"
@@ -359,7 +368,7 @@ const HeaderContent = memo(function HeaderContent({
           </Tooltip>
         ) : null}
         <Dropdown menu={{ items: copyMenuItems }} trigger={["click"]}>
-          <Tooltip title="Copy">
+          <Tooltip title={t("common.copy")}>
             <CopyOutlined
               data-testid="traffic-detail-copy-trigger"
               style={{

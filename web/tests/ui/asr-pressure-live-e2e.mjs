@@ -60,6 +60,10 @@ const pages = [
 
 const browser = await chromium.launch({ headless: true });
 const context = await browser.newContext();
+// The admin UI defaults to zh-CN; these checks assert the English copy.
+await context.addInitScript(() => {
+  localStorage.setItem("bifrost-locale", JSON.stringify({ state: { locale: "en" }, version: 0 }));
+});
 const page = await context.newPage();
 const failures = [];
 

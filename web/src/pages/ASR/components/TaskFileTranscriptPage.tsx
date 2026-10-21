@@ -17,6 +17,7 @@ import type {
 } from "../../../api/asr";
 import { buildAsrTaskFileSourceUrl } from "../../../api/asr";
 import { formatDuration, formatTime } from "../asrUtils";
+import { useI18n, type TFunction } from "../../../i18n";
 
 const { Text, Paragraph } = Typography;
 const AUTO_FOLLOW_RESUME_DELAY_MS = 5000;
@@ -36,6 +37,7 @@ export default function TaskFileTranscriptPage({
   loading,
   onBack,
 }: TaskFileTranscriptPageProps) {
+  const { t } = useI18n();
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const segmentsContainerRef = useRef<HTMLDivElement | null>(null);
   const segmentRefs = useRef<Record<number, HTMLDivElement | null>>({});
@@ -183,12 +185,12 @@ export default function TaskFileTranscriptPage({
       <Card
         title={
           <Space>
-            <Button icon={<ArrowLeftOutlined />} onClick={onBack} aria-label="Back to task files" />
-            <span>Transcript File</span>
+            <Button icon={<ArrowLeftOutlined />} onClick={onBack} aria-label={t("asrTasks.transcript.backToFiles")} />
+            <span>{t("asrTasks.transcript.title")}</span>
           </Space>
         }
       >
-        <Text type="secondary">Select a processed file to inspect its transcript timeline.</Text>
+        <Text type="secondary">{t("asrTasks.transcript.selectFile")}</Text>
       </Card>
     );
   }
@@ -198,14 +200,14 @@ export default function TaskFileTranscriptPage({
       data-testid="asr-task-file-detail-page"
       title={
         <Space>
-          <Button icon={<ArrowLeftOutlined />} onClick={onBack} aria-label="Back to task files" />
-          <span>Transcript File</span>
+          <Button icon={<ArrowLeftOutlined />} onClick={onBack} aria-label={t("asrTasks.transcript.backToFiles")} />
+          <span>{t("asrTasks.transcript.title")}</span>
         </Space>
       }
     >
       <Space direction="vertical" size={16} style={{ width: "100%" }}>
         <section
-          aria-label="Original audio"
+          aria-label={t("asrTasks.transcript.originalAudioAria")}
           style={{
             border: `1px solid ${token.colorBorderSecondary}`,
             borderRadius: 6,
@@ -218,7 +220,7 @@ export default function TaskFileTranscriptPage({
             style={{ width: "100%", justifyContent: "space-between", marginBottom: 12 }}
           >
             <Typography.Title level={5} style={{ margin: 0 }}>
-              Original Audio
+              {t("asrTasks.transcript.originalAudio")}
             </Typography.Title>
             <Tag>{formatDuration(file.media_duration_ms)}</Tag>
           </Space>
@@ -227,7 +229,7 @@ export default function TaskFileTranscriptPage({
             src={audioUrl}
             controls
             preload="metadata"
-            aria-label="Original audio player"
+            aria-label={t("asrTasks.transcript.originalAudioPlayer")}
             style={{ width: "100%" }}
             onTimeUpdate={(event) => {
               syncCurrentTime(event.currentTarget);
@@ -248,10 +250,10 @@ export default function TaskFileTranscriptPage({
         </section>
 
         {loading ? (
-          <Text type="secondary">Loading transcript timeline...</Text>
+          <Text type="secondary">{t("asrTasks.transcript.loadingTimeline")}</Text>
         ) : timeline ? (
           <section
-            aria-label="Transcript timeline"
+            aria-label={t("asrTasks.transcript.timelineAria")}
             style={{
               border: `1px solid ${token.colorBorderSecondary}`,
               borderRadius: 6,
@@ -264,34 +266,40 @@ export default function TaskFileTranscriptPage({
               style={{ width: "100%", justifyContent: "space-between", marginBottom: 12 }}
             >
               <Typography.Title level={5} style={{ margin: 0 }}>
-                File Timeline
+                {t("asrTasks.transcript.fileTimeline")}
               </Typography.Title>
-              <Tag color="blue">{timeline.segments.length} segments</Tag>
+              <Tag color="blue">
+                {t("asrTasks.transcript.segmentsCount", { count: timeline.segments.length })}
+              </Tag>
             </Space>
             <Descriptions size="small" bordered column={2} style={{ marginBottom: 12 }}>
-              <Descriptions.Item label="File" span={2}>
+              <Descriptions.Item label={t("asrTasks.field.file")} span={2}>
                 {timeline.source_path}
               </Descriptions.Item>
-              <Descriptions.Item label="Recorded">
+              <Descriptions.Item label={t("asrTasks.field.recorded")}>
                 {formatTime(timeline.source_created_at_ms)}
               </Descriptions.Item>
-              <Descriptions.Item label="Source">
+              <Descriptions.Item label={t("asrTasks.field.source")}>
                 {timeline.source_created_at_source || "-"}
               </Descriptions.Item>
-              <Descriptions.Item label="Duration">
+              <Descriptions.Item label={t("asrTasks.field.duration")}>
                 {formatDuration(timeline.media_duration_ms)}
               </Descriptions.Item>
-              <Descriptions.Item label="Segments">
+              <Descriptions.Item label={t("asrTasks.field.segments")}>
                 {timeline.segments.length}
               </Descriptions.Item>
-              <Descriptions.Item label="Speakers">
+              <Descriptions.Item label={t("asrTasks.field.speakers")}>
                 {timeline.speakers?.length ? (
                   <Space wrap>
                     {timeline.speakers.map((speaker) => (
                       <Tag key={speaker.id} color="purple">
                         {formatSpeakerLabel(speaker.display_name, speaker.confidence)}
                         {!speaker.mapped_profile_id
-                          ? formatSpeakerCandidate(speaker.candidate_display_name, speaker.candidate_confidence)
+                          ? formatSpeakerCandidate(
+                              t,
+                              speaker.candidate_display_name,
+                              speaker.candidate_confidence,
+                            )
                           : ""}
                       </Tag>
                     ))}
@@ -302,7 +310,7 @@ export default function TaskFileTranscriptPage({
               </Descriptions.Item>
             </Descriptions>
             <div>
-              <Text strong>Segments</Text>
+              <Text strong>{t("asrTasks.field.segments")}</Text>
               <div
                 ref={segmentsContainerRef}
                 data-testid="asr-transcript-segments"
@@ -359,6 +367,7 @@ export default function TaskFileTranscriptPage({
                             )}
                             {!speakerMetadataById.get(segment.speaker)?.mapped_profile_id
                               ? formatSpeakerCandidate(
+                                  t,
                                   speakerMetadataById.get(segment.speaker)?.candidate_display_name,
                                   speakerMetadataById.get(segment.speaker)?.candidate_confidence,
                                 )
@@ -380,12 +389,12 @@ export default function TaskFileTranscriptPage({
                     ))}
                   </div>
                 ) : (
-                  <Text type="secondary">No transcript segments were produced.</Text>
+                  <Text type="secondary">{t("asrTasks.transcript.noSegments")}</Text>
                 )}
               </div>
             </div>
             <div style={{ marginTop: 16 }}>
-              <Text strong>Full Transcript</Text>
+              <Text strong>{t("asrTasks.transcript.fullTranscript")}</Text>
               <Paragraph
                 style={{
                   marginTop: 12,
@@ -397,7 +406,7 @@ export default function TaskFileTranscriptPage({
                   borderRadius: 6,
                 }}
               >
-                {fullTranscript || "No transcript text."}
+                {fullTranscript || t("asrTasks.transcript.noText")}
               </Paragraph>
             </div>
           </section>
@@ -405,8 +414,8 @@ export default function TaskFileTranscriptPage({
           <Alert
             type="warning"
             showIcon
-            message="Transcript timeline is unavailable"
-            description="This file has not produced a timeline yet, or the saved timeline could not be loaded."
+            message={t("asrTasks.transcript.unavailable")}
+            description={t("asrTasks.transcript.unavailableDescription")}
           />
         )}
       </Space>
@@ -437,9 +446,16 @@ function formatSpeakerLabel(displayName: string, confidence?: number): string {
   return `${displayName} ${Math.round(Math.max(0, Math.min(1, confidence)) * 100)}%`;
 }
 
-function formatSpeakerCandidate(displayName?: string, confidence?: number): string {
+function formatSpeakerCandidate(
+  t: TFunction,
+  displayName?: string,
+  confidence?: number,
+): string {
   if (!displayName || confidence === undefined || confidence === null) {
     return "";
   }
-  return ` candidate ${displayName} ${Math.round(Math.max(0, Math.min(1, confidence)) * 100)}%`;
+  return t("asrTasks.transcript.speakerCandidate", {
+    name: displayName,
+    percent: Math.round(Math.max(0, Math.min(1, confidence)) * 100),
+  });
 }

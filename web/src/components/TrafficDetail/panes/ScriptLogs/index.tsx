@@ -10,6 +10,7 @@ import Editor from "@monaco-editor/react";
 import type { ScriptExecutionResult, ScriptLogEntry } from "../../../../types";
 import { scriptsApi, type ScriptType } from "../../../../api/scripts";
 import { useThemeStore } from "../../../../stores/useThemeStore";
+import { useI18n, type TFunction } from "../../../../i18n";
 
 const { Text } = Typography;
 
@@ -34,12 +35,19 @@ function LogLevel({ level }: { level: ScriptLogEntry["level"] }) {
   );
 }
 
+const scriptTypeLabel = (type: string, t: TFunction): string => {
+  if (type === "request") return t("trafficDetail.script.typeRequest");
+  if (type === "response") return t("trafficDetail.script.typeResponse");
+  return type;
+};
+
 interface ScriptResultCardProps {
   result: ScriptExecutionResult;
   onScriptClick: (scriptName: string, scriptType: ScriptType) => void;
 }
 
 function ScriptResultCard({ result, onScriptClick }: ScriptResultCardProps) {
+  const { t } = useI18n();
   const { token } = theme.useToken();
 
   const handleScriptNameClick = useCallback(() => {
@@ -79,7 +87,7 @@ function ScriptResultCard({ result, onScriptClick }: ScriptResultCardProps) {
             {result.script_name}
           </Text>
           <Tag color={result.script_type === "request" ? "blue" : "green"}>
-            {result.script_type}
+            {scriptTypeLabel(result.script_type, t)}
           </Tag>
         </Space>
         <Space>
@@ -146,7 +154,7 @@ function ScriptResultCard({ result, onScriptClick }: ScriptResultCardProps) {
         </div>
       ) : (
         <Text type="secondary" style={{ fontSize: 12 }}>
-          No logs
+          {t("trafficDetail.script.noLogs")}
         </Text>
       )}
     </div>
@@ -154,6 +162,7 @@ function ScriptResultCard({ result, onScriptClick }: ScriptResultCardProps) {
 }
 
 export default function ScriptLogsPane({ results }: ScriptLogsPaneProps) {
+  const { t } = useI18n();
   const resolvedTheme = useThemeStore((s) => s.resolvedTheme);
   const [modalVisible, setModalVisible] = useState(false);
   const [scriptContent, setScriptContent] = useState<string | null>(null);
@@ -174,12 +183,14 @@ export default function ScriptLogsPane({ results }: ScriptLogsPaneProps) {
         const detail = await scriptsApi.get(scriptType, scriptName);
         setScriptContent(detail.content);
       } catch {
-        setScriptContent(`// Failed to load script: ${scriptName}`);
+        setScriptContent(
+          `// ${t("trafficDetail.script.loadFailed", { name: scriptName })}`,
+        );
       } finally {
         setScriptLoading(false);
       }
     },
-    [],
+    [t],
   );
 
   const handleModalClose = useCallback(() => {
@@ -191,7 +202,7 @@ export default function ScriptLogsPane({ results }: ScriptLogsPaneProps) {
   if (!results || results.length === 0) {
     return (
       <Empty
-        description="No script execution results"
+        description={t("trafficDetail.script.noResults")}
         style={{ padding: 40 }}
       />
     );
@@ -214,7 +225,7 @@ export default function ScriptLogsPane({ results }: ScriptLogsPaneProps) {
             <span>{currentScript?.name}</span>
             {currentScript && (
               <Tag color={currentScript.type === "request" ? "blue" : "green"}>
-                {currentScript.type}
+                {scriptTypeLabel(currentScript.type, t)}
               </Tag>
             )}
           </Space>

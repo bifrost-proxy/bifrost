@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import type { Group, GroupMember, GroupUserLevel } from '../api/group';
 import * as groupApi from '../api/group';
 import { isConnectionIssueError, normalizeApiErrorMessage } from '../api/client';
+import { t } from '../i18n';
 
 interface GroupState {
   groups: Group[];
@@ -107,7 +108,7 @@ export const useGroupStore = create<GroupState>((set, get) => ({
       set({ loading: false });
       return true;
     } catch (e) {
-      const msg = isConnectionIssueError(e) ? 'Connection error' : normalizeApiErrorMessage(e);
+      const msg = isConnectionIssueError(e) ? t('shared.connectionError') : normalizeApiErrorMessage(e);
       set({ error: isConnectionIssueError(e) ? null : msg, loading: false });
       return msg;
     }

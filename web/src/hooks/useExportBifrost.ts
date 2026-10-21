@@ -21,6 +21,7 @@ import type {
   ExportValuesRequest,
   ExportTemplateRequest,
 } from '../api/bifrost-file';
+import { t } from '../i18n';
 
 export function useExportBifrost() {
   const exportFile = useCallback(
@@ -65,9 +66,11 @@ export function useExportBifrost() {
 
         const filename = customFilename || formatExportFilename(fileType, count);
         downloadFile(content, filename);
-        message.success(`Exported as ${filename}`);
+        message.success(t('shared.bifrostFile.exportSuccess', { filename }));
       } catch (error) {
-        message.error(`Export failed: ${formatBifrostFileError(error)}`);
+        message.error(
+          t('shared.bifrostFile.exportFailed', { error: formatBifrostFileError(error) }),
+        );
       }
     },
     []

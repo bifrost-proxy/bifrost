@@ -21,6 +21,7 @@ import {
   isSystemProxyConfiguredEnabled,
   isSystemProxyLiveEnabledByBifrost,
 } from "../../../stores/useProxyStore";
+import { useI18n } from "../../../i18n";
 
 const { Text } = Typography;
 
@@ -49,13 +50,14 @@ export default function SystemProxySection({
   onToggleSystemProxyLaunchd,
   onToggleInjectBifrostBadge,
 }: SystemProxySectionProps) {
+  const { t } = useI18n();
   const cliProxyDisplay = useMemo(() => {
     if (!cliProxy) {
-      return { tag: null, detail: "Loading CLI proxy status..." };
+      return { tag: null, detail: t("settings.systemProxy.cliLoading") };
     }
     const tag = {
       color: cliProxy.enabled ? "green" : "default",
-      text: cliProxy.enabled ? "Enabled" : "Disabled",
+      text: cliProxy.enabled ? t("common.enabled") : t("common.disabled"),
     };
     const shortFiles = (cliProxy.config_files || [])
       .map((file) => file.replace(`${window.location.origin}/`, ""))
@@ -67,9 +69,12 @@ export default function SystemProxySection({
         : "-";
     return {
       tag,
-      detail: `Shell: ${cliProxy.shell || "-"} · Files: ${filesText}`,
+      detail: t("settings.systemProxy.cliDetail", {
+        shell: cliProxy.shell || "-",
+        files: filesText,
+      }),
     };
-  }, [cliProxy]);
+  }, [cliProxy, t]);
 
   const launchdEnabled =
     !!systemProxyLaunchd?.installed &&
@@ -97,7 +102,7 @@ export default function SystemProxySection({
         title={
           <Space>
             <GlobalOutlined />
-            <span>System Proxy</span>
+            <span>{t("settings.systemProxy.title")}</span>
           </Space>
         }
         size="small"
@@ -105,7 +110,7 @@ export default function SystemProxySection({
         <Space direction="vertical" style={{ width: "100%" }}>
           <Row justify="space-between" align="middle">
             <Col>
-              <Text>Enable System Proxy</Text>
+              <Text>{t("settings.systemProxy.enable")}</Text>
             </Col>
             <Col>
               {systemProxy ? (
@@ -117,12 +122,16 @@ export default function SystemProxySection({
                     data-testid="settings-system-proxy-switch"
                   />
                 ) : (
-                  <Tooltip title="System proxy is not supported on this platform">
-                    <Text type="secondary">Not Supported</Text>
+                  <Tooltip
+                    title={t("settings.systemProxy.notSupportedTooltip")}
+                  >
+                    <Text type="secondary">
+                      {t("settings.systemProxy.notSupported")}
+                    </Text>
                   </Tooltip>
                 )
               ) : (
-                <Text type="secondary">Loading...</Text>
+                <Text type="secondary">{t("common.loading")}</Text>
               )}
             </Col>
           </Row>
@@ -130,30 +139,32 @@ export default function SystemProxySection({
             <Alert
               type="warning"
               showIcon
-              message="System proxy is occupied by another proxy"
-              description={`Current system proxy points to ${systemProxy.host}:${systemProxy.port}. ${
+              message={t("settings.systemProxy.occupied")}
+              description={`${t("settings.systemProxy.occupiedPointsTo", {
+                address: `${systemProxy.host}:${systemProxy.port}`,
+              })} ${
                 systemProxyConfiguredEnabled
-                  ? "Bifrost is configured to enable system proxy, but is not currently active."
-                  : "Turn this on to let Bifrost take over and restore it when turned off."
+                  ? t("settings.systemProxy.occupiedConfigured")
+                  : t("settings.systemProxy.occupiedTakeOver")
               }`}
             />
           ) : systemProxyConfiguredButInactive ? (
             <Alert
               type="warning"
               showIcon
-              message="System proxy is configured but not active"
-              description="Bifrost will keep this preference and re-apply it when the runtime enables system proxy again."
+              message={t("settings.systemProxy.configuredInactive")}
+              description={t("settings.systemProxy.configuredInactiveHint")}
             />
           ) : systemProxyDisabledButActive ? (
             <Alert
               type="warning"
               showIcon
-              message="System proxy is still active"
-              description="Bifrost's saved system proxy preference is off, but the OS is still using Bifrost as its system proxy."
+              message={t("settings.systemProxy.stillActive")}
+              description={t("settings.systemProxy.stillActiveHint")}
             />
           ) : (
             <Text type="secondary" style={{ fontSize: 12 }}>
-              Route all system traffic through this proxy
+              {t("settings.systemProxy.hint")}
             </Text>
           )}
 
@@ -165,7 +176,7 @@ export default function SystemProxySection({
             >
               <Row justify="space-between" align="middle">
                 <Col>
-                  <Text>Boot/Shutdown Cleanup</Text>
+                  <Text>{t("settings.systemProxy.cleanup")}</Text>
                 </Col>
                 <Col>
                   <Switch
@@ -180,13 +191,13 @@ export default function SystemProxySection({
                 <Alert
                   type="warning"
                   showIcon
-                  message="Cleanup fallback needs upgrade"
+                  message={t("settings.systemProxy.cleanupNeedsUpgrade")}
                   description={
                     systemProxyLaunchd.needs_upgrade_reason ||
                     systemProxyLaunchd.message ||
-                    `Installed helper mode or paths are outdated. Version: ${
-                      systemProxyLaunchd.installed_version || "-"
-                    }`
+                    t("settings.systemProxy.cleanupOutdated", {
+                      version: systemProxyLaunchd.installed_version || "-",
+                    })
                   }
                 />
               ) : systemProxyLaunchd.message ? (
@@ -195,12 +206,12 @@ export default function SystemProxySection({
                 </Text>
               ) : (
                 <Text type="secondary" style={{ fontSize: 12 }}>
-                  Restores Bifrost-managed system proxy settings during crash
-                  recovery and after restart without keeping an idle daemon
-                  process alive. Version:{" "}
-                  {systemProxyLaunchd.installed_version ||
-                    systemProxyLaunchd.current_version ||
-                    "-"}
+                  {t("settings.systemProxy.cleanupHint", {
+                    version:
+                      systemProxyLaunchd.installed_version ||
+                      systemProxyLaunchd.current_version ||
+                      "-",
+                  })}
                 </Text>
               )}
             </Space>
@@ -210,11 +221,11 @@ export default function SystemProxySection({
 
           <Row justify="space-between" align="middle">
             <Col>
-              <Text>Inject Bifrost Badge</Text>
+              <Text>{t("settings.systemProxy.injectBadge")}</Text>
             </Col>
             <Col>
               {injectBifrostBadge === null ? (
-                <Text type="secondary">Loading...</Text>
+                <Text type="secondary">{t("common.loading")}</Text>
               ) : (
                 <Switch
                   checked={injectBifrostBadge}
@@ -226,8 +237,7 @@ export default function SystemProxySection({
             </Col>
           </Row>
           <Text type="secondary" style={{ fontSize: 12 }}>
-            Only applies to HTML pages. Indicates that traffic is flowing
-            through Bifrost proxy.
+            {t("settings.systemProxy.injectBadgeHint")}
           </Text>
 
           <Divider style={{ margin: "12px 0" }} />
@@ -235,8 +245,8 @@ export default function SystemProxySection({
           <Row justify="space-between" align="middle">
             <Col>
               <Space>
-                <Text>CLI Proxy (ENV)</Text>
-                <Tooltip title="Persist proxy environment variables in your shell config so new terminals inherit the proxy">
+                <Text>{t("settings.systemProxy.cliProxy")}</Text>
+                <Tooltip title={t("settings.systemProxy.cliProxyTooltip")}>
                   <ExclamationCircleOutlined style={{ color: "#8c8c8c" }} />
                 </Tooltip>
               </Space>
@@ -250,7 +260,7 @@ export default function SystemProxySection({
                   {cliProxyDisplay.tag.text}
                 </Tag>
               ) : (
-                <Text type="secondary">Loading...</Text>
+                <Text type="secondary">{t("common.loading")}</Text>
               )}
             </Col>
           </Row>
@@ -258,9 +268,9 @@ export default function SystemProxySection({
             title={
               cliProxy ? (
                 <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>
-                  {`Proxy URL: ${cliProxy.proxy_url}\nConfig files:\n${
-                    (cliProxy.config_files || []).join("\n") || "-"
-                  }`}
+                  {`${t("settings.systemProxy.cliProxyUrl", { url: cliProxy.proxy_url })}\n${t(
+                    "settings.systemProxy.cliConfigFiles",
+                  )}\n${(cliProxy.config_files || []).join("\n") || "-"}`}
                 </pre>
               ) : undefined
             }

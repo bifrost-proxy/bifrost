@@ -9,6 +9,7 @@ import {
 import type { UpgradePhase, UpgradeProgress, VersionCheckResponse } from "../types";
 import { isConnectionIssueError, normalizeApiErrorMessage } from "../api/client";
 import { isDesktopShell } from "../runtime";
+import { SUPPORTED_LOCALES, t, translate } from "../i18n";
 
 const SEEN_VERSIONS_STORAGE_KEY = "bifrost-seen-versions";
 const CHECK_INTERVAL_MS = 60 * 60 * 1000;
@@ -16,8 +17,17 @@ export const DESKTOP_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const UPGRADE_POLL_INTERVAL_MS = 1000;
 /** sessionStorage flag guarding the single post-upgrade auto-reload. */
 export const UPGRADE_RELOAD_PENDING_KEY = "bifrost-upgrade-reload-pending";
-const DESKTOP_RESTART_HANDOFF_FAILED_MESSAGE =
-  "Desktop update installed, but restart handoff failed";
+const DESKTOP_RESTART_HANDOFF_FAILED_KEY = "shared.version.restartHandoffFailed";
+
+/** True when `message` is the restart-handoff failure text in any locale. */
+function isRestartHandoffFailedMessage(message: string | null | undefined): boolean {
+  return (
+    !!message &&
+    SUPPORTED_LOCALES.some(
+      (locale) => translate(locale, DESKTOP_RESTART_HANDOFF_FAILED_KEY) === message,
+    )
+  );
+}
 
 interface CheckVersionOptions {
   forceRefresh?: boolean;
@@ -93,11 +103,11 @@ function triggerUpgradeReloadOnce(desktopHandoff = false) {
         useVersionStore.setState({
           upgrading: false,
           upgradePhase: "failed",
-          upgradeMessage: DESKTOP_RESTART_HANDOFF_FAILED_MESSAGE,
+          upgradeMessage: t(DESKTOP_RESTART_HANDOFF_FAILED_KEY),
           upgradeError:
             error instanceof Error
               ? error.message
-              : "Failed to restart the desktop app after update",
+              : t("shared.version.restartFailed"),
         });
       });
     return;
@@ -197,12 +207,12 @@ export const useVersionStore = create<VersionState>()(
         if (
           isDesktopShell() &&
           state.upgradePhase === "failed" &&
-          state.upgradeMessage === DESKTOP_RESTART_HANDOFF_FAILED_MESSAGE
+          isRestartHandoffFailedMessage(state.upgradeMessage)
         ) {
           set({
             upgrading: true,
             upgradePhase: "restarting",
-            upgradeMessage: "Retrying desktop restart handoff…",
+            upgradeMessage: t("shared.version.retryingHandoff"),
             upgradeError: null,
           });
           triggerUpgradeReloadOnce(true);
@@ -218,7 +228,7 @@ export const useVersionStore = create<VersionState>()(
           upgrading: true,
           upgradePhase: "checking",
           upgradePercent: null,
-          upgradeMessage: "Checking for updates…",
+          upgradeMessage: t("shared.version.checking"),
           upgradeError: null,
         });
         try {
@@ -237,7 +247,7 @@ export const useVersionStore = create<VersionState>()(
           set({
             upgrading: false,
             upgradePhase: "failed",
-            upgradeError: normalizeApiErrorMessage(error, "Failed to start upgrade"),
+            upgradeError: normalizeApiErrorMessage(error, t("shared.version.startFailed")),
           });
         }
       },

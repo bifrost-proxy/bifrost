@@ -1719,6 +1719,10 @@ if (!mobileDebugPage.user_agent.includes('Mobile') || !mobileDebugPage.user_agen
 }
 
 const adminContext = await browser.newContext();
+// The admin UI defaults to zh-CN; this suite asserts the English copy.
+await adminContext.addInitScript(() => {
+  localStorage.setItem('bifrost-locale', JSON.stringify({ state: { locale: 'en' }, version: 0 }));
+});
 await adminContext.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: `http://127.0.0.1:${proxyPort}` });
 const adminPage = await adminContext.newPage();
 await adminPage.goto(webui, { waitUntil: 'load' });

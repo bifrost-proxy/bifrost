@@ -4,6 +4,7 @@ import VirtualTrafficTable from "../../../components/TrafficTable/VirtualTraffic
 import type { DebugNetworkEvent } from "../../../api/devtools";
 import type { TrafficSummary } from "../../../types";
 import { filterBySearch } from "./sharedUtils";
+import { useI18n, type TFunction } from "../../../i18n";
 
 const METHOD_COLORS: Record<string, string> = {
   GET: "green",
@@ -25,6 +26,7 @@ export function NetworkList({
   searchQuery: string;
   onOpenTraffic?: (event: DebugNetworkEvent) => void;
 }) {
+  const { t } = useI18n();
   const [selectedId, setSelectedId] = useState<string | undefined>();
   const dedupedEvents = useMemo(() => dedupeNetworkEvents(events), [events]);
   const filteredEvents = useMemo(
@@ -46,8 +48,11 @@ export function NetworkList({
     [dedupedEvents, searchQuery],
   );
   const rows = useMemo(
-    () => filteredEvents.map((event, index) => networkEventToTrafficSummary(event, index, filteredEvents.length)),
-    [filteredEvents],
+    () =>
+      filteredEvents.map((event, index) =>
+        networkEventToTrafficSummary(event, index, filteredEvents.length, t),
+      ),
+    [filteredEvents, t],
   );
   const eventByRowId = useMemo(() => {
     const map = new Map<string, DebugNetworkEvent>();
@@ -58,7 +63,7 @@ export function NetworkList({
     return map;
   }, [filteredEvents, rows]);
 
-  if (!events.length) return <Empty description="No network events yet" />;
+  if (!events.length) return <Empty description={t("devtools.network.noEvents")} />;
 
   return (
     <div data-testid="devtools-network-traffic-table" style={{ height: "100%", minHeight: 0 }}>
@@ -100,7 +105,12 @@ function networkDedupeKey(url: string): string {
   }
 }
 
-function networkEventToTrafficSummary(event: DebugNetworkEvent, index: number, total: number): TrafficSummary {
+function networkEventToTrafficSummary(
+  event: DebugNetworkEvent,
+  index: number,
+  total: number,
+  t: TFunction,
+): TrafficSummary {
   const parsed = parseUrl(event.url);
   const status = event.status ?? 0;
   const method = (event.method || "GET").toUpperCase();
@@ -133,10 +143,10 @@ function networkEventToTrafficSummary(event: DebugNetworkEvent, index: number, t
     _statusDotColor: getStatusDotColor(status),
     _displaySize: "-",
     _contentTypeShort: event.resource_type || "-",
-    _clientDisplay: "page",
+    _clientDisplay: t("devtools.network.clientPage"),
     _clientTooltip: event.client_req_id
-      ? `DevTools client request id: ${event.client_req_id}`
-      : "Captured from target page bridge",
+      ? t("devtools.network.clientRequestTooltip", { id: event.client_req_id })
+      : t("devtools.network.capturedFromBridge"),
   };
 }
 

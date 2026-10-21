@@ -19,6 +19,7 @@ import type { ReplayRequestSummary, ReplayGroup } from "../../../types";
 import { ImportBifrostButton } from "../../../components/ImportBifrostButton";
 import { useExportBifrost } from "../../../hooks/useExportBifrost";
 import { isMacDesktopShell } from "../../../runtime";
+import { useI18n } from "../../../i18n";
 
 const { Text } = Typography;
 
@@ -72,6 +73,7 @@ function isActionButtonClick(target: EventTarget | null): boolean {
 }
 
 export default function CollectionPanel() {
+  const { t } = useI18n();
   const { token } = theme.useToken();
   const macDesktopShell = isMacDesktopShell();
   const {
@@ -139,7 +141,7 @@ export default function CollectionPanel() {
 
   const handleCreateGroup = useCallback(async () => {
     if (!newGroupName.trim()) {
-      message.warning('Please enter a group name');
+      message.warning(t("replay.collection.groupNameRequired"));
       return;
     }
     const success = await createGroup(newGroupName.trim());
@@ -147,7 +149,7 @@ export default function CollectionPanel() {
       setNewGroupModalVisible(false);
       setNewGroupName("");
     }
-  }, [createGroup, newGroupName]);
+  }, [createGroup, newGroupName, t]);
 
   const handleDeleteGroup = useCallback(async (groupId: string) => {
     await deleteGroup(groupId);
@@ -345,14 +347,14 @@ export default function CollectionPanel() {
           <Dropdown
             menu={{
               items: [
-                { key: 'export', label: 'Export', icon: <ExportOutlined /> },
+                { key: 'export', label: t("common.export"), icon: <ExportOutlined /> },
                 ...(groups.length > 0 ? [
                   { type: 'divider' as const },
                   {
                     key: 'move',
-                    label: 'Move to...',
+                    label: t("replay.collection.moveTo"),
                     children: [
-                      ...(groupId ? [{ key: 'move-ungrouped', label: 'Ungrouped' }] : []),
+                      ...(groupId ? [{ key: 'move-ungrouped', label: t("replay.collection.ungrouped") }] : []),
                       ...groups
                         .filter(g => g.id !== groupId)
                         .map(g => ({ key: `move-${g.id}`, label: g.name })),
@@ -360,7 +362,7 @@ export default function CollectionPanel() {
                   },
                 ] : []),
                 { type: 'divider' as const },
-                { key: 'delete', label: 'Delete', icon: <DeleteOutlined />, danger: true },
+                { key: 'delete', label: t("common.delete"), icon: <DeleteOutlined />, danger: true },
               ],
               onClick: ({ key }) => {
                 if (key === 'export') {
@@ -391,7 +393,7 @@ export default function CollectionPanel() {
       ),
       isLeaf: true,
     };
-  }, [currentRequest, groups, handleSelectRequest, handleDeleteRequest, handleMoveRequest, handleExportRequest, styles, searchText, token]);
+  }, [currentRequest, groups, handleSelectRequest, handleDeleteRequest, handleMoveRequest, handleExportRequest, styles, searchText, token, t]);
 
   const treeData: DataNode[] = useMemo(() => {
     const nodes: DataNode[] = [];
@@ -417,11 +419,11 @@ export default function CollectionPanel() {
             <Dropdown
               menu={{
                 items: [
-                  { key: 'export', label: `Export (${groupRequests.length})`, icon: <ExportOutlined />, disabled: groupRequests.length === 0 },
+                  { key: 'export', label: t("replay.collection.exportCount", { count: groupRequests.length }), icon: <ExportOutlined />, disabled: groupRequests.length === 0 },
                   { type: 'divider' },
-                  { key: 'rename', label: 'Rename', icon: <EditOutlined /> },
+                  { key: 'rename', label: t("common.rename"), icon: <EditOutlined /> },
                   { type: 'divider' },
-                  { key: 'delete', label: 'Delete', icon: <DeleteOutlined />, danger: true },
+                  { key: 'delete', label: t("common.delete"), icon: <DeleteOutlined />, danger: true },
                 ],
                 onClick: ({ key }) => {
                   if (key === 'export') {
@@ -464,7 +466,7 @@ export default function CollectionPanel() {
             ) : (
               <FolderOutlined style={{ fontSize: 12, marginRight: 6 }} />
             )}
-            <span>Ungrouped</span>
+            <span>{t("replay.collection.ungrouped")}</span>
             <Tag style={styles.countTag}>{ungroupedRequests.length}</Tag>
           </div>
         ),
@@ -473,7 +475,7 @@ export default function CollectionPanel() {
     }
 
     return nodes;
-  }, [groups, requestsByGroup, buildRequestNode, styles, handleDeleteGroup, handleExportGroup, searchText, expandedKeys]);
+  }, [groups, requestsByGroup, buildRequestNode, styles, handleDeleteGroup, handleExportGroup, searchText, expandedKeys, t]);
 
   const handleDrop: TreeProps<DataNode>['onDrop'] = useCallback(async (info: Parameters<NonNullable<TreeProps<DataNode>['onDrop']>>[0]) => {
     const dragKey = info.dragNode.key as string;
@@ -561,14 +563,14 @@ export default function CollectionPanel() {
   return (
     <div style={styles.container} data-testid="replay-collection-panel">
       <div style={styles.header}>
-        <span style={styles.headerTitle}>Collections</span>
+        <span style={styles.headerTitle}>{t("replay.collection.title")}</span>
         <div style={styles.headerActions}>
           <Button
             type="text"
             size="small"
             icon={<FolderAddOutlined />}
             onClick={() => setNewGroupModalVisible(true)}
-            title="New Folder"
+            title={t("replay.collection.newFolder")}
             data-testid="replay-new-group-button"
           />
           <Button
@@ -576,7 +578,7 @@ export default function CollectionPanel() {
             size="small"
             icon={<PlusOutlined />}
             onClick={createNewRequest}
-            title="New Request"
+            title={t("replay.collection.newRequest")}
             data-testid="replay-new-request-button"
           />
           {savedRequests.length > 0 && (
@@ -585,7 +587,7 @@ export default function CollectionPanel() {
               size="small"
               icon={<ExportOutlined />}
               onClick={handleExportAll}
-              title="Export All"
+              title={t("replay.collection.exportAll")}
             />
           )}
           <ImportBifrostButton
@@ -600,7 +602,7 @@ export default function CollectionPanel() {
 
       <div style={styles.searchBox}>
         <Input
-          placeholder="Search..."
+          placeholder={t("replay.collection.searchPlaceholder")}
           prefix={<SearchOutlined />}
           value={searchText}
           onChange={(e) => setSearchText(e.target.value)}
@@ -635,14 +637,14 @@ export default function CollectionPanel() {
             image={Empty.PRESENTED_IMAGE_SIMPLE}
             description={
               <Text type="secondary" style={{ fontSize: 12 }}>
-                {searchText ? "No matching requests" : "No saved requests yet"}
+                {searchText ? t("replay.collection.noMatching") : t("replay.collection.empty")}
               </Text>
             }
             style={styles.empty}
           >
             {!searchText && (
               <Button type="primary" size="small" onClick={createNewRequest}>
-                New Request
+                {t("replay.collection.newRequest")}
               </Button>
             )}
           </Empty>
@@ -650,17 +652,17 @@ export default function CollectionPanel() {
       </div>
 
       <Modal
-        title="New Folder"
+        title={t("replay.collection.newFolder")}
         open={newGroupModalVisible}
         onOk={handleCreateGroup}
         onCancel={() => {
           setNewGroupModalVisible(false);
           setNewGroupName("");
         }}
-        okText="Create"
+        okText={t("common.create")}
       >
         <Input
-          placeholder="Folder name"
+          placeholder={t("replay.collection.folderNamePlaceholder")}
           value={newGroupName}
           onChange={(e) => setNewGroupName(e.target.value)}
           onPressEnter={handleCreateGroup}
@@ -670,17 +672,17 @@ export default function CollectionPanel() {
       </Modal>
 
       <Modal
-        title="Rename Folder"
+        title={t("replay.collection.renameFolder")}
         open={!!editGroupId}
         onOk={handleUpdateGroup}
         onCancel={() => {
           setEditGroupId(null);
           setEditGroupName("");
         }}
-        okText="Save"
+        okText={t("common.save")}
       >
         <Input
-          placeholder="Folder name"
+          placeholder={t("replay.collection.folderNamePlaceholder")}
           value={editGroupName}
           onChange={(e) => setEditGroupName(e.target.value)}
           onPressEnter={handleUpdateGroup}

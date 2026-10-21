@@ -35,6 +35,7 @@ import type {
   ImProviderConfig,
 } from "../../../../api/imGateway";
 import LongTextModalField from "../agent/LongTextModalField";
+import { useI18n, type TFunction } from "../../../../i18n";
 
 const { Text } = Typography;
 
@@ -54,11 +55,13 @@ const ADAPTER_OPTIONS = [
   { label: "ChatGPT Web", value: "chatgpt_web" },
 ];
 
-const DELIVERY_OPTIONS = [
-  { label: "Final reply", value: "final_reply" },
-  { label: "Progress card", value: "progress_card" },
-  { label: "No IM", value: "no_im" },
-];
+function getDeliveryOptions(t: TFunction) {
+  return [
+    { label: t("imGateway.externalCli.deliveryFinalReply"), value: "final_reply" },
+    { label: t("imGateway.externalCli.deliveryProgressCard"), value: "progress_card" },
+    { label: t("imGateway.externalCli.deliveryNoIm"), value: "no_im" },
+  ];
+}
 
 function SectionHeader({ description, children }: { description: string; children?: ReactNode }) {
   return (
@@ -165,6 +168,8 @@ export default function ExternalCliPanel({
   loading: boolean;
   onRefresh: () => void;
 }) {
+  const { t } = useI18n();
+  const deliveryOptions = useMemo(() => getDeliveryOptions(t), [t]);
   const [config, setConfig] = useState<ExternalCliGatewayConfig | null>(null);
   const [selectedProviderId, setSelectedProviderId] = useState<string>();
   const [saving, setSaving] = useState(false);
@@ -208,9 +213,9 @@ export default function ExternalCliPanel({
       setConfig(data);
       syncChannelForm(data, selectedProviderId);
     } catch (err) {
-      message.error(normalizeApiErrorMessage(err, "Failed to load runners"));
+      message.error(normalizeApiErrorMessage(err, t("imGateway.externalCli.loadFailed")));
     }
-  }, [selectedProviderId, syncChannelForm]);
+  }, [selectedProviderId, syncChannelForm, t]);
 
   useEffect(() => {
     void fetchConfig();
@@ -230,12 +235,12 @@ export default function ExternalCliPanel({
       setConfig(saved);
       syncChannelForm(saved, selectedProviderId);
       setSaveState("saved");
-      if (showToast) message.success("Runners saved");
+      if (showToast) message.success(t("imGateway.externalCli.saved"));
       onRefresh();
       return saved;
     } catch (err) {
       setSaveState("error");
-      message.error(normalizeApiErrorMessage(err, "Failed to save runners"));
+      message.error(normalizeApiErrorMessage(err, t("imGateway.externalCli.saveFailed")));
       return null;
     } finally {
       setSaving(false);
@@ -273,7 +278,7 @@ export default function ExternalCliPanel({
   const handleCheckChatGptLogin = async () => {
     const runnerId = currentModalRunnerId();
     if (!runnerId) {
-      message.error("Save or enter a Runner ID first");
+      message.error(t("imGateway.externalCli.runnerIdFirst"));
       return;
     }
     setAuthChecking(true);
@@ -281,10 +286,10 @@ export default function ExternalCliPanel({
       const status = await imGatewayApi.getChatGptWebAuthStatus(runnerId);
       setAuthStatus(status);
       message[status.loggedIn ? "success" : "warning"](
-        status.loggedIn ? "ChatGPT Web login is valid" : "ChatGPT Web login is required",
+        status.loggedIn ? t("imGateway.externalCli.loginValid") : t("imGateway.externalCli.loginRequired"),
       );
     } catch (err) {
-      message.error(normalizeApiErrorMessage(err, "Failed to check ChatGPT Web login"));
+      message.error(normalizeApiErrorMessage(err, t("imGateway.externalCli.checkLoginFailed")));
     } finally {
       setAuthChecking(false);
     }
@@ -293,7 +298,7 @@ export default function ExternalCliPanel({
   const handleOpenChatGptLogin = async () => {
     const runnerId = currentModalRunnerId();
     if (!runnerId) {
-      message.error("Save or enter a Runner ID first");
+      message.error(t("imGateway.externalCli.runnerIdFirst"));
       return;
     }
     loginStopRequested.current = false;
@@ -302,11 +307,11 @@ export default function ExternalCliPanel({
       const status = await imGatewayApi.openChatGptWebLogin(runnerId);
       setAuthStatus(status);
       message[status.loggedIn ? "success" : "warning"](
-        status.loggedIn ? "ChatGPT Web login captured" : "ChatGPT Web login is still required",
+        status.loggedIn ? t("imGateway.externalCli.loginCaptured") : t("imGateway.externalCli.loginStillRequired"),
       );
     } catch (err) {
       if (!loginStopRequested.current) {
-        message.error(normalizeApiErrorMessage(err, "Failed to open ChatGPT Web login"));
+        message.error(normalizeApiErrorMessage(err, t("imGateway.externalCli.openLoginFailed")));
       }
     } finally {
       loginStopRequested.current = false;
@@ -317,16 +322,16 @@ export default function ExternalCliPanel({
   const handleStopChatGptLogin = async () => {
     const runnerId = currentModalRunnerId();
     if (!runnerId) {
-      message.error("Save or enter a Runner ID first");
+      message.error(t("imGateway.externalCli.runnerIdFirst"));
       return;
     }
     loginStopRequested.current = true;
     try {
       const status = await imGatewayApi.stopChatGptWebLogin(runnerId);
       setAuthStatus(status);
-      message.info("ChatGPT Web login stopped");
+      message.info(t("imGateway.externalCli.loginStopped"));
     } catch (err) {
-      message.error(normalizeApiErrorMessage(err, "Failed to stop ChatGPT Web login"));
+      message.error(normalizeApiErrorMessage(err, t("imGateway.externalCli.stopLoginFailed")));
     }
   };
 
@@ -338,11 +343,11 @@ export default function ExternalCliPanel({
         .trim()
         .replace(/\s+/g, "-");
       if (!runnerId) {
-        message.error("Runner ID is required");
+        message.error(t("imGateway.externalCli.runnerIdRequired"));
         return;
       }
       if (!editingRunnerId && config.runners[runnerId]) {
-        message.error(`Runner '${runnerId}' already exists`);
+        message.error(t("imGateway.externalCli.runnerExists", { id: runnerId }));
         return;
       }
       const runners = { ...config.runners };
@@ -359,7 +364,7 @@ export default function ExternalCliPanel({
       }
     } catch (err) {
       if (!(err && typeof err === "object" && "errorFields" in err)) {
-        message.error(normalizeApiErrorMessage(err, "Failed to save runner"));
+        message.error(normalizeApiErrorMessage(err, t("imGateway.externalCli.saveRunnerFailed")));
       }
     }
   };
@@ -425,9 +430,9 @@ export default function ExternalCliPanel({
         providerId: selectedProviderId,
       });
       setTestResult(result);
-      message.success("Runner test completed");
+      message.success(t("imGateway.externalCli.testCompleted"));
     } catch (err) {
-      message.error(normalizeApiErrorMessage(err, "Runner test failed"));
+      message.error(normalizeApiErrorMessage(err, t("imGateway.externalCli.testFailed")));
     } finally {
       setTesting(false);
     }
@@ -435,37 +440,37 @@ export default function ExternalCliPanel({
 
   return (
     <div>
-      <SectionHeader description="Manage external runners used by Agent Chat, IM providers, schedules, and ASR Daily Agent. Working directory is inherited from IM Provider Agent settings, then global Agent settings.">
+      <SectionHeader description={t("imGateway.externalCli.description")}>
         <Button icon={<ReloadOutlined />} onClick={fetchConfig} loading={loading || saving}>
-          Refresh
+          {t("common.refresh")}
         </Button>
       </SectionHeader>
       <div style={{ display: "grid", gap: 12 }}>
         <Card
           size="small"
-          title="Runners"
+          title={t("imGateway.externalCli.runners")}
           extra={
             <Space>
               <Text type={saveState === "error" ? "danger" : "secondary"}>
                 {saveState === "saving"
-                  ? "Auto-saving..."
+                  ? t("imGateway.externalCli.autoSaving")
                   : saveState === "saved"
-                    ? "Saved"
+                    ? t("common.saved")
                     : saveState === "error"
-                      ? "Save failed"
-                      : "Changes auto-save"}
+                      ? t("imGateway.externalCli.saveStateFailed")
+                      : t("imGateway.externalCli.changesAutoSave")}
               </Text>
               <Button icon={<PlusOutlined />} onClick={openCreateRunner} type="primary">
-                Add Runner
+                {t("imGateway.externalCli.addRunner")}
               </Button>
             </Space>
           }
         >
           <Space direction="vertical" style={{ width: "100%" }} size={12}>
             <Descriptions size="small" column={1}>
-              <Descriptions.Item label="Working Directory">
+              <Descriptions.Item label={t("imGateway.externalCli.workingDirectory")}>
                 <Text type="secondary">
-                  Inherited from IM Provider Agent settings, then global Agent settings
+                  {t("imGateway.externalCli.workingDirectoryInherited")}
                 </Text>
               </Descriptions.Item>
             </Descriptions>
@@ -476,29 +481,29 @@ export default function ExternalCliPanel({
               dataSource={runnerIds.map((id) => ({ id, runner: config?.runners[id] || DEFAULT_RUNNER }))}
               columns={[
                 {
-                  title: "Runner ID",
+                  title: t("imGateway.externalCli.runnerId"),
                   dataIndex: "id",
                   render: (id: string) => <Text code>{id}</Text>,
                 },
                 {
-                  title: "Executor",
+                  title: t("imGateway.externalCli.executor"),
                   dataIndex: ["runner", "adapter"],
                   render: (adapter: string) => <Tag>{adapter}</Tag>,
                 },
                 {
-                  title: "Enabled",
+                  title: t("common.enabled"),
                   dataIndex: ["runner", "enabled"],
                   render: (enabled: boolean) => (
-                    <Tag color={enabled ? "green" : "default"}>{enabled ? "enabled" : "disabled"}</Tag>
+                    <Tag color={enabled ? "green" : "default"}>{enabled ? t("imGateway.externalCli.stateEnabled") : t("imGateway.externalCli.stateDisabled")}</Tag>
                   ),
                 },
                 {
-                  title: "Delivery",
+                  title: t("imGateway.externalCli.delivery"),
                   dataIndex: ["runner", "deliveryMode"],
                   render: (mode: string) => <Tag>{mode}</Tag>,
                 },
                 {
-                  title: "Actions",
+                  title: t("common.actions"),
                   key: "actions",
                   align: "right" as const,
                   render: (_: unknown, row: { id: string }) => (
@@ -508,11 +513,11 @@ export default function ExternalCliPanel({
                         icon={<EditOutlined />}
                         onClick={() => openEditRunner(row.id)}
                       >
-                        Edit
+                        {t("common.edit")}
                       </Button>
                       <Popconfirm
-                        title="Delete runner?"
-                        okText="Delete"
+                        title={t("imGateway.externalCli.deleteConfirm")}
+                        okText={t("common.delete")}
                         okButtonProps={{ danger: true }}
                         disabled={runnerIds.length <= 1}
                         onConfirm={() => handleDeleteRunner(row.id)}
@@ -523,7 +528,7 @@ export default function ExternalCliPanel({
                           icon={<DeleteOutlined />}
                           disabled={runnerIds.length <= 1}
                         >
-                          Delete
+                          {t("common.delete")}
                         </Button>
                       </Popconfirm>
                     </Space>
@@ -534,12 +539,12 @@ export default function ExternalCliPanel({
           </Space>
         </Card>
 
-        <Card size="small" title="IM Channel Runner and Test">
+        <Card size="small" title={t("imGateway.externalCli.channelCardTitle")}>
           <Space direction="vertical" style={{ width: "100%" }} size={12}>
             <Select
               allowClear
               style={{ width: "100%" }}
-              placeholder="Select an IM provider/channel"
+              placeholder={t("imGateway.externalCli.selectChannel")}
               value={selectedProviderId}
               onChange={(value) => {
                 if (saveTimer.current) {
@@ -557,38 +562,38 @@ export default function ExternalCliPanel({
               }))}
             />
             <Descriptions size="small" column={1}>
-              <Descriptions.Item label="Effective Runner">
+              <Descriptions.Item label={t("imGateway.externalCli.effectiveRunner")}>
                 <Text code>{effectiveRunnerId}</Text>
               </Descriptions.Item>
-              <Descriptions.Item label="Effective Adapter">
+              <Descriptions.Item label={t("imGateway.externalCli.effectiveAdapter")}>
                 <Text code>{effectiveRunner.adapter}</Text>
               </Descriptions.Item>
-              <Descriptions.Item label="Delivery Mode">
+              <Descriptions.Item label={t("imGateway.externalCli.deliveryMode")}>
                 <Tag>{selectedOverride?.deliveryMode || effectiveRunner.deliveryMode}</Tag>
               </Descriptions.Item>
             </Descriptions>
             <Form form={channelForm} layout="vertical" onValuesChange={scheduleChannelSave}>
-              <Form.Item name="runnerId" label="Runner Override">
+              <Form.Item name="runnerId" label={t("imGateway.externalCli.runnerOverride")}>
                 <Select
                   disabled={!selectedProviderId}
                   options={[
-                    { label: "Inherit global runner", value: "__inherit__" },
+                    { label: t("imGateway.externalCli.inheritGlobalRunner"), value: "__inherit__" },
                     ...runnerIds.map((id) => ({ label: id, value: id })),
                   ]}
                 />
               </Form.Item>
-              <Form.Item name="enabledMode" label="Enabled Override">
+              <Form.Item name="enabledMode" label={t("imGateway.externalCli.enabledOverride")}>
                 <Select
                   disabled={!selectedProviderId}
                   options={[
-                    { label: "Inherit runner setting", value: "__inherit__" },
-                    { label: "Enabled for this channel", value: "true" },
-                    { label: "Disabled for this channel", value: "false" },
+                    { label: t("imGateway.externalCli.inheritRunnerSetting"), value: "__inherit__" },
+                    { label: t("imGateway.externalCli.enabledForChannel"), value: "true" },
+                    { label: t("imGateway.externalCli.disabledForChannel"), value: "false" },
                   ]}
                 />
               </Form.Item>
-              <Form.Item name="deliveryMode" label="Delivery Override">
-                <Select allowClear disabled={!selectedProviderId} options={DELIVERY_OPTIONS} />
+              <Form.Item name="deliveryMode" label={t("imGateway.externalCli.deliveryOverride")}>
+                <Select allowClear disabled={!selectedProviderId} options={deliveryOptions} />
               </Form.Item>
               <Button
                 type="primary"
@@ -596,7 +601,7 @@ export default function ExternalCliPanel({
                 disabled={!selectedProviderId}
                 loading={saving}
               >
-                Save Channel
+                {t("imGateway.externalCli.saveChannel")}
               </Button>
             </Form>
             <Input.TextArea
@@ -610,14 +615,14 @@ export default function ExternalCliPanel({
               loading={testing}
               disabled={!testMessage.trim()}
             >
-              Run Test Message
+              {t("imGateway.externalCli.runTestMessage")}
             </Button>
             {testResult && (
-              <Card size="small" title={`Run ${testResult.runId}`}>
+              <Card size="small" title={t("imGateway.externalCli.runTitle", { id: testResult.runId })}>
                 <Space direction="vertical" style={{ width: "100%" }}>
                   <Tag>{testResult.status}</Tag>
                   <Typography.Paragraph>{testResult.response}</Typography.Paragraph>
-                  <Text type="secondary">{testResult.events.length} events captured</Text>
+                  <Text type="secondary">{t("imGateway.externalCli.eventsCaptured", { count: testResult.events.length })}</Text>
                 </Space>
               </Card>
             )}
@@ -626,11 +631,11 @@ export default function ExternalCliPanel({
       </div>
 
       <Modal
-        title={editingRunnerId ? `Edit Runner: ${editingRunnerId}` : "Add Runner"}
+        title={editingRunnerId ? t("imGateway.externalCli.editRunnerTitle", { id: editingRunnerId }) : t("imGateway.externalCli.addRunner")}
         open={runnerModalOpen}
         onCancel={() => setRunnerModalOpen(false)}
         onOk={handleSaveRunner}
-        okText={editingRunnerId ? "Save Runner" : "Create Runner"}
+        okText={editingRunnerId ? t("imGateway.externalCli.saveRunner") : t("imGateway.externalCli.createRunner")}
         confirmLoading={saving}
         width={760}
         destroyOnClose
@@ -638,21 +643,21 @@ export default function ExternalCliPanel({
         <Form form={runnerForm} layout="vertical">
           <Form.Item
             name="runnerId"
-            label="Runner ID"
+            label={t("imGateway.externalCli.runnerId")}
             rules={[
-              { required: true, message: "Runner ID is required" },
+              { required: true, message: t("imGateway.externalCli.runnerIdRequired") },
               {
                 pattern: /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/,
-                message: "Use letters, numbers, dot, underscore or dash",
+                message: t("imGateway.externalCli.runnerIdPattern"),
               },
             ]}
           >
             <Input disabled={Boolean(editingRunnerId)} placeholder="Codex" />
           </Form.Item>
-          <Form.Item name="enabled" label="Runner Enabled" valuePropName="checked">
+          <Form.Item name="enabled" label={t("imGateway.externalCli.runnerEnabled")} valuePropName="checked">
             <Switch />
           </Form.Item>
-          <Form.Item name="adapter" label="Adapter">
+          <Form.Item name="adapter" label={t("imGateway.externalCli.adapter")}>
             <Select options={ADAPTER_OPTIONS} />
           </Form.Item>
           <Form.Item shouldUpdate noStyle>
@@ -660,21 +665,23 @@ export default function ExternalCliPanel({
               getFieldValue("adapter") === "chatgpt_web" ? (
                 <Space direction="vertical" style={{ width: "100%" }} size={12}>
                   <Descriptions size="small" column={1} bordered>
-                    <Descriptions.Item label="Login State">
+                    <Descriptions.Item label={t("imGateway.externalCli.loginState")}>
                       <Space wrap>
                         <Tag color={authStatus?.loggedIn ? "green" : "orange"}>
-                          {authStatus?.state || "not checked"}
+                          {authStatus?.state || t("imGateway.externalCli.notChecked")}
                         </Tag>
                         {authStatus && (
                           <Text type="secondary">
-                            cookies {authStatus.cookieCount}, headers{" "}
-                            {authStatus.capturedHeaderNames.length}
+                            {t("imGateway.externalCli.cookiesHeaders", {
+                              cookies: authStatus.cookieCount,
+                              headers: authStatus.capturedHeaderNames.length,
+                            })}
                           </Text>
                         )}
                       </Space>
                     </Descriptions.Item>
-                    <Descriptions.Item label="Profile">
-                      <Text type="secondary">{authStatus?.profileDir || "Bifrost data dir"}</Text>
+                    <Descriptions.Item label={t("imGateway.externalCli.profile")}>
+                      <Text type="secondary">{authStatus?.profileDir || t("imGateway.externalCli.bifrostDataDir")}</Text>
                     </Descriptions.Item>
                   </Descriptions>
                   <Space>
@@ -683,22 +690,22 @@ export default function ExternalCliPanel({
                       loading={authChecking}
                       onClick={handleCheckChatGptLogin}
                     >
-                      Check Login
+                      {t("imGateway.externalCli.checkLogin")}
                     </Button>
                     <Button
                       icon={<LoginOutlined />}
                       loading={loginOpening}
                       onClick={handleOpenChatGptLogin}
                     >
-                      Open Login Browser
+                      {t("imGateway.externalCli.openLoginBrowser")}
                     </Button>
                     {loginOpening && (
                       <Button danger onClick={handleStopChatGptLogin}>
-                        Stop Login
+                        {t("imGateway.externalCli.stopLogin")}
                       </Button>
                     )}
                   </Space>
-                  <Form.Item name="browserChannel" label="Browser">
+                  <Form.Item name="browserChannel" label={t("imGateway.externalCli.browser")}>
                     <Select
                       options={[
                         { label: "Microsoft Edge", value: "edge" },
@@ -706,62 +713,62 @@ export default function ExternalCliPanel({
                       ]}
                     />
                   </Form.Item>
-                  <Form.Item name="browserProfileDir" label="Browser Profile Dir">
-                    <Input placeholder="Leave empty to use Bifrost data dir" />
+                  <Form.Item name="browserProfileDir" label={t("imGateway.externalCli.browserProfileDir")}>
+                    <Input placeholder={t("imGateway.externalCli.browserProfileDirPlaceholder")} />
                   </Form.Item>
-                  <Form.Item name="executionMode" label="Execution Mode">
+                  <Form.Item name="executionMode" label={t("imGateway.externalCli.executionMode")}>
                     <Select
                       options={[
-                        { label: "Headless", value: "headless" },
-                        { label: "Headed", value: "headed" },
+                        { label: t("imGateway.externalCli.headless"), value: "headless" },
+                        { label: t("imGateway.externalCli.headed"), value: "headed" },
                       ]}
                     />
                   </Form.Item>
-                  <Form.Item name="chatgptBaseUrl" label="Base URL">
+                  <Form.Item name="chatgptBaseUrl" label={t("imGateway.externalCli.baseUrl")}>
                     <Input placeholder="https://chatgpt.com" />
                   </Form.Item>
-                  <Form.Item name="chatgptTimeoutSecs" label="Run Timeout Seconds">
+                  <Form.Item name="chatgptTimeoutSecs" label={t("imGateway.externalCli.runTimeoutSeconds")}>
                     <Input type="number" min={60} />
                   </Form.Item>
-                  <Form.Item name="pollIntervalMs" label="Poll Interval Ms">
+                  <Form.Item name="pollIntervalMs" label={t("imGateway.externalCli.pollIntervalMs")}>
                     <Input type="number" min={250} />
                   </Form.Item>
                 </Space>
               ) : (
                 <>
-                  <Form.Item name="executable" label="Executable">
+                  <Form.Item name="executable" label={t("imGateway.externalCli.executable")}>
                     <Input placeholder="Codex" />
                   </Form.Item>
-                  <Form.Item name="args" label="Arguments">
-                    <Input.TextArea rows={3} placeholder="One argument per line" />
+                  <Form.Item name="args" label={t("imGateway.externalCli.arguments")}>
+                    <Input.TextArea rows={3} placeholder={t("imGateway.externalCli.argumentsPlaceholder")} />
                   </Form.Item>
-                  <Form.Item name="permissionMode" label="Permission Mode">
+                  <Form.Item name="permissionMode" label={t("imGateway.externalCli.permissionMode")}>
                     <Select
                       allowClear
                       options={[
-                        { label: "Headless default", value: "" },
-                        { label: "Plan", value: "plan" },
-                        { label: "Bypass Permissions", value: "bypass_permissions" },
-                        { label: "Auto", value: "auto" },
-                        { label: "Custom", value: "custom" },
+                        { label: t("imGateway.externalCli.permHeadlessDefault"), value: "" },
+                        { label: t("imGateway.externalCli.permPlan"), value: "plan" },
+                        { label: t("imGateway.externalCli.permBypass"), value: "bypass_permissions" },
+                        { label: t("imGateway.externalCli.permAuto"), value: "auto" },
+                        { label: t("imGateway.externalCli.permCustom"), value: "custom" },
                       ]}
                     />
                   </Form.Item>
-                  <Form.Item name="skillPaths" label="Skill Paths">
-                    <Input.TextArea rows={3} placeholder="Skill folder or SKILL.md path per line" />
+                  <Form.Item name="skillPaths" label={t("imGateway.externalCli.skillPaths")}>
+                    <Input.TextArea rows={3} placeholder={t("imGateway.externalCli.skillPathsPlaceholder")} />
                   </Form.Item>
                 </>
               )
             }
           </Form.Item>
-          <Form.Item name="deliveryMode" label="Default IM Delivery">
-            <Select options={DELIVERY_OPTIONS} />
+          <Form.Item name="deliveryMode" label={t("imGateway.externalCli.defaultImDelivery")}>
+            <Select options={deliveryOptions} />
           </Form.Item>
           <Form.Item name="instructions">
             <LongTextModalField
-              label="Runner Instructions"
-              placeholder="Optional instructions sent with every message"
-              description="Sent with every message. When empty, Bifrost adds nothing before the channel message."
+              label={t("imGateway.externalCli.runnerInstructions")}
+              placeholder={t("imGateway.externalCli.runnerInstructionsPlaceholder")}
+              description={t("imGateway.externalCli.runnerInstructionsDescription")}
               testId="settings-im-external-cli-instructions"
             />
           </Form.Item>

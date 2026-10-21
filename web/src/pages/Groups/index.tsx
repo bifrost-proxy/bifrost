@@ -27,6 +27,7 @@ import {
 import { useGroupStore } from "../../stores/useGroupStore";
 import type { Group, GroupVisibility } from "../../api/group";
 import { isMacDesktopShell } from "../../runtime";
+import { useI18n, type TranslationKey } from "../../i18n";
 
 const { Title, Paragraph } = Typography;
 
@@ -36,10 +37,10 @@ const randomColor = () =>
     .toString(16)
     .padStart(6, "0");
 
-const roleLabelMap: Record<number, { text: string; color: string }> = {
-  2: { text: "Owner", color: "gold" },
-  1: { text: "Master", color: "blue" },
-  0: { text: "Member", color: "default" },
+const roleLabelMap: Record<number, { textKey: TranslationKey; color: string }> = {
+  2: { textKey: "groups.role.owner", color: "gold" },
+  1: { textKey: "groups.role.master", color: "blue" },
+  0: { textKey: "groups.role.member", color: "default" },
 };
 
 function GroupCardGrid({
@@ -52,6 +53,7 @@ function GroupCardGrid({
   prependSlot?: React.ReactNode;
 }) {
   const { token } = theme.useToken();
+  const { t } = useI18n();
 
   return (
     <Row gutter={[16, 16]}>
@@ -92,11 +94,11 @@ function GroupCardGrid({
                       color={group.visibility === "public" ? "green" : "default"}
                       style={{ marginRight: 0 }}
                     >
-                      {group.visibility === "public" ? "Public" : "Private"}
+                      {group.visibility === "public" ? t("groups.public") : t("groups.private")}
                     </Tag>
                     {roleInfo && (
                       <Tag color={roleInfo.color} style={{ marginRight: 0 }}>
-                        {roleInfo.text}
+                        {t(roleInfo.textKey)}
                       </Tag>
                     )}
                   </div>
@@ -105,7 +107,7 @@ function GroupCardGrid({
                     style={{ margin: 0, fontSize: 13 }}
                     ellipsis={{ rows: 1 }}
                   >
-                    {group.description || "No description"}
+                    {group.description || t("groups.noDescription")}
                   </Paragraph>
                 </div>
               </div>
@@ -119,6 +121,7 @@ function GroupCardGrid({
 
 export default function Groups() {
   const { token } = theme.useToken();
+  const { t } = useI18n();
   const navigate = useNavigate();
   const groups = useGroupStore((s) => s.groups);
   const loading = useGroupStore((s) => s.loading);
@@ -171,19 +174,19 @@ export default function Groups() {
         avatar: randomColor(),
       });
       if (group) {
-        message.success("Group created");
+        message.success(t("groups.list.created"));
         setCreateModalOpen(false);
         form.resetFields();
         navigate(`/groups/${group.id}`);
       } else {
         const err = useGroupStore.getState().error;
         (window as unknown as Record<string, unknown>).__BIFROST_LAST_ERROR__ = err;
-        message.error(err || "Failed to create group");
+        message.error(err || t("groups.list.createFailed"));
       }
     } finally {
       setCreateLoading(false);
     }
-  }, [form, createGroup, navigate]);
+  }, [form, createGroup, navigate, t]);
 
   const handleCreateCancel = useCallback(() => {
     setCreateModalOpen(false);
@@ -216,7 +219,7 @@ export default function Groups() {
         }}
       >
         <PlusOutlined style={{ fontSize: 18 }} />
-        <span style={{ fontSize: 14, fontWeight: 500 }}>Create Group</span>
+        <span style={{ fontSize: 14, fontWeight: 500 }}>{t("groups.list.createGroup")}</span>
       </div>
     </Card>
   );
@@ -236,7 +239,7 @@ export default function Groups() {
           type="info"
           showIcon
           icon={<TeamOutlined />}
-          message="Groups allow team members to share proxy rules and collaborate efficiently. Create or join a group to sync rules across your team."
+          message={t("groups.list.intro")}
           style={{ marginBottom: 20 }}
         />
         <div
@@ -247,7 +250,7 @@ export default function Groups() {
           }}
         >
           <Input.Search
-            placeholder="Search groups by name..."
+            placeholder={t("groups.list.searchPlaceholder")}
             allowClear
             value={searchKeyword}
             onChange={(e) => setSearchKeyword(e.target.value)}
@@ -269,7 +272,7 @@ export default function Groups() {
           </div>
         ) : isSearching ? (
           groups.length === 0 ? (
-            <Empty description="No groups found" style={{ padding: "80px 0" }} />
+            <Empty description={t("groups.list.noGroupsFound")} style={{ padding: "80px 0" }} />
           ) : (
             <GroupCardGrid
               groups={groups}
@@ -280,7 +283,7 @@ export default function Groups() {
           <>
             <div style={{ marginBottom: 24 }}>
               <Title level={5} style={{ marginBottom: 12 }}>
-                Managed
+                {t("groups.list.managed")}
               </Title>
               <GroupCardGrid
                 groups={managedGroups}
@@ -291,7 +294,7 @@ export default function Groups() {
             {joinedGroups.length > 0 && (
               <div style={{ marginBottom: 24 }}>
                 <Title level={5} style={{ marginBottom: 12 }}>
-                  Joined
+                  {t("groups.list.joined")}
                 </Title>
                 <GroupCardGrid
                   groups={joinedGroups}
@@ -302,7 +305,7 @@ export default function Groups() {
             {discoverGroups.length > 0 && (
               <div style={{ marginBottom: 24 }}>
                 <Title level={5} style={{ marginBottom: 12 }}>
-                  Discover
+                  {t("groups.list.discover")}
                 </Title>
                 <GroupCardGrid
                   groups={discoverGroups}
@@ -312,7 +315,7 @@ export default function Groups() {
             )}
             {managedGroups.length === 0 && joinedGroups.length === 0 && discoverGroups.length === 0 && (
               <Empty
-                description="No groups yet, create one to get started"
+                description={t("groups.list.empty")}
                 style={{ padding: "40px 0" }}
               />
             )}
@@ -321,7 +324,7 @@ export default function Groups() {
       </div>
 
       <Modal
-        title="Create Group"
+        title={t("groups.list.createGroup")}
         open={createModalOpen}
         onOk={handleCreateSubmit}
         onCancel={handleCreateCancel}
@@ -335,24 +338,24 @@ export default function Groups() {
         >
           <Form.Item
             name="name"
-            label="Name"
-            rules={[{ required: true, message: "Please enter a group name" }]}
+            label={t("common.name")}
+            rules={[{ required: true, message: t("groups.list.nameRequired") }]}
           >
-            <Input placeholder="Group name" maxLength={50} />
+            <Input placeholder={t("groups.list.namePlaceholder")} maxLength={50} />
           </Form.Item>
-          <Form.Item name="description" label="Description">
+          <Form.Item name="description" label={t("common.description")}>
             <Input.TextArea
-              placeholder="Group description (optional)"
+              placeholder={t("groups.list.descriptionPlaceholder")}
               rows={3}
               maxLength={200}
             />
           </Form.Item>
           <Form.Item
             name="visibility"
-            label="Visibility"
+            label={t("groups.visibility")}
             extra={
               <span style={{ fontSize: 12 }}>
-                <b>Public</b>: Anyone can discover this group and access its shared rules. <b>Private</b>: Only invited members can see and access the group.
+                <b>{t("groups.public")}</b>{t("groups.visibilityPublicDesc")}<b>{t("groups.private")}</b>{t("groups.visibilityPrivateDesc")}
               </span>
             }
           >
@@ -360,13 +363,13 @@ export default function Groups() {
               <Select.Option value="private">
                 <Space>
                   <LockOutlined />
-                  <span>Private</span>
+                  <span>{t("groups.private")}</span>
                 </Space>
               </Select.Option>
               <Select.Option value="public">
                 <Space>
                   <GlobalOutlined />
-                  <span>Public</span>
+                  <span>{t("groups.public")}</span>
                 </Space>
               </Select.Option>
             </Select>

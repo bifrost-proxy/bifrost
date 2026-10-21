@@ -8,6 +8,7 @@ import { useMarkSearch } from "../../hooks/useMarkSearch";
 import { TunnelInterceptActions } from "../../TunnelInterceptActions";
 import { areHeadersEqual, buildHeaderDiff } from "./diff";
 import type { HeaderDiffItem } from "./diff";
+import { useI18n } from "../../../../i18n";
 
 const { Text } = Typography;
 
@@ -40,6 +41,7 @@ export const HeaderView = ({
   editable = false,
   onHeadersChange,
 }: HeaderViewProps) => {
+  const { t } = useI18n();
   const { token } = theme.useToken();
   const resolvedTheme = useThemeStore((state) => state.resolvedTheme);
   const tableRef = useRef<HTMLDivElement>(null);
@@ -123,23 +125,23 @@ export const HeaderView = ({
                 <Input
                   value={name}
                   status={nameValid ? undefined : "error"}
-                  aria-label={`Header ${index + 1} name`}
+                  aria-label={t("trafficDetail.headers.ariaName", { index: index + 1 })}
                   data-testid={`${testIdPrefix}-name-${index}`}
                   onChange={(event) => updateHeader(index, 0, event.target.value)}
-                  placeholder="Header name"
+                  placeholder={t("trafficDetail.headers.namePlaceholder")}
                   style={{ width: 190, fontFamily: "monospace", fontSize: 12 }}
                 />
                 <Input
                   value={value}
-                  aria-label={`Header ${index + 1} value`}
+                  aria-label={t("trafficDetail.headers.ariaValue", { index: index + 1 })}
                   data-testid={`${testIdPrefix}-value-${index}`}
                   onChange={(event) => updateHeader(index, 1, event.target.value)}
-                  placeholder="Header value"
+                  placeholder={t("trafficDetail.headers.valuePlaceholder")}
                   style={{ flex: 1, fontFamily: "monospace", fontSize: 12 }}
                 />
-                <Tooltip title="Delete header">
+                <Tooltip title={t("trafficDetail.headers.deleteHeader")}>
                   <Button
-                    aria-label={`Delete header ${index + 1}`}
+                    aria-label={t("trafficDetail.headers.ariaDelete", { index: index + 1 })}
                     data-testid={`${testIdPrefix}-delete-${index}`}
                     icon={<DeleteOutlined />}
                     onClick={() =>
@@ -156,7 +158,7 @@ export const HeaderView = ({
             data-testid={`${testIdPrefix}-add`}
             onClick={() => onHeadersChange?.([...editableHeaders, ["", ""]])}
           >
-            Add header
+            {t("trafficDetail.headers.addHeader")}
           </Button>
         </Space>
       </div>
@@ -172,7 +174,7 @@ export const HeaderView = ({
 
   const columns: ColumnsType<HeaderDiffItem> = [
     {
-      title: "Name",
+      title: t("common.name"),
       dataIndex: "name",
       key: "name",
       width: 180,
@@ -193,7 +195,7 @@ export const HeaderView = ({
       ),
     },
     {
-      title: "Value",
+      title: t("common.value"),
       dataIndex: "value",
       key: "value",
       render: (text: string, record: HeaderDiffItem) => (
@@ -227,9 +229,9 @@ export const HeaderView = ({
             </div>
           )}
           {protocolChange(record) && (
-            <Tooltip title="Bifrost removes hop-by-hop headers while forwarding for protocol compatibility. No rule, script, or breakpoint change is implied.">
+            <Tooltip title={t("trafficDetail.headers.protocolHandlingTip")}>
               <Tag color="blue" style={{ marginLeft: 8 }} data-testid={`${testIdPrefix}-protocol-badge`}>
-                Protocol handling
+                {t("trafficDetail.headers.protocolHandling")}
               </Tag>
             </Tooltip>
           )}
@@ -258,20 +260,20 @@ export const HeaderView = ({
             host={host}
             clientApp={clientApp}
             clientIp={clientIp}
-            emptyText="No headers"
+            emptyText={t("trafficDetail.headers.noHeaders")}
           />
         </div>
       );
     }
     return (
       <Text type="secondary" style={{ padding: 8, display: "block" }}>
-        No headers
+        {t("trafficDetail.headers.noHeaders")}
       </Text>
     );
   }
 
-  const currentLabel = flow === "response" ? "Sent to client" : "Sent upstream";
-  const originalLabel = flow === "response" ? "Upstream original" : "Client original";
+  const currentLabel = flow === "response" ? t("trafficDetail.headers.sentToClient") : t("trafficDetail.headers.sentUpstream");
+  const originalLabel = flow === "response" ? t("trafficDetail.headers.upstreamOriginal") : t("trafficDetail.headers.clientOriginal");
 
   return (
     <div ref={tableRef}>
@@ -296,10 +298,10 @@ export const HeaderView = ({
             {diffResult && (
               <>
                 <Tag color={diffResult.summary.configured > 0 ? "red" : undefined} data-testid={`${testIdPrefix}-configured-summary`}>
-                  Configured changes: {diffResult.summary.configured}
+                  {t("trafficDetail.headers.configuredChanges", { count: diffResult.summary.configured })}
                 </Tag>
                 <Tag color={diffResult.summary.protocol > 0 ? "blue" : undefined} data-testid={`${testIdPrefix}-protocol-summary`}>
-                  Protocol handling: {diffResult.summary.protocol}
+                  {t("trafficDetail.headers.protocolHandlingCount", { count: diffResult.summary.protocol })}
                 </Tag>
               </>
             )}

@@ -29,10 +29,10 @@ test("AI skill assistant opens from the status bar next to version", async ({
   const panel = page.getByTestId("ai-skill-assistant-panel");
   await expect(panel).toBeVisible();
   await expect(panel).toContainText("bifrost install-skill -y");
-  await expect(panel).toContainText("通过 AI 操作规则增删改查");
-  await expect(panel).toContainText("流量搜索和问题排查");
-  await expect(panel).toContainText("多端口独立规则");
-  await expect(panel).not.toContainText("拖拽气泡");
+  await expect(panel).toContainText("Create, read, update, and delete rules with AI");
+  await expect(panel).toContainText("Traffic search and troubleshooting");
+  await expect(panel).toContainText("Independent rules per port");
+  await expect(panel).not.toContainText("drag the bubble");
 
   await expect
     .poll(async () => {
@@ -65,6 +65,6 @@ test("AI skill assistant status bar popover remains readable in dark theme", asy
   await page.getByTestId("ai-skill-assistant-trigger").click();
   const panel = page.getByTestId("ai-skill-assistant-panel");
   await expect(panel).toBeVisible();
-  await expect(panel).toContainText("AI Skill 加速 Bifrost 操作");
+  await expect(panel).toContainText("Speed up Bifrost with an AI skill");
   await expect(panel).toContainText("SKILL.md");
 });

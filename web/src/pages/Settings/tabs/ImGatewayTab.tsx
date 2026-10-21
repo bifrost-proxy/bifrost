@@ -59,13 +59,10 @@ import {
   IM_GATEWAY_SECTION_NAV as IM_GATEWAY_SECTION_LABELS,
   type ImGatewaySectionId,
 } from "./aiSections";
+import { useI18n, type TranslationKey } from "../../../i18n";
 
 const { Text } = Typography;
 const { useBreakpoint } = Grid;
-
-const AGENT_RUNNER_OPTIONS = [
-  { label: "Inherit global default", value: "__inherit__" },
-];
 
 type ProviderCreateStep = 0 | 1 | 2;
 type SetupProviderType = "weixin" | "feishu";
@@ -174,6 +171,7 @@ function CopyableOverflowText({
   width?: number | string;
   testId?: string;
 }) {
+  const { t } = useI18n();
   const [hovered, setHovered] = useState(false);
   const copyValue = value?.trim();
   const canCopy = Boolean(copyValue);
@@ -182,9 +180,9 @@ function CopyableOverflowText({
     if (!copyValue) return;
     try {
       await navigator.clipboard.writeText(copyValue);
-      message.success("Copied");
+      message.success(t("common.copied"));
     } catch {
-      message.error("Copy failed");
+      message.error(t("common.copyFailed"));
     }
   };
 
@@ -205,9 +203,9 @@ function CopyableOverflowText({
         <OverflowText value={displayValue ?? value} code={code} width="100%" />
       </span>
       {canCopy && (
-        <Tooltip title="Copy">
+        <Tooltip title={t("common.copy")}>
           <Button
-            aria-label="Copy"
+            aria-label={t("common.copy")}
             type="text"
             size="small"
             icon={<CopyOutlined />}
@@ -352,6 +350,7 @@ function DetailGrid({
 const IM_GATEWAY_SECTION_NAV: Array<{
   id: ImGatewaySectionId;
   label: string;
+  labelKey: TranslationKey;
   icon: ReactNode;
 }> = [
   { ...IM_GATEWAY_SECTION_LABELS[0], icon: <ApiOutlined /> },
@@ -374,6 +373,7 @@ function ConnectionsPanel({
   onRefresh: () => void;
   cardGrid?: boolean;
 }) {
+  const { t } = useI18n();
   const { token } = theme.useToken();
   const [statusMap, setStatusMap] = useState<
     Record<string, ConnectionStatus>
@@ -466,25 +466,25 @@ function ConnectionsPanel({
   }, [fetchAgentDefaults, fetchExternalCliConfig]);
 
   const inheritedWorkDir =
-    agentDefaults?.work_dir || agentDefaults?.resolved_work_dir || "Process working directory";
+    agentDefaults?.work_dir || agentDefaults?.resolved_work_dir || t("imGateway.provider.inheritedWorkDirFallback");
   const inheritedBaseInstructions =
     agentDefaults?.base_instructions ||
     agentDefaults?.default_base_instructions ||
-    "Built-in default Agent prompt";
+    t("imGateway.provider.inheritedBasePromptFallback");
   const inheritedDeveloperInstructions =
-    agentDefaults?.developer_instructions || "No global developer instructions";
+    agentDefaults?.developer_instructions || t("imGateway.provider.noGlobalDeveloperInstructions");
   const inheritedUserInstructions =
-    agentDefaults?.user_instructions || "No global user instructions";
+    agentDefaults?.user_instructions || t("imGateway.provider.noGlobalUserInstructions");
   const runnerIds = useMemo(
     () => Object.keys(externalCliConfig?.runners || {}).sort(),
     [externalCliConfig?.runners],
   );
   const agentRunnerOptions = useMemo(
     () => [
-      ...AGENT_RUNNER_OPTIONS,
+      { label: t("imGateway.provider.inheritGlobalDefault"), value: "__inherit__" },
       ...runnerIds.map((id) => ({ label: id, value: id })),
     ],
-    [runnerIds],
+    [runnerIds, t],
   );
   const inheritedRunner = agentDefaults?.runner || externalCliConfig?.defaultRunnerId || "Codex";
 
@@ -634,7 +634,7 @@ function ConnectionsPanel({
         status: "pending",
       });
     } catch (err) {
-      const errorMessage = normalizeApiErrorMessage(err, "Failed to start Feishu setup");
+      const errorMessage = normalizeApiErrorMessage(err, t("imGateway.feishu.startSetupFailed"));
       setFeishuSetup({
         sessionId: "",
         verificationUrl: "",
@@ -691,11 +691,11 @@ function ConnectionsPanel({
         status: "pending",
       });
       setAutoPromptedWeixinIds((prev) => new Set(prev).add(values.id));
-      message.success("Provider created. Scan the Weixin QR code to continue.");
+      message.success(t("imGateway.weixin.createdScanToContinue"));
       onRefresh();
     } catch (err) {
       if (err && typeof err === "object" && "errorFields" in err) return;
-      message.error(normalizeApiErrorMessage(err, "Failed to start Weixin setup"));
+      message.error(normalizeApiErrorMessage(err, t("imGateway.weixin.startSetupFailed")));
     }
   };
 
@@ -727,16 +727,16 @@ function ConnectionsPanel({
         },
       });
       setCreateStep(2);
-      message.success("Feishu provider connected. Finish the optional configuration.");
+      message.success(t("imGateway.feishu.providerConnected"));
       onRefresh();
       void fetchStatuses();
     } catch (err) {
       if (err && typeof err === "object" && "errorFields" in err) return;
-      message.error(normalizeApiErrorMessage(err, "Failed to create Feishu provider"));
+      message.error(normalizeApiErrorMessage(err, t("imGateway.feishu.createProviderFailed")));
     } finally {
       setFeishuAutoConnecting(false);
     }
-  }, [feishuSetup, fetchStatuses, form, onRefresh, providerRunnerFormValue]);
+  }, [feishuSetup, fetchStatuses, form, onRefresh, providerRunnerFormValue, t]);
 
   const handleSaveProvider = async () => {
     try {
@@ -772,7 +772,7 @@ function ConnectionsPanel({
           payload as Partial<ImProviderConfig>,
         );
         await syncProviderRunnerOverride(editingProvider.id, values.agent_config?.runner);
-        message.success("Provider updated");
+        message.success(t("imGateway.provider.updated"));
       } else if (createdProvider) {
         const payload = normalizeProviderValues(
           {
@@ -788,7 +788,7 @@ function ConnectionsPanel({
           payload as Partial<ImProviderConfig>,
         );
         await syncProviderRunnerOverride(createdProvider.id, values.agent_config?.runner);
-        message.success("Provider configured");
+        message.success(t("imGateway.provider.configured"));
       } else {
         const appSecret =
           typeof values.app_secret === "string" ? values.app_secret.trim() : "";
@@ -806,12 +806,12 @@ function ConnectionsPanel({
             status: "pending",
           });
           setAutoPromptedWeixinIds((prev) => new Set(prev).add(values.id));
-          message.success("Provider created. Scan the Weixin QR code to finish login.");
+          message.success(t("imGateway.weixin.createdScanToFinish"));
         } else if (values.enabled && values.event_connection_enabled && appSecret) {
           await imGatewayApi.connectProvider(values.id);
-          message.success("Provider created and connected");
+          message.success(t("imGateway.provider.createdAndConnected"));
         } else {
-          message.success("Provider created");
+          message.success(t("imGateway.provider.created"));
         }
       }
       setAddModalOpen(false);
@@ -821,29 +821,29 @@ function ConnectionsPanel({
       void fetchExternalCliConfig();
     } catch (err) {
       if (err && typeof err === "object" && "errorFields" in err) return;
-      message.error(normalizeApiErrorMessage(err, "Failed to save provider"));
+      message.error(normalizeApiErrorMessage(err, t("imGateway.provider.saveFailed")));
     }
   };
 
   const handleConnect = async (id: string) => {
     try {
       await imGatewayApi.connectProvider(id);
-      message.success("Provider connected");
+      message.success(t("imGateway.provider.connected"));
       onRefresh();
       void fetchStatuses();
     } catch (err) {
-      message.error(normalizeApiErrorMessage(err, "Failed to connect provider"));
+      message.error(normalizeApiErrorMessage(err, t("imGateway.provider.connectFailed")));
     }
   };
 
   const handleDisconnect = async (id: string) => {
     try {
       await imGatewayApi.disconnectProvider(id);
-      message.success("Provider disconnected");
+      message.success(t("imGateway.provider.disconnected"));
       onRefresh();
       void fetchStatuses();
     } catch (err) {
-      message.error(normalizeApiErrorMessage(err, "Failed to disconnect provider"));
+      message.error(normalizeApiErrorMessage(err, t("imGateway.provider.disconnectFailed")));
     }
   };
 
@@ -858,9 +858,9 @@ function ConnectionsPanel({
         expiresAt: Date.now() + result.expires_in_seconds * 1000,
         status: "pending",
       });
-      message.success("Weixin QR code generated");
+      message.success(t("imGateway.weixin.qrGenerated"));
     } catch (err) {
-      message.error(normalizeApiErrorMessage(err, "Failed to start Weixin login"));
+      message.error(normalizeApiErrorMessage(err, t("imGateway.weixin.startLoginFailed")));
     } finally {
       setWeixinLoginLoading(false);
     }
@@ -880,15 +880,15 @@ function ConnectionsPanel({
         });
         setAutoPromptedWeixinIds((prev) => new Set(prev).add(providerId));
         if (showToast) {
-          message.success("Weixin QR code refreshed");
+          message.success(t("imGateway.weixin.qrRefreshed"));
         }
       } catch (err) {
-        message.error(normalizeApiErrorMessage(err, "Failed to refresh Weixin QR"));
+        message.error(normalizeApiErrorMessage(err, t("imGateway.weixin.refreshQrFailed")));
       } finally {
         setWeixinLoginLoading(false);
       }
     },
-    [],
+    [t],
   );
 
   useEffect(() => {
@@ -933,7 +933,7 @@ function ConnectionsPanel({
           });
           setCreateStep(2);
           setWeixinLogin(null);
-          message.success("Weixin login completed. Finish the optional configuration.");
+          message.success(t("imGateway.weixin.loginCompleted"));
           onRefresh();
           void fetchStatuses();
           return;
@@ -967,6 +967,7 @@ function ConnectionsPanel({
     onRefresh,
     providerRunnerFormValue,
     refreshWeixinLogin,
+    t,
     weixinLogin,
     weixinLoginLoading,
   ]);
@@ -989,7 +990,7 @@ function ConnectionsPanel({
                 }
               : current,
           );
-          message.success("Feishu app created. Connecting provider...");
+          message.success(t("imGateway.feishu.appCreatedConnecting"));
           return;
         }
         if (result.status === "expired") {
@@ -1004,7 +1005,7 @@ function ConnectionsPanel({
       }
     }, delay);
     return () => window.clearInterval(timer);
-  }, [feishuSetup, feishuSetupLoading]);
+  }, [feishuSetup, feishuSetupLoading, t]);
 
   useEffect(() => {
     if (
@@ -1058,46 +1059,49 @@ function ConnectionsPanel({
   const handleDelete = async (id: string) => {
     try {
       await imGatewayApi.deleteProvider(id);
-      message.success("Provider deleted");
+      message.success(t("imGateway.provider.deleted"));
       onRefresh();
     } catch {
-      message.error("Failed to delete provider");
+      message.error(t("imGateway.provider.deleteFailed"));
     }
   };
 
   const getStateBadge = (state?: string) => {
     switch (state) {
       case "connected":
-        return <Badge status="success" text="Connected" />;
+        return <Badge status="success" text={t("imGateway.state.connected")} />;
       case "connecting":
       case "reconnecting":
-        return <Badge status="processing" text={state} />;
+        return <Badge
+            status="processing"
+            text={state === "connecting" ? t("imGateway.state.connecting") : t("imGateway.state.reconnecting")}
+          />;
       case "disconnected":
-        return <Badge status="default" text="Disconnected" />;
+        return <Badge status="default" text={t("imGateway.state.disconnected")} />;
       case "failed":
-        return <Badge status="error" text="Failed" />;
+        return <Badge status="error" text={t("imGateway.state.failed")} />;
       case "authentication_required":
-        return <Badge status="error" text="Scan QR again" />;
+        return <Badge status="error" text={t("imGateway.state.authenticationRequired")} />;
       default:
-        return <Badge status="default" text="Unknown" />;
+        return <Badge status="default" text={t("common.unknown")} />;
     }
   };
 
   const addProviderOkText = editingProvider
-    ? "Save"
+    ? t("common.save")
     : createStep === 0
-    ? "Next"
+    ? t("common.next")
     : createStep === 1
     ? setupProviderType === "weixin"
       ? createdProvider
-        ? "Waiting for Scan"
-        : "Create and Show QR"
+        ? t("imGateway.providerModal.waitingForScan")
+        : t("imGateway.providerModal.createAndShowQr")
       : feishuAutoConnecting
-      ? "Connecting"
+      ? t("imGateway.providerModal.connecting")
       : feishuSetup?.status === "confirmed"
-      ? "Retry Connect"
-      : "Waiting for Setup"
-    : "Save Configuration";
+      ? t("imGateway.providerModal.retryConnect")
+      : t("imGateway.providerModal.waitingForSetup")
+    : t("imGateway.providerModal.saveConfiguration");
   const addProviderOkDisabled =
     !editingProvider &&
     createStep === 1 &&
@@ -1107,19 +1111,19 @@ function ConnectionsPanel({
 
   return (
     <div>
-      <PanelHeader description="Manage IM bot connections">
+      <PanelHeader description={t("imGateway.connections.description")}>
         <Button icon={<ReloadOutlined />} onClick={onRefresh} loading={loading}>
-          Refresh
+          {t("common.refresh")}
         </Button>
         <Button type="primary" icon={<PlusOutlined />} onClick={openAddModal}>
-          Add Provider
+          {t("imGateway.connections.addProvider")}
         </Button>
       </PanelHeader>
 
       {loading && providers.length === 0 ? (
         <Spin style={{ display: "block", margin: "40px auto" }} />
       ) : providers.length === 0 ? (
-        <Empty description="No IM providers configured" />
+        <Empty description={t("imGateway.connections.empty")} />
       ) : (
         <div data-testid="settings-im-provider-list">
           {cardGrid ? (
@@ -1150,7 +1154,7 @@ function ConnectionsPanel({
                         {status?.state === "connected" ||
                         status?.state === "connecting" ||
                         status?.state === "reconnecting" ? (
-                          <Tooltip title="Disconnect provider">
+                          <Tooltip title={t("imGateway.connections.disconnectTooltip")}>
                             <Button
                               size="small"
                               icon={<PauseCircleOutlined />}
@@ -1159,7 +1163,7 @@ function ConnectionsPanel({
                             />
                           </Tooltip>
                         ) : (
-                          <Tooltip title="Connect provider">
+                          <Tooltip title={t("imGateway.connections.connectTooltip")}>
                             <Button
                               size="small"
                               icon={<PlayCircleOutlined />}
@@ -1170,7 +1174,7 @@ function ConnectionsPanel({
                           </Tooltip>
                         )}
                         {p.provider_type === "weixin" && (
-                          <Tooltip title="Scan Weixin QR">
+                          <Tooltip title={t("imGateway.weixin.scanQr")}>
                             <Button
                               size="small"
                               icon={<CloudOutlined />}
@@ -1180,7 +1184,7 @@ function ConnectionsPanel({
                             />
                           </Tooltip>
                         )}
-                        <Tooltip title="Edit">
+                        <Tooltip title={t("common.edit")}>
                           <Button
                             size="small"
                             icon={<EditOutlined />}
@@ -1189,7 +1193,7 @@ function ConnectionsPanel({
                           />
                         </Tooltip>
                         <Popconfirm
-                          title="Delete this provider?"
+                          title={t("imGateway.connections.deleteConfirm")}
                           onConfirm={() => handleDelete(p.id)}
                         >
                           <Button
@@ -1203,10 +1207,10 @@ function ConnectionsPanel({
                   >
                     <Space wrap size={[4, 6]} style={{ marginBottom: 12 }}>
                       <Tag color={p.enabled ? "green" : undefined}>
-                        {p.enabled ? "Enabled" : "Disabled"}
+                        {p.enabled ? t("common.enabled") : t("common.disabled")}
                       </Tag>
                       <Tag>
-                        {p.event_connection_enabled ? "Long Connection" : "Webhook"}
+                        {p.event_connection_enabled ? t("imGateway.connectionMode.longConnection") : t("imGateway.connectionMode.webhook")}
                       </Tag>
                       {displayRunnerLabel(p) ? (
                         <Tag color="geekblue">
@@ -1217,7 +1221,7 @@ function ConnectionsPanel({
                     <ProviderFieldList
                       items={[
                         {
-                          label: "App ID",
+                          label: t("imGateway.field.appId"),
                           value: (
                             <CopyableOverflowText
                               value={p.app_id}
@@ -1229,15 +1233,15 @@ function ConnectionsPanel({
                           ),
                         },
                         {
-                          label: "Secret",
+                          label: t("imGateway.field.secret"),
                           value: p.secret_configured ? (
-                            <Tag color="green">Configured</Tag>
+                            <Tag color="green">{t("imGateway.field.configured")}</Tag>
                           ) : (
-                            <Tag color="red">Not Set</Tag>
+                            <Tag color="red">{t("imGateway.field.notSet")}</Tag>
                           ),
                         },
                         {
-                          label: "Owner ID",
+                          label: t("imGateway.field.ownerId"),
                           value: p.owner_open_id ? (
                             <CopyableOverflowText
                               value={p.owner_open_id}
@@ -1246,11 +1250,11 @@ function ConnectionsPanel({
                               testId={`settings-im-provider-${p.id}-owner-id`}
                             />
                           ) : (
-                            <SecondaryInline>Auto-detect</SecondaryInline>
+                            <SecondaryInline>{t("imGateway.field.autoDetect")}</SecondaryInline>
                           ),
                         },
                         {
-                          label: "Work Dir",
+                          label: t("imGateway.field.workDir"),
                           value: (
                             <CopyableOverflowText
                               value={p.agent_config?.work_dir || inheritedWorkDir}
@@ -1296,10 +1300,10 @@ function ConnectionsPanel({
                         <Tag>{p.provider_type}</Tag>
                         {getStateBadge(status?.state)}
                         <Tag color={p.enabled ? "green" : undefined}>
-                          {p.enabled ? "Enabled" : "Disabled"}
+                          {p.enabled ? t("common.enabled") : t("common.disabled")}
                         </Tag>
                         <Tag>
-                          {p.event_connection_enabled ? "Long Connection" : "Webhook"}
+                          {p.event_connection_enabled ? t("imGateway.connectionMode.longConnection") : t("imGateway.connectionMode.webhook")}
                         </Tag>
                       </Space>
                     }
@@ -1308,7 +1312,7 @@ function ConnectionsPanel({
                         {status?.state === "connected" ||
                         status?.state === "connecting" ||
                         status?.state === "reconnecting" ? (
-                          <Tooltip title="Disconnect provider">
+                          <Tooltip title={t("imGateway.connections.disconnectTooltip")}>
                             <Button
                               size="small"
                               icon={<PauseCircleOutlined />}
@@ -1317,7 +1321,7 @@ function ConnectionsPanel({
                             />
                           </Tooltip>
                         ) : (
-                          <Tooltip title="Connect provider">
+                          <Tooltip title={t("imGateway.connections.connectTooltip")}>
                             <Button
                               size="small"
                               icon={<PlayCircleOutlined />}
@@ -1328,7 +1332,7 @@ function ConnectionsPanel({
                           </Tooltip>
                         )}
                         {p.provider_type === "weixin" && (
-                          <Tooltip title="Scan Weixin QR">
+                          <Tooltip title={t("imGateway.weixin.scanQr")}>
                             <Button
                               size="small"
                               icon={<CloudOutlined />}
@@ -1338,7 +1342,7 @@ function ConnectionsPanel({
                             />
                           </Tooltip>
                         )}
-                        <Tooltip title="Edit">
+                        <Tooltip title={t("common.edit")}>
                           <Button
                             size="small"
                             icon={<EditOutlined />}
@@ -1347,7 +1351,7 @@ function ConnectionsPanel({
                           />
                         </Tooltip>
                         <Popconfirm
-                          title="Delete this provider?"
+                          title={t("imGateway.connections.deleteConfirm")}
                           onConfirm={() => handleDelete(p.id)}
                         >
                           <Button size="small" danger icon={<DeleteOutlined />} />
@@ -1358,7 +1362,7 @@ function ConnectionsPanel({
                     <ProviderFieldList
                       items={[
                         {
-                          label: "App ID",
+                          label: t("imGateway.field.appId"),
                           value: (
                             <CopyableOverflowText
                               value={p.app_id}
@@ -1369,15 +1373,15 @@ function ConnectionsPanel({
                           ),
                         },
                         {
-                          label: "Secret",
+                          label: t("imGateway.field.secret"),
                           value: p.secret_configured ? (
-                            <Tag color="green">Configured</Tag>
+                            <Tag color="green">{t("imGateway.field.configured")}</Tag>
                           ) : (
-                            <Tag color="red">Not Set</Tag>
+                            <Tag color="red">{t("imGateway.field.notSet")}</Tag>
                           ),
                         },
                         {
-                          label: "Owner ID",
+                          label: t("imGateway.field.ownerId"),
                           value: p.owner_open_id ? (
                             <CopyableOverflowText
                               value={p.owner_open_id}
@@ -1385,21 +1389,21 @@ function ConnectionsPanel({
                               testId={`settings-im-provider-${p.id}-owner-id`}
                             />
                           ) : (
-                            <SecondaryInline>Auto-detect on connect</SecondaryInline>
+                            <SecondaryInline>{t("imGateway.field.autoDetectOnConnect")}</SecondaryInline>
                           ),
                         },
                         {
-                          label: "Agent Runner",
+                          label: t("imGateway.field.agentRunner"),
                           value: displayRunnerLabel(p) ? (
                             <Tag color="geekblue">
                               {displayRunnerLabel(p)}
                             </Tag>
                           ) : (
-                            <SecondaryInline>Global default</SecondaryInline>
+                            <SecondaryInline>{t("imGateway.field.globalDefault")}</SecondaryInline>
                           ),
                         },
                         {
-                          label: "Agent Work Dir",
+                          label: t("imGateway.field.agentWorkDir"),
                           value: p.agent_config?.work_dir ? (
                             <CopyableOverflowText
                               value={p.agent_config.work_dir}
@@ -1415,30 +1419,30 @@ function ConnectionsPanel({
                           ),
                         },
                         {
-                          label: "Agent Base Prompt",
+                          label: t("imGateway.field.agentBasePrompt"),
                           value: p.agent_config?.base_instructions ? (
-                            <Tag color="blue">Configured</Tag>
+                            <Tag color="blue">{t("imGateway.field.configured")}</Tag>
                           ) : (
-                            <SecondaryInline>Global default</SecondaryInline>
+                            <SecondaryInline>{t("imGateway.field.globalDefault")}</SecondaryInline>
                           ),
                         },
                         {
-                          label: "Agent Developer/User",
+                          label: t("imGateway.field.agentDeveloperUser"),
                           value:
                             p.agent_config?.developer_instructions ||
                             p.agent_config?.user_instructions ? (
-                              <Tag color="purple">Configured</Tag>
+                              <Tag color="purple">{t("imGateway.field.configured")}</Tag>
                             ) : (
-                              <SecondaryInline>Global default</SecondaryInline>
+                              <SecondaryInline>{t("imGateway.field.globalDefault")}</SecondaryInline>
                             ),
                         },
                         ...(status?.reconnect_count != null && status.reconnect_count > 0
-                          ? [{ label: "Reconnects", value: status.reconnect_count }]
+                          ? [{ label: t("imGateway.field.reconnects"), value: status.reconnect_count }]
                           : []),
                         ...(status?.last_error
                           ? [
                               {
-                                label: "Last Error",
+                                label: t("imGateway.field.lastError"),
                                 value: (
                                   <Text type="danger" ellipsis style={{ maxWidth: 300 }}>
                                     {status.last_error}
@@ -1458,7 +1462,7 @@ function ConnectionsPanel({
       )}
 
       <Modal
-        title={editingProvider ? "Edit IM Provider" : "Add IM Provider"}
+        title={editingProvider ? t("imGateway.providerModal.editTitle") : t("imGateway.providerModal.addTitle")}
         open={addModalOpen}
         onOk={handleSaveProvider}
         onCancel={() => {
@@ -1481,9 +1485,9 @@ function ConnectionsPanel({
             current={createStep}
             style={{ marginBottom: 20 }}
             items={[
-              { title: "Type" },
-              { title: "Connect" },
-              { title: "Configure" },
+              { title: t("imGateway.providerModal.stepType") },
+              { title: t("imGateway.providerModal.stepConnect") },
+              { title: t("imGateway.providerModal.stepConfigure") },
             ]}
           />
         )}
@@ -1496,20 +1500,19 @@ function ConnectionsPanel({
           {!editingProvider && createStep === 0 ? (
             <Space direction="vertical" size={12} style={{ width: "100%" }}>
               <Text type="secondary">
-                Choose the IM platform first. Bifrost will only ask for platform-specific setup on
-                the next step.
+                {t("imGateway.providerModal.chooseTypeHint")}
               </Text>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
                 {([
                   {
                     type: "weixin" as const,
-                    title: "Weixin",
-                    desc: "Create the provider, then scan the QR code with Weixin.",
+                    title: t("imGateway.platform.weixin"),
+                    desc: t("imGateway.providerModal.weixinDesc"),
                   },
                   {
                     type: "feishu" as const,
-                    title: "Feishu",
-                    desc: "Scan a Lark CLI style QR code to create the bot app automatically.",
+                    title: t("imGateway.platform.feishu"),
+                    desc: t("imGateway.providerModal.feishuDesc"),
                   },
                 ]).map((option) => (
                   <Card
@@ -1548,17 +1551,17 @@ function ConnectionsPanel({
             <>
               <Form.Item
                 name="id"
-                label="Provider ID"
-                rules={[{ required: true, message: "Required" }]}
+                label={t("imGateway.field.providerId")}
+                rules={[{ required: true, message: t("common.required") }]}
               >
                 <Input
                   placeholder={nextProviderId(setupProviderType, providers)}
                   disabled={!!createdProvider || feishuAutoConnecting}
                 />
               </Form.Item>
-              <Form.Item name="display_name" label="Display Name">
+              <Form.Item name="display_name" label={t("imGateway.field.displayName")}>
                 <Input
-                  placeholder="Optional display name"
+                  placeholder={t("imGateway.field.displayNamePlaceholder")}
                   disabled={!!createdProvider || feishuAutoConnecting}
                 />
               </Form.Item>
@@ -1568,8 +1571,8 @@ function ConnectionsPanel({
                   showIcon
                   message={
                     createdProvider
-                      ? "Provider created. Complete the QR scan in the Weixin dialog."
-                      : "Create the provider first, then Bifrost will immediately show the Weixin QR code."
+                      ? t("imGateway.weixin.createdCompleteScan")
+                      : t("imGateway.weixin.createFirstHint")
                   }
                 />
               ) : (
@@ -1585,7 +1588,7 @@ function ConnectionsPanel({
                         target="_blank"
                         rel="noopener noreferrer"
                       >
-                        Open Setup Page
+                        {t("imGateway.feishu.openSetupPage")}
                       </Button>
                     </>
                   ) : feishuSetup?.status === "error" ? null : (
@@ -1605,12 +1608,12 @@ function ConnectionsPanel({
                     style={{ width: "100%" }}
                     message={
                       feishuSetup?.status === "confirmed"
-                        ? "App created. Bifrost has the App ID and Secret on the server."
+                        ? t("imGateway.feishu.setupConfirmed")
                         : feishuSetup?.status === "expired"
-                        ? "The setup QR code expired. Close and start again."
+                        ? t("imGateway.feishu.setupExpired")
                         : feishuSetup?.status === "error"
-                        ? "Failed to start Feishu setup."
-                        : "Create the bot app in the opened page. Bifrost will detect completion automatically."
+                        ? t("imGateway.feishu.setupError")
+                        : t("imGateway.feishu.setupPending")
                     }
                     description={
                       feishuSetup?.status === "error" ? (
@@ -1621,7 +1624,7 @@ function ConnectionsPanel({
                             loading={feishuSetupLoading}
                             onClick={() => void startFeishuSetupSession()}
                           >
-                            Retry Setup
+                            {t("imGateway.feishu.retrySetup")}
                           </Button>
                         </Space>
                       ) : feishuSetup?.appId ? (
@@ -1639,43 +1642,43 @@ function ConnectionsPanel({
               className="im-provider-edit-summary"
               style={{ marginBottom: 10 }}
             >
-              <Descriptions.Item label="Provider ID">
+              <Descriptions.Item label={t("imGateway.field.providerId")}>
                 <Text code>{editingProvider.id}</Text>
               </Descriptions.Item>
-              <Descriptions.Item label="Type">
+              <Descriptions.Item label={t("common.type")}>
                 <Tag>{editingProvider.provider_type}</Tag>
               </Descriptions.Item>
-              <Descriptions.Item label="App ID">
+              <Descriptions.Item label={t("imGateway.field.appId")}>
                 <Text code>
                   {editingProvider.app_id
                     ? `${editingProvider.app_id.slice(0, 8)}***`
                     : "-"}
                 </Text>
               </Descriptions.Item>
-              <Descriptions.Item label="Secret">
+              <Descriptions.Item label={t("imGateway.field.secret")}>
                 {editingProvider.secret_configured ? (
-                  <Tag color="green">Configured</Tag>
+                  <Tag color="green">{t("imGateway.field.configured")}</Tag>
                 ) : (
-                  <Tag color="red">Not Set</Tag>
+                  <Tag color="red">{t("imGateway.field.notSet")}</Tag>
                 )}
               </Descriptions.Item>
-              <Descriptions.Item label="Connection Mode">
+              <Descriptions.Item label={t("imGateway.field.connectionMode")}>
                 {editingProvider.event_connection_enabled
-                  ? "Long Connection"
-                  : "Webhook"}
+                  ? t("imGateway.connectionMode.longConnection")
+                  : t("imGateway.connectionMode.webhook")}
               </Descriptions.Item>
             </Descriptions>
           ) : (
             createdProvider ? (
               <Descriptions size="small" column={1} style={{ marginBottom: 16 }}>
-                <Descriptions.Item label="Provider ID">
+                <Descriptions.Item label={t("imGateway.field.providerId")}>
                   <Text code>{createdProvider.id}</Text>
                 </Descriptions.Item>
-                <Descriptions.Item label="Type">
+                <Descriptions.Item label={t("common.type")}>
                   <Tag>{createdProvider.provider_type}</Tag>
                 </Descriptions.Item>
-                <Descriptions.Item label="Connection">
-                  <Tag color="green">Connected</Tag>
+                <Descriptions.Item label={t("imGateway.field.connection")}>
+                  <Tag color="green">{t("imGateway.state.connected")}</Tag>
                 </Descriptions.Item>
               </Descriptions>
             ) : null
@@ -1687,52 +1690,55 @@ function ConnectionsPanel({
                   type="info"
                   showIcon
                   style={{ marginBottom: 14 }}
-                  message="Enable the Feishu group permission check"
+                  message={t("imGateway.feishuPermission.title")}
                   description={
                     <span>
-                      In Feishu Open Platform, subscribe to <Text code>im.chat.member.bot.added_v1</Text>{" "}
-                      and grant <Text code>im:chat.members:bot_access</Text>. Bifrost then checks{" "}
-                      <Text code>im:message.group_msg</Text> when the bot joins a group and posts a
-                      direct permission-application link only when it is missing.
+                      {t("imGateway.feishuPermission.part1")}
+                      <Text code>im.chat.member.bot.added_v1</Text>{" "}
+                      {t("imGateway.feishuPermission.part2")}
+                      <Text code>im:chat.members:bot_access</Text>
+                      {t("imGateway.feishuPermission.part3")}{" "}
+                      <Text code>im:message.group_msg</Text>
+                      {t("imGateway.feishuPermission.part4")}
                     </span>
                   }
                 />
               )}
-          <Form.Item name="display_name" label="Display Name">
-            <Input placeholder="Optional display name" />
+          <Form.Item name="display_name" label={t("imGateway.field.displayName")}>
+            <Input placeholder={t("imGateway.field.displayNamePlaceholder")} />
           </Form.Item>
-          <Form.Item name="enabled" label="Enabled" valuePropName="checked">
+          <Form.Item name="enabled" label={t("common.enabled")} valuePropName="checked">
             <Switch />
           </Form.Item>
-          <Form.Item name="owner_open_id" label="Owner Open ID">
-            <Input placeholder="Optional owner open_id" />
+          <Form.Item name="owner_open_id" label={t("imGateway.field.ownerOpenId")}>
+            <Input placeholder={t("imGateway.field.ownerOpenIdPlaceholder")} />
           </Form.Item>
           {editingProvider && (
             <>
-              <Form.Item name="app_id" label="App ID">
+              <Form.Item name="app_id" label={t("imGateway.field.appId")}>
                 <Input
                   placeholder={
                     selectedProviderType === "weixin"
-                      ? "Filled after QR login"
-                      : "Application ID"
+                      ? t("imGateway.field.appIdWeixinPlaceholder")
+                      : t("imGateway.field.appIdPlaceholder")
                   }
                   disabled={selectedProviderType === "weixin"}
                 />
               </Form.Item>
               <Form.Item
                 name="app_secret"
-                label={selectedProviderType === "weixin" ? "Bot Token" : "App Secret"}
+                label={selectedProviderType === "weixin" ? t("imGateway.field.botToken") : t("imGateway.field.appSecret")}
                 extra={
                   selectedProviderType === "weixin"
-                    ? "Filled by QR login. Manual replacement is only for debugging."
-                    : "Leave blank to keep the existing secret. Enter a new value to replace it."
+                    ? t("imGateway.field.botTokenHint")
+                    : t("imGateway.field.appSecretHint")
                 }
               >
                 <Input.Password
                   placeholder={
                     selectedProviderType === "weixin"
-                      ? "Filled by QR login"
-                      : "Application secret (stored securely)"
+                      ? t("imGateway.field.botTokenPlaceholder")
+                      : t("imGateway.field.appSecretPlaceholder")
                   }
                 />
               </Form.Item>
@@ -1740,10 +1746,10 @@ function ConnectionsPanel({
           )}
           <Form.Item
             name={["agent_config", "runner"]}
-            label="Agent Runner"
+            label={t("imGateway.field.agentRunner")}
             extra={
               <Text type="secondary">
-                Inherits: {inheritedRunner}. Custom runners are managed under Agent Runners.
+                {t("imGateway.form.runnerHint", { runner: inheritedRunner })}
               </Text>
             }
           >
@@ -1751,11 +1757,12 @@ function ConnectionsPanel({
           </Form.Item>
           <Form.Item
             name={["agent_config", "work_dir"]}
-            label="Agent Working Directory"
+            label={t("imGateway.field.agentWorkingDirectory")}
             extra={
               <Text type="secondary">
-                Inherits: <Text code>{inheritedWorkDir}</Text>. Enter a value to override for this
-                provider.
+                {t("imGateway.form.inheritsPrefix")}
+                <Text code>{inheritedWorkDir}</Text>
+                {t("imGateway.form.workDirOverrideHint")}
               </Text>
             }
           >
@@ -1765,29 +1772,27 @@ function ConnectionsPanel({
             name={["agent_config", "base_instructions"]}
             extra={
               <Text type="secondary">
-                Inherits the global value when empty. Sent only with the first message of a new
-                external-runner session.
+                {t("imGateway.form.baseInstructionsHint")}
               </Text>
             }
           >
             <LongTextModalField
-              label="Base Instructions / System Prompt"
+              label={t("imGateway.field.baseInstructions")}
               placeholder={inheritedBaseInstructions}
               testId="settings-im-provider-base-instructions"
-              copyPlaceholderLabel="Copy inherited into editor"
+              copyPlaceholderLabel={t("imGateway.form.copyInheritedIntoEditor")}
             />
           </Form.Item>
           <Form.Item
             name={["agent_config", "developer_instructions"]}
             extra={
               <Text type="secondary">
-                Inherits: {inheritedDeveloperInstructions}. Sent with every external-runner
-                message.
+                {t("imGateway.form.everyMessageHint", { value: inheritedDeveloperInstructions })}
               </Text>
             }
           >
             <LongTextModalField
-              label="Developer Instructions"
+              label={t("imGateway.field.developerInstructions")}
               placeholder={inheritedDeveloperInstructions}
               testId="settings-im-provider-developer-instructions"
             />
@@ -1796,12 +1801,12 @@ function ConnectionsPanel({
             name={["agent_config", "user_instructions"]}
             extra={
               <Text type="secondary">
-                Inherits: {inheritedUserInstructions}. Sent with every external-runner message.
+                {t("imGateway.form.everyMessageHint", { value: inheritedUserInstructions })}
               </Text>
             }
           >
             <LongTextModalField
-              label="User Instructions"
+              label={t("imGateway.field.userInstructions")}
               placeholder={inheritedUserInstructions}
               testId="settings-im-provider-user-instructions"
             />
@@ -1818,11 +1823,11 @@ function ConnectionsPanel({
         </Form>
       </Modal>
       <Modal
-        title="Scan Weixin QR"
+        title={t("imGateway.weixin.scanQr")}
         open={!!weixinLogin}
         footer={
           <Space>
-            <Button onClick={() => setWeixinLogin(null)}>Close</Button>
+            <Button onClick={() => setWeixinLogin(null)}>{t("common.close")}</Button>
             <Button
               type="primary"
               loading={weixinLoginLoading}
@@ -1830,7 +1835,7 @@ function ConnectionsPanel({
                 weixinLogin && void refreshWeixinLogin(weixinLogin.providerId, true)
               }
             >
-              Refresh QR
+              {t("imGateway.weixin.refreshQr")}
             </Button>
           </Space>
         }
@@ -1841,13 +1846,15 @@ function ConnectionsPanel({
             <QRCode value={weixinLogin.scanUrl} size={220} />
             <Text type="secondary">
               {weixinLogin.status === "checking"
-                ? "Checking authorization..."
+                ? t("imGateway.weixin.checkingAuthorization")
                 : weixinLogin.status === "expired"
-                ? "QR code expired. Refreshing automatically..."
-                : `Expires in about ${Math.max(
-                    0,
-                    Math.ceil((weixinLogin.expiresAt - Date.now()) / 1000),
-                  )} seconds. Scan with Weixin; Bifrost will connect automatically.`}
+                ? t("imGateway.weixin.qrExpiredRefreshing")
+                : t("imGateway.weixin.expiresIn", {
+                    seconds: Math.max(
+                      0,
+                      Math.ceil((weixinLogin.expiresAt - Date.now()) / 1000),
+                    ),
+                  })}
             </Text>
             <Text code style={{ wordBreak: "break-all" }}>
               {weixinLogin.scanUrl}
@@ -1872,6 +1879,7 @@ function TargetsPanel({
   loading: boolean;
   onRefresh: () => void;
 }) {
+  const { t } = useI18n();
   const [addModalOpen, setAddModalOpen] = useState(false);
   const [form] = Form.useForm();
 
@@ -1879,23 +1887,23 @@ function TargetsPanel({
     try {
       const values = await form.validateFields();
       await imGatewayApi.createTarget(values);
-      message.success("Target created");
+      message.success(t("imGateway.targets.created"));
       setAddModalOpen(false);
       form.resetFields();
       onRefresh();
     } catch (err) {
       if (err && typeof err === "object" && "errorFields" in err) return;
-      message.error("Failed to create target");
+      message.error(t("imGateway.targets.createFailed"));
     }
   };
 
   const handleDelete = async (id: string) => {
     try {
       await imGatewayApi.deleteTarget(id);
-      message.success("Target deleted");
+      message.success(t("imGateway.targets.deleted"));
       onRefresh();
     } catch {
-      message.error("Failed to delete target");
+      message.error(t("imGateway.targets.deleteFailed"));
     }
   };
 
@@ -1907,19 +1915,19 @@ function TargetsPanel({
       width: 160,
     },
     {
-      title: "Provider",
+      title: t("imGateway.targets.colProvider"),
       dataIndex: "provider_id",
       key: "provider_id",
       width: 140,
     },
     {
-      title: "ID Type",
+      title: t("imGateway.targets.colIdType"),
       dataIndex: "receive_id_type",
       key: "receive_id_type",
       width: 120,
     },
     {
-      title: "Receive ID",
+      title: t("imGateway.targets.colReceiveId"),
       dataIndex: "receive_id",
       key: "receive_id",
       render: (val: string) => (
@@ -1929,21 +1937,21 @@ function TargetsPanel({
       ),
     },
     {
-      title: "Enabled",
+      title: t("common.enabled"),
       dataIndex: "enabled",
       key: "enabled",
       width: 80,
       render: (val: boolean) => (
-        <Tag color={val ? "green" : "default"}>{val ? "Yes" : "No"}</Tag>
+        <Tag color={val ? "green" : "default"}>{val ? t("common.yes") : t("common.no")}</Tag>
       ),
     },
     {
-      title: "Actions",
+      title: t("common.actions"),
       key: "actions",
       width: 80,
       render: (_: unknown, record: ImTarget) => (
         <Popconfirm
-          title="Delete this target?"
+          title={t("imGateway.targets.deleteConfirm")}
           onConfirm={() => handleDelete(record.id)}
         >
           <Button size="small" danger icon={<DeleteOutlined />} />
@@ -1954,16 +1962,16 @@ function TargetsPanel({
 
   return (
     <div>
-      <PanelHeader description="Message targets define where to send notifications">
+      <PanelHeader description={t("imGateway.targets.description")}>
         <Button icon={<ReloadOutlined />} onClick={onRefresh} loading={loading}>
-          Refresh
+          {t("common.refresh")}
         </Button>
         <Button
           type="primary"
           icon={<PlusOutlined />}
           onClick={() => setAddModalOpen(true)}
         >
-          Add Target
+          {t("imGateway.targets.add")}
         </Button>
       </PanelHeader>
 
@@ -1974,35 +1982,35 @@ function TargetsPanel({
         size="small"
         loading={loading}
         pagination={false}
-        locale={{ emptyText: <Empty description="No targets configured" /> }}
+        locale={{ emptyText: <Empty description={t("imGateway.targets.empty")} /> }}
         scroll={{ x: 760 }}
       />
 
       <Modal
-        title="Add Target"
+        title={t("imGateway.targets.add")}
         open={addModalOpen}
         onOk={handleAdd}
         onCancel={() => {
           setAddModalOpen(false);
           form.resetFields();
         }}
-        okText="Create"
+        okText={t("common.create")}
       >
         <Form form={form} layout="vertical">
           <Form.Item
             name="id"
-            label="Target ID"
-            rules={[{ required: true, message: "Required" }]}
+            label={t("imGateway.targets.targetId")}
+            rules={[{ required: true, message: t("common.required") }]}
           >
-            <Input placeholder="e.g. oncall-group" />
+            <Input placeholder={t("imGateway.targets.targetIdPlaceholder")} />
           </Form.Item>
           <Form.Item
             name="provider_id"
-            label="Provider"
-            rules={[{ required: true, message: "Required" }]}
+            label={t("imGateway.targets.colProvider")}
+            rules={[{ required: true, message: t("common.required") }]}
           >
             <Select
-              placeholder="Select provider"
+              placeholder={t("imGateway.targets.selectProvider")}
               options={providers.map((p) => ({
                 label: p.display_name || p.id,
                 value: p.id,
@@ -2011,28 +2019,28 @@ function TargetsPanel({
           </Form.Item>
           <Form.Item
             name="receive_id_type"
-            label="Receive ID Type"
-            rules={[{ required: true, message: "Required" }]}
+            label={t("imGateway.targets.receiveIdType")}
+            rules={[{ required: true, message: t("common.required") }]}
           >
             <Select
-              placeholder="Select type"
+              placeholder={t("imGateway.targets.selectType")}
               options={[
-                { label: "Chat ID", value: "chat_id" },
-                { label: "User ID", value: "open_id" },
-                { label: "Email", value: "email" },
-                { label: "Union ID", value: "union_id" },
+                { label: t("imGateway.targets.idTypeChatId"), value: "chat_id" },
+                { label: t("imGateway.targets.idTypeUserId"), value: "open_id" },
+                { label: t("imGateway.targets.idTypeEmail"), value: "email" },
+                { label: t("imGateway.targets.idTypeUnionId"), value: "union_id" },
               ]}
             />
           </Form.Item>
           <Form.Item
             name="receive_id"
-            label="Receive ID"
-            rules={[{ required: true, message: "Required" }]}
+            label={t("imGateway.targets.colReceiveId")}
+            rules={[{ required: true, message: t("common.required") }]}
           >
-            <Input placeholder="e.g. oc_xxxxx" />
+            <Input placeholder={t("imGateway.targets.receiveIdPlaceholder")} />
           </Form.Item>
-          <Form.Item name="display_name" label="Display Name">
-            <Input placeholder="Optional display name" />
+          <Form.Item name="display_name" label={t("imGateway.field.displayName")}>
+            <Input placeholder={t("imGateway.field.displayNamePlaceholder")} />
           </Form.Item>
         </Form>
       </Modal>
@@ -2051,50 +2059,51 @@ function RoutesPanel({
   loading: boolean;
   onRefresh: () => void;
 }) {
+  const { t } = useI18n();
   const { token } = theme.useToken();
 
   const handlePause = async (id: string) => {
     try {
       await imGatewayApi.pauseRoute(id);
-      message.success("Route paused");
+      message.success(t("imGateway.routes.paused"));
       onRefresh();
     } catch {
-      message.error("Failed to pause route");
+      message.error(t("imGateway.routes.pauseFailed"));
     }
   };
 
   const handleResume = async (id: string) => {
     try {
       await imGatewayApi.resumeRoute(id);
-      message.success("Route resumed");
+      message.success(t("imGateway.routes.resumed"));
       onRefresh();
     } catch {
-      message.error("Failed to resume route");
+      message.error(t("imGateway.routes.resumeFailed"));
     }
   };
 
   const handleDelete = async (id: string) => {
     try {
       await imGatewayApi.deleteRoute(id);
-      message.success("Route deleted");
+      message.success(t("imGateway.routes.deleted"));
       onRefresh();
     } catch {
-      message.error("Failed to delete route");
+      message.error(t("imGateway.routes.deleteFailed"));
     }
   };
 
   return (
     <div>
-      <PanelHeader description="Event routes map incoming messages to script actions">
+      <PanelHeader description={t("imGateway.routes.description")}>
         <Button icon={<ReloadOutlined />} onClick={onRefresh} loading={loading}>
-          Refresh
+          {t("common.refresh")}
         </Button>
       </PanelHeader>
 
       {loading && routes.length === 0 ? (
         <Spin style={{ display: "block", margin: "40px auto" }} />
       ) : routes.length === 0 ? (
-        <Empty description="No routes configured" />
+        <Empty description={t("imGateway.routes.empty")} />
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
           {routes.map((r) => (
@@ -2107,14 +2116,14 @@ function RoutesPanel({
                   <RocketOutlined />
                   <span>{r.name || r.id}</span>
                   <Tag color={r.enabled ? "green" : "default"}>
-                    {r.enabled ? "Active" : "Paused"}
+                    {r.enabled ? t("imGateway.routes.active") : t("imGateway.routes.pausedState")}
                   </Tag>
                 </Space>
               }
               extra={
                 <Space wrap size={8}>
                   {r.enabled ? (
-                    <Tooltip title="Pause">
+                    <Tooltip title={t("imGateway.action.pause")}>
                       <Button
                         size="small"
                         icon={<PauseCircleOutlined />}
@@ -2122,7 +2131,7 @@ function RoutesPanel({
                       />
                     </Tooltip>
                   ) : (
-                    <Tooltip title="Resume">
+                    <Tooltip title={t("imGateway.action.resume")}>
                       <Button
                         size="small"
                         icon={<PlayCircleOutlined />}
@@ -2131,7 +2140,7 @@ function RoutesPanel({
                     </Tooltip>
                   )}
                   <Popconfirm
-                    title="Delete this route?"
+                    title={t("imGateway.routes.deleteConfirm")}
                     onConfirm={() => handleDelete(r.id)}
                   >
                     <Button size="small" danger icon={<DeleteOutlined />} />
@@ -2142,12 +2151,12 @@ function RoutesPanel({
               <DetailGrid
                 items={[
                   {
-                    label: "Provider",
+                    label: t("imGateway.targets.colProvider"),
                     value: <OverflowText value={r.provider_id} code width={180} />,
                   },
-                  { label: "Event", value: <Tag>{r.event_type}</Tag> },
+                  { label: t("imGateway.routes.event"), value: <Tag>{r.event_type}</Tag> },
                   {
-                    label: "Matcher",
+                    label: t("imGateway.routes.matcher"),
                     value: (
                       <Space wrap size={[4, 4]}>
                         {r.matcher?.regex && (
@@ -2167,8 +2176,8 @@ function RoutesPanel({
                       </Space>
                     ),
                   },
-                  { label: "Action", value: <Tag>{r.action?.type || "script"}</Tag> },
-                  { label: "Timeout", value: r.timeout_ms ? `${r.timeout_ms}ms` : "-" },
+                  { label: t("imGateway.routes.action"), value: <Tag>{r.action?.type || "script"}</Tag> },
+                  { label: t("imGateway.schedules.timeout"), value: r.timeout_ms ? `${r.timeout_ms}ms` : "-" },
                 ]}
               />
             </Card>
@@ -2196,6 +2205,7 @@ function SchedulesPanel({
   loading: boolean;
   onRefresh: () => void;
 }) {
+  const { t } = useI18n();
   const [addModalOpen, setAddModalOpen] = useState(false);
   const [detailOpen, setDetailOpen] = useState(false);
   const [selectedSchedule, setSelectedSchedule] = useState<ImSchedule | null>(null);
@@ -2225,7 +2235,7 @@ function SchedulesPanel({
         .filter((provider) => provider.owner_open_id?.trim())
         .map((provider) => ({
           value: `owner:${provider.id}`,
-          label: `${provider.display_name || provider.id} · Owner`,
+          label: `${provider.display_name || provider.id} · ${t("imGateway.schedules.ownerSuffix")}`,
         })),
       ...targets
         .filter((target) => target.enabled)
@@ -2234,7 +2244,7 @@ function SchedulesPanel({
           label: `${target.display_name || target.id} · ${providerById.get(target.provider_id)?.display_name || target.provider_id}`,
         })),
     ],
-    [providerById, providers, targets],
+    [providerById, providers, targets, t],
   );
 
   const resolveChannelPayload = (value?: string) => {
@@ -2323,42 +2333,42 @@ function SchedulesPanel({
       }
       const preview = await imGatewayApi.previewSchedule(payload);
       Modal.confirm({
-        title: "Confirm schedule",
+        title: t("imGateway.schedules.confirmTitle"),
         width: 620,
         content: (
           <div>
-            <p>Review the normalized schedule before creating it.</p>
+            <p>{t("imGateway.schedules.confirmHint")}</p>
             <Descriptions size="small" bordered column={1}>
-              <Descriptions.Item label="Task">{preview.schedule.name}</Descriptions.Item>
-              <Descriptions.Item label="Runner">
-                {preview.schedule.agent?.runner_id || externalCliConfig?.defaultRunnerId || "Default"}
+              <Descriptions.Item label={t("imGateway.schedules.task")}>{preview.schedule.name}</Descriptions.Item>
+              <Descriptions.Item label={t("imGateway.schedules.runner")}>
+                {preview.schedule.agent?.runner_id || externalCliConfig?.defaultRunnerId || t("imGateway.schedules.defaultRunner")}
               </Descriptions.Item>
-              <Descriptions.Item label="Destination">
+              <Descriptions.Item label={t("imGateway.schedules.destination")}>
                 {renderScheduleChannel(preview.schedule)} · {preview.schedule.message_channel?.target_mode}
               </Descriptions.Item>
-              <Descriptions.Item label="Next runs">
+              <Descriptions.Item label={t("imGateway.schedules.nextRuns")}>
                 {preview.upcoming_run_times.map((timestamp) => new Date(timestamp).toLocaleString()).join("; ")}
               </Descriptions.Item>
             </Descriptions>
           </div>
         ),
-        okText: "Confirm and create",
+        okText: t("imGateway.schedules.confirmAndCreate"),
         onOk: async () => {
           try {
             await imGatewayApi.createSchedule(preview.schedule);
-            message.success("Schedule created");
+            message.success(t("imGateway.schedules.created"));
             setAddModalOpen(false);
             form.resetFields();
             onRefresh();
           } catch (err) {
-            message.error(normalizeApiErrorMessage(err, "Failed to create schedule"));
+            message.error(normalizeApiErrorMessage(err, t("imGateway.schedules.createFailed")));
             throw err;
           }
         },
       });
     } catch (err) {
       if ((err as { errorFields?: unknown }).errorFields) return;
-      message.error(err instanceof Error ? err.message : "Failed to create schedule");
+      message.error(err instanceof Error ? err.message : t("imGateway.schedules.createFailed"));
     }
   };
 
@@ -2369,7 +2379,7 @@ function SchedulesPanel({
     try {
       setScheduleRuns(await imGatewayApi.getScheduleRuns(schedule.id));
     } catch (err) {
-      message.error(err instanceof Error ? err.message : "Failed to load schedule runs");
+      message.error(err instanceof Error ? err.message : t("imGateway.schedules.loadRunsFailed"));
       setScheduleRuns([]);
     } finally {
       setRunsLoading(false);
@@ -2379,77 +2389,77 @@ function SchedulesPanel({
   const handlePause = async (id: string) => {
     try {
       await imGatewayApi.pauseSchedule(id);
-      message.success("Schedule paused");
+      message.success(t("imGateway.schedules.paused"));
       onRefresh();
     } catch {
-      message.error("Failed to pause schedule");
+      message.error(t("imGateway.schedules.pauseFailed"));
     }
   };
 
   const handleResume = async (id: string) => {
     try {
       await imGatewayApi.resumeSchedule(id);
-      message.success("Schedule resumed");
+      message.success(t("imGateway.schedules.resumed"));
       onRefresh();
     } catch {
-      message.error("Failed to resume schedule");
+      message.error(t("imGateway.schedules.resumeFailed"));
     }
   };
 
   const handleRun = async (schedule: ImSchedule) => {
     try {
       await imGatewayApi.runSchedule(schedule.id);
-      message.success("Schedule triggered");
+      message.success(t("imGateway.schedules.triggered"));
       onRefresh();
       await openScheduleDetail(schedule);
     } catch {
-      message.error("Failed to trigger schedule");
+      message.error(t("imGateway.schedules.triggerFailed"));
     }
   };
 
   const handleDelete = async (id: string) => {
     try {
       await imGatewayApi.deleteSchedule(id);
-      message.success("Schedule deleted");
+      message.success(t("imGateway.schedules.deleted"));
       onRefresh();
     } catch {
-      message.error("Failed to delete schedule");
+      message.error(t("imGateway.schedules.deleteFailed"));
     }
   };
 
   const columns = [
     {
-      title: "Name",
+      title: t("common.name"),
       dataIndex: "name",
       key: "name",
       width: 160,
     },
     {
-      title: "Type",
+      title: t("common.type"),
       dataIndex: "task_type",
       key: "task_type",
       width: 90,
       render: (val: string | undefined) => (
         <Tag color={val === "agent" ? "blue" : "default"}>
-          {val === "agent" ? "Agent" : "Script"}
+          {val === "agent" ? t("imGateway.taskType.agent") : t("imGateway.taskType.script")}
         </Tag>
       ),
     },
     {
-      title: "IM Channel",
+      title: t("imGateway.schedules.imChannel"),
       key: "message_channel",
       width: 140,
       render: (_: unknown, record: ImSchedule) => renderScheduleChannel(record),
     },
     {
-      title: "Runner",
+      title: t("imGateway.schedules.runner"),
       key: "runner",
       width: 130,
       render: (_: unknown, record: ImSchedule) =>
         record.task_type === "agent" ? record.agent?.runner_id || externalCliConfig?.defaultRunnerId || "Codex" : "-",
     },
     {
-      title: "Trigger",
+      title: t("imGateway.schedules.trigger"),
       key: "trigger",
       width: 160,
       render: (_: unknown, record: ImSchedule) => {
@@ -2457,34 +2467,34 @@ function SchedulesPanel({
           return <Text code style={{ fontSize: 12 }}>{record.trigger.expr}</Text>;
         }
         if (record.trigger?.type === "interval" && record.trigger.every_ms) {
-          return <Text code style={{ fontSize: 12 }}>every {record.trigger.every_ms}ms</Text>;
+          return <Text code style={{ fontSize: 12 }}>{t("imGateway.schedules.everyMs", { ms: record.trigger.every_ms })}</Text>;
         }
         return "-";
       },
     },
     {
-      title: "Enabled",
+      title: t("common.enabled"),
       dataIndex: "enabled",
       key: "enabled",
       width: 80,
       render: (val: boolean) => (
-        <Tag color={val ? "green" : "default"}>{val ? "Yes" : "No"}</Tag>
+        <Tag color={val ? "green" : "default"}>{val ? t("common.yes") : t("common.no")}</Tag>
       ),
     },
     {
-      title: "Timeout",
+      title: t("imGateway.schedules.timeout"),
       dataIndex: "timeout_ms",
       key: "timeout_ms",
       width: 100,
       render: (val: number) => (val ? `${val}ms` : "-"),
     },
     {
-      title: "Actions",
+      title: t("common.actions"),
       key: "actions",
       width: 160,
       render: (_: unknown, record: ImSchedule) => (
         <Space size="small" onClick={(event) => event.stopPropagation()}>
-          <Tooltip title="Run now">
+          <Tooltip title={t("imGateway.schedules.runNow")}>
             <Button
               size="small"
               icon={<PlayCircleOutlined />}
@@ -2492,7 +2502,7 @@ function SchedulesPanel({
             />
           </Tooltip>
           {record.enabled ? (
-            <Tooltip title="Pause">
+            <Tooltip title={t("imGateway.action.pause")}>
               <Button
                 size="small"
                 icon={<PauseCircleOutlined />}
@@ -2500,7 +2510,7 @@ function SchedulesPanel({
               />
             </Tooltip>
           ) : (
-            <Tooltip title="Resume">
+            <Tooltip title={t("imGateway.action.resume")}>
               <Button
                 size="small"
                 type="primary"
@@ -2511,7 +2521,7 @@ function SchedulesPanel({
             </Tooltip>
           )}
           <Popconfirm
-            title="Delete this schedule?"
+            title={t("imGateway.schedules.deleteConfirm")}
             onConfirm={() => handleDelete(record.id)}
           >
             <Button size="small" danger icon={<DeleteOutlined />} />
@@ -2523,7 +2533,7 @@ function SchedulesPanel({
 
   return (
     <div>
-      <PanelHeader description="Scheduled tasks run scripts or Agent prompts on a cron/interval basis">
+      <PanelHeader description={t("imGateway.schedules.description")}>
         <Button
           type="primary"
           icon={<PlusOutlined />}
@@ -2544,10 +2554,10 @@ function SchedulesPanel({
             setAddModalOpen(true);
           }}
         >
-          Add
+          {t("common.add")}
         </Button>
         <Button icon={<ReloadOutlined />} onClick={onRefresh} loading={loading}>
-          Refresh
+          {t("common.refresh")}
         </Button>
       </PanelHeader>
 
@@ -2562,49 +2572,49 @@ function SchedulesPanel({
           onClick: () => openScheduleDetail(record),
           style: { cursor: "pointer" },
         })}
-        locale={{ emptyText: <Empty description="No schedules configured" /> }}
+        locale={{ emptyText: <Empty description={t("imGateway.schedules.empty")} /> }}
         scroll={{ x: 1020 }}
       />
 
       <Modal
-        title="Add Schedule"
+        title={t("imGateway.schedules.addTitle")}
         open={addModalOpen}
         onCancel={() => setAddModalOpen(false)}
         onOk={handleAdd}
-        okText="Create"
+        okText={t("common.create")}
         width={720}
         destroyOnHidden
       >
         <Form form={form} layout="vertical">
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
             <Form.Item name="id" label="ID">
-              <Input placeholder="Optional stable id" />
+              <Input placeholder={t("imGateway.schedules.idPlaceholder")} />
             </Form.Item>
             <Form.Item
               name="name"
-              label="Name"
-              rules={[{ required: true, message: "Name is required" }]}
+              label={t("common.name")}
+              rules={[{ required: true, message: t("imGateway.schedules.nameRequired") }]}
             >
-              <Input placeholder="Daily summary" />
+              <Input placeholder={t("imGateway.schedules.namePlaceholder")} />
             </Form.Item>
-            <Form.Item name="task_type" label="Task Type" initialValue="script">
+            <Form.Item name="task_type" label={t("imGateway.schedules.taskType")} initialValue="script">
               <Select
                 options={[
-                  { value: "script", label: "Script" },
-                  { value: "agent", label: "Agent" },
+                  { value: "script", label: t("imGateway.taskType.script") },
+                  { value: "agent", label: t("imGateway.taskType.agent") },
                 ]}
               />
             </Form.Item>
             <Form.Item
               name="target_channel"
-              label="IM Channel"
+              label={t("imGateway.schedules.imChannel")}
               rules={[
                 ({ getFieldValue }) => ({
                   validator(_, value) {
                     if (value) return Promise.resolve();
                     const currentTaskType = getFieldValue("task_type");
                     if (currentTaskType === "agent" || currentTaskType === "script") {
-                      return Promise.reject(new Error("IM channel is required"));
+                      return Promise.reject(new Error(t("imGateway.schedules.imChannelRequired")));
                     }
                     return Promise.resolve();
                   },
@@ -2613,14 +2623,14 @@ function SchedulesPanel({
             >
               <Select
                 allowClear
-                placeholder="Select a connection"
+                placeholder={t("imGateway.schedules.selectConnection")}
                 options={channelOptions}
               />
             </Form.Item>
-            <Form.Item name="trigger_type" label="Trigger" initialValue="interval">
+            <Form.Item name="trigger_type" label={t("imGateway.schedules.trigger")} initialValue="interval">
               <Select
                 options={[
-                  { value: "interval", label: "Interval" },
+                  { value: "interval", label: t("imGateway.schedules.interval") },
                   { value: "cron", label: "Cron" },
                 ]}
               />
@@ -2628,8 +2638,8 @@ function SchedulesPanel({
             {triggerType === "interval" ? (
               <Form.Item
                 name="every_ms"
-                label="Every (ms)"
-                rules={[{ required: true, message: "Interval is required" }]}
+                label={t("imGateway.schedules.everyMsLabel")}
+                rules={[{ required: true, message: t("imGateway.schedules.intervalRequired") }]}
               >
                 <Input type="number" min={1} />
               </Form.Item>
@@ -2637,71 +2647,71 @@ function SchedulesPanel({
               <Form.Item
                 name="cron_expr"
                 label="Cron"
-                rules={[{ required: true, message: "Cron expression is required" }]}
+                rules={[{ required: true, message: t("imGateway.schedules.cronRequired") }]}
               >
                 <Input placeholder="*/5 * * * *" />
               </Form.Item>
             )}
             {triggerType === "cron" && (
-              <Form.Item name="timezone" label="Timezone">
+              <Form.Item name="timezone" label={t("imGateway.schedules.timezone")}>
                 <Input placeholder="UTC" />
               </Form.Item>
             )}
-            <Form.Item name="timeout_ms" label="Timeout (ms)">
+            <Form.Item name="timeout_ms" label={t("imGateway.schedules.timeoutMs")}>
               <Input type="number" min={1} />
             </Form.Item>
-            <Form.Item name="max_output_bytes" label="Max Output Bytes">
+            <Form.Item name="max_output_bytes" label={t("imGateway.schedules.maxOutputBytes")}>
               <Input type="number" min={1} />
             </Form.Item>
-            <Form.Item name="enabled" label="Enabled" valuePropName="checked">
+            <Form.Item name="enabled" label={t("common.enabled")} valuePropName="checked">
               <Switch />
             </Form.Item>
-            <Form.Item name="idempotency_key" label="Idempotency Key">
-              <Input placeholder="Optional stable create key" />
+            <Form.Item name="idempotency_key" label={t("imGateway.schedules.idempotencyKey")}>
+              <Input placeholder={t("imGateway.schedules.idempotencyKeyPlaceholder")} />
             </Form.Item>
-            <Form.Item name="concurrency_policy" label="Concurrency">
+            <Form.Item name="concurrency_policy" label={t("imGateway.schedules.concurrency")}>
               <Select
                 options={[
-                  { value: "skip_if_running", label: "Skip if running" },
-                  { value: "forbid", label: "Reject overlap" },
-                  { value: "queue_one", label: "Queue one" },
+                  { value: "skip_if_running", label: t("imGateway.schedules.concurrencySkip") },
+                  { value: "forbid", label: t("imGateway.schedules.concurrencyForbid") },
+                  { value: "queue_one", label: t("imGateway.schedules.concurrencyQueueOne") },
                 ]}
               />
             </Form.Item>
-            <Form.Item name="retry_max" label="Max Retries">
+            <Form.Item name="retry_max" label={t("imGateway.schedules.maxRetries")}>
               <Input type="number" min={0} max={10} />
             </Form.Item>
-            <Form.Item name="retry_delay_ms" label="Retry Delay (ms)">
+            <Form.Item name="retry_delay_ms" label={t("imGateway.schedules.retryDelayMs")}>
               <Input type="number" min={0} max={86400000} />
             </Form.Item>
           </div>
 
           {taskType === "agent" ? (
             <>
-              <Form.Item name="agent_runner_id" label="Runner" initialValue={externalCliConfig?.defaultRunnerId || "Codex"}>
+              <Form.Item name="agent_runner_id" label={t("imGateway.schedules.runner")} initialValue={externalCliConfig?.defaultRunnerId || "Codex"}>
                 <Select options={scheduleRunnerOptions} />
               </Form.Item>
               {selectedRunnerIsChatGptWeb && (
-                <Form.Item name="agent_initial_prompt" label="First-round Prompt">
+                <Form.Item name="agent_initial_prompt" label={t("imGateway.schedules.firstRoundPrompt")}>
                   <Input.TextArea
                     rows={3}
-                    placeholder="Optional persona or initialization prompt for this ChatGPT Web Runner"
+                    placeholder={t("imGateway.schedules.firstRoundPromptPlaceholder")}
                   />
                 </Form.Item>
               )}
               <Form.Item
                 name="agent_prompt"
-                label="Preset Prompt"
-                rules={[{ required: true, message: "Preset prompt is required" }]}
+                label={t("imGateway.schedules.presetPrompt")}
+                rules={[{ required: true, message: t("imGateway.schedules.presetPromptRequired") }]}
               >
-                <Input.TextArea rows={5} placeholder="Run the scheduled Agent task..." />
+                <Input.TextArea rows={5} placeholder={t("imGateway.schedules.presetPromptPlaceholder")} />
               </Form.Item>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-                <Form.Item name="agent_session_key" label="Session Key">
-                  <Input placeholder="Optional session key" />
+                <Form.Item name="agent_session_key" label={t("imGateway.schedules.sessionKey")}>
+                  <Input placeholder={t("imGateway.schedules.sessionKeyPlaceholder")} />
                 </Form.Item>
-                <Form.Item name="agent_work_dir" label="Default Execution Directory">
-                  <Input placeholder="Project path used for runner execution" />
+                <Form.Item name="agent_work_dir" label={t("imGateway.schedules.defaultExecutionDir")}>
+                  <Input placeholder={t("imGateway.schedules.defaultExecutionDirPlaceholder")} />
                 </Form.Item>
               </div>
             </>
@@ -2709,12 +2719,12 @@ function SchedulesPanel({
             <>
               <Form.Item
                 name="script_text"
-                label="Script Text"
+                label={t("imGateway.schedules.scriptText")}
                 rules={[
                   ({ getFieldValue }) => ({
                     validator(_, value) {
                       if (value || getFieldValue("script_file")) return Promise.resolve();
-                      return Promise.reject(new Error("Script text or file is required"));
+                      return Promise.reject(new Error(t("imGateway.schedules.scriptRequired")));
                     },
                   }),
                 ]}
@@ -2722,11 +2732,11 @@ function SchedulesPanel({
                 <Input.TextArea rows={5} placeholder="echo hello" />
               </Form.Item>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-                <Form.Item name="script_file" label="Script File">
+                <Form.Item name="script_file" label={t("imGateway.schedules.scriptFile")}>
                   <Input placeholder="/path/to/script.sh" />
                 </Form.Item>
-                <Form.Item name="cwd" label="Working Directory">
-                  <Input placeholder="Optional cwd" />
+                <Form.Item name="cwd" label={t("imGateway.schedules.workingDirectory")}>
+                  <Input placeholder={t("imGateway.schedules.cwdPlaceholder")} />
                 </Form.Item>
               </div>
             </>
@@ -2764,6 +2774,7 @@ function ScheduleDetailModal({
   onClose: () => void;
   onRefresh: () => void;
 }) {
+  const { t } = useI18n();
   if (!schedule) return null;
 
   const renderTime = (ts?: number) => {
@@ -2808,15 +2819,15 @@ function ScheduleDetailModal({
 
   return (
     <Modal
-      title={`Schedule Detail · ${schedule.name}`}
+      title={`${t("imGateway.schedules.detailTitle")} · ${schedule.name}`}
       open={open}
       onCancel={onClose}
       footer={[
         <Button key="refresh" icon={<ReloadOutlined />} onClick={onRefresh} loading={loading}>
-          Refresh
+          {t("common.refresh")}
         </Button>,
         <Button key="close" onClick={onClose}>
-          Close
+          {t("common.close")}
         </Button>,
       ]}
       width={920}
@@ -2824,41 +2835,41 @@ function ScheduleDetailModal({
     >
       <Descriptions size="small" bordered column={2}>
         <Descriptions.Item label="ID">{schedule.id}</Descriptions.Item>
-        <Descriptions.Item label="Type">
+        <Descriptions.Item label={t("common.type")}>
           <Tag color={schedule.task_type === "agent" ? "blue" : "default"}>
-            {schedule.task_type === "agent" ? "Agent" : "Script"}
+            {schedule.task_type === "agent" ? t("imGateway.taskType.agent") : t("imGateway.taskType.script")}
           </Tag>
         </Descriptions.Item>
-        <Descriptions.Item label="Enabled">
-          {schedule.enabled ? "Yes" : "No"}
+        <Descriptions.Item label={t("common.enabled")}>
+          {schedule.enabled ? t("common.yes") : t("common.no")}
         </Descriptions.Item>
-        <Descriptions.Item label="IM Channel">{renderTarget()}</Descriptions.Item>
+        <Descriptions.Item label={t("imGateway.schedules.imChannel")}>{renderTarget()}</Descriptions.Item>
         {schedule.task_type === "agent" && (
-          <Descriptions.Item label="Runner">
-            {schedule.agent?.runner_id || "Default external runner"}
+          <Descriptions.Item label={t("imGateway.schedules.runner")}>
+            {schedule.agent?.runner_id || t("imGateway.schedules.defaultExternalRunner")}
           </Descriptions.Item>
         )}
         {schedule.task_type === "agent" && (
-          <Descriptions.Item label="Conversation">{renderConversationRef()}</Descriptions.Item>
+          <Descriptions.Item label={t("imGateway.schedules.conversation")}>{renderConversationRef()}</Descriptions.Item>
         )}
-        <Descriptions.Item label="Trigger">
+        <Descriptions.Item label={t("imGateway.schedules.trigger")}>
           {schedule.trigger.type === "cron"
             ? `${schedule.trigger.expr || "-"} (${schedule.trigger.timezone || "UTC"})`
-            : `every ${schedule.trigger.every_ms}ms`}
+            : t("imGateway.schedules.everyMs", { ms: schedule.trigger.every_ms })}
         </Descriptions.Item>
-        <Descriptions.Item label="Next Run">{renderTime(schedule.next_run_at)}</Descriptions.Item>
-        <Descriptions.Item label="Last Run">{renderTime(schedule.last_run_at)}</Descriptions.Item>
-        <Descriptions.Item label="Last Status">
+        <Descriptions.Item label={t("imGateway.schedules.nextRun")}>{renderTime(schedule.next_run_at)}</Descriptions.Item>
+        <Descriptions.Item label={t("imGateway.schedules.lastRun")}>{renderTime(schedule.last_run_at)}</Descriptions.Item>
+        <Descriptions.Item label={t("imGateway.schedules.lastStatus")}>
           {schedule.last_run_status || "-"}
         </Descriptions.Item>
-        <Descriptions.Item label="Consecutive Failures">
+        <Descriptions.Item label={t("imGateway.schedules.consecutiveFailures")}>
           {schedule.consecutive_failures || 0}
         </Descriptions.Item>
-        <Descriptions.Item label="Timeout">{schedule.timeout_ms}ms</Descriptions.Item>
+        <Descriptions.Item label={t("imGateway.schedules.timeout")}>{schedule.timeout_ms}ms</Descriptions.Item>
       </Descriptions>
 
       <div style={{ marginTop: 16 }}>
-        <Text strong>Task</Text>
+        <Text strong>{t("imGateway.schedules.task")}</Text>
         <div style={{ marginTop: 8 }}>
           {schedule.task_type === "agent"
             ? renderBlock(schedule.agent?.prompt)
@@ -2867,17 +2878,17 @@ function ScheduleDetailModal({
       </div>
       {schedule.task_type === "agent" && schedule.agent?.initial_prompt && (
         <div style={{ marginTop: 16 }}>
-          <Text strong>First-round Prompt</Text>
+          <Text strong>{t("imGateway.schedules.firstRoundPrompt")}</Text>
           <div style={{ marginTop: 8 }}>{renderBlock(schedule.agent.initial_prompt)}</div>
         </div>
       )}
 
       <div style={{ marginTop: 20, marginBottom: 8 }}>
-        <Text strong>Run History</Text>
+        <Text strong>{t("imGateway.schedules.runHistory")}</Text>
       </div>
       <Spin spinning={loading}>
         {runs.length === 0 ? (
-          <Empty description="No runs yet" />
+          <Empty description={t("imGateway.schedules.noRuns")} />
         ) : (
           <Space direction="vertical" style={{ width: "100%" }} size={12}>
             {runs
@@ -2894,6 +2905,7 @@ function ScheduleDetailModal({
 }
 
 function RunDetailCard({ run }: { run: ImTaskRun }) {
+  const { t } = useI18n();
   const isAgent = run.task_type === "agent" || !!run.agent_final_response;
   const formatRunTs = (ts?: number) => {
     if (!ts) return "-";
@@ -2920,35 +2932,35 @@ function RunDetailCard({ run }: { run: ImTaskRun }) {
   return (
     <Card size="small" title={`${run.run_id} · ${run.status}`}>
       <Descriptions size="small" column={3} bordered>
-        <Descriptions.Item label="Run ID">{run.run_id}</Descriptions.Item>
-        <Descriptions.Item label="Type">
-          <Tag color={isAgent ? "blue" : "default"}>{isAgent ? "Agent" : "Script"}</Tag>
+        <Descriptions.Item label={t("imGateway.run.runId")}>{run.run_id}</Descriptions.Item>
+        <Descriptions.Item label={t("common.type")}>
+          <Tag color={isAgent ? "blue" : "default"}>{isAgent ? t("imGateway.taskType.agent") : t("imGateway.taskType.script")}</Tag>
         </Descriptions.Item>
-        <Descriptions.Item label="Status">
+        <Descriptions.Item label={t("common.status")}>
           <Tag color={run.status === "success" || run.status === "completed" ? "green" : run.status === "failed" || run.status === "error" ? "red" : "processing"}>
             {run.status}
           </Tag>
         </Descriptions.Item>
-        <Descriptions.Item label="Source">{run.trigger_source}</Descriptions.Item>
-        <Descriptions.Item label="Schedule">{run.schedule_id || "-"}</Descriptions.Item>
-        <Descriptions.Item label="Route">{run.route_id || "-"}</Descriptions.Item>
-        <Descriptions.Item label="Provider">{run.provider_id || "-"}</Descriptions.Item>
-        <Descriptions.Item label="Target">{run.target_id || "-"}</Descriptions.Item>
+        <Descriptions.Item label={t("imGateway.run.source")}>{run.trigger_source}</Descriptions.Item>
+        <Descriptions.Item label={t("imGateway.run.schedule")}>{run.schedule_id || "-"}</Descriptions.Item>
+        <Descriptions.Item label={t("imGateway.run.route")}>{run.route_id || "-"}</Descriptions.Item>
+        <Descriptions.Item label={t("imGateway.targets.colProvider")}>{run.provider_id || "-"}</Descriptions.Item>
+        <Descriptions.Item label={t("imGateway.run.target")}>{run.target_id || "-"}</Descriptions.Item>
         {isAgent && (
-          <Descriptions.Item label="Runner">
-            {run.runner_id || "Default external runner"}
+          <Descriptions.Item label={t("imGateway.schedules.runner")}>
+            {run.runner_id || t("imGateway.schedules.defaultExternalRunner")}
           </Descriptions.Item>
         )}
-        <Descriptions.Item label="Started">
+        <Descriptions.Item label={t("imGateway.run.started")}>
           {formatRunTs(run.started_at)}
         </Descriptions.Item>
-        <Descriptions.Item label="Ended">
+        <Descriptions.Item label={t("imGateway.run.ended")}>
           {formatRunTs(run.ended_at)}
         </Descriptions.Item>
-        <Descriptions.Item label="Duration">
+        <Descriptions.Item label={t("imGateway.run.duration")}>
           {run.duration_ms !== undefined ? `${run.duration_ms}ms` : "-"}
         </Descriptions.Item>
-        <Descriptions.Item label="Exit Code">
+        <Descriptions.Item label={t("imGateway.run.exitCode")}>
           {run.exit_code !== undefined ? run.exit_code : "-"}
         </Descriptions.Item>
         <Descriptions.Item label="Stdout SHA1">
@@ -2957,22 +2969,22 @@ function RunDetailCard({ run }: { run: ImTaskRun }) {
         <Descriptions.Item label="Stderr SHA1">
           <Text code>{run.stderr_digest || "-"}</Text>
         </Descriptions.Item>
-        <Descriptions.Item label="Error">{run.error || "-"}</Descriptions.Item>
+        <Descriptions.Item label={t("common.error")}>{run.error || "-"}</Descriptions.Item>
       </Descriptions>
 
       {isAgent ? (
         <Space direction="vertical" style={{ width: "100%", marginTop: 12 }} size={12}>
           <div>
-            <Text strong>Input</Text>
+            <Text strong>{t("imGateway.run.input")}</Text>
             <div style={{ marginTop: 6 }}>{renderBlock(run.input_preview)}</div>
           </div>
           <div>
-            <Text strong>Final Result</Text>
+            <Text strong>{t("imGateway.run.finalResult")}</Text>
             <div style={{ marginTop: 6 }}>{renderBlock(run.agent_final_response || run.stdout_preview)}</div>
           </div>
           {run.agent_plan_steps && run.agent_plan_steps.length > 0 && (
             <div>
-              <Text strong>Plan Trace</Text>
+              <Text strong>{t("imGateway.run.planTrace")}</Text>
               <div style={{ marginTop: 6 }}>
                 {run.agent_plan_steps.map((step, idx) => (
                   <div key={`${step.step}-${idx}`}>
@@ -2985,14 +2997,14 @@ function RunDetailCard({ run }: { run: ImTaskRun }) {
           )}
           {run.agent_tool_calls && run.agent_tool_calls.length > 0 && (
             <div>
-              <Text strong>Tool Calls</Text>
+              <Text strong>{t("imGateway.run.toolCalls")}</Text>
               <Space direction="vertical" style={{ width: "100%", marginTop: 6 }} size={8}>
                 {run.agent_tool_calls.map((tool, idx) => (
-                  <Card key={`${tool.tool_name}-${idx}`} size="small" type="inner" title={`${tool.tool_name} · ${tool.success ? "success" : "failed"}`}>
-                    <Text type="secondary">Arguments</Text>
+                  <Card key={`${tool.tool_name}-${idx}`} size="small" type="inner" title={`${tool.tool_name} · ${tool.success ? t("imGateway.run.toolSuccess") : t("imGateway.run.toolFailed")}`}>
+                    <Text type="secondary">{t("imGateway.run.arguments")}</Text>
                     {renderBlock(tool.arguments)}
                     <div style={{ marginTop: 8 }}>
-                      <Text type="secondary">Result</Text>
+                      <Text type="secondary">{t("imGateway.run.result")}</Text>
                     </div>
                     {renderBlock(tool.result)}
                   </Card>
@@ -3004,7 +3016,7 @@ function RunDetailCard({ run }: { run: ImTaskRun }) {
       ) : (
         <Space direction="vertical" style={{ width: "100%", marginTop: 12 }} size={12}>
           <div>
-            <Text strong>Input</Text>
+            <Text strong>{t("imGateway.run.input")}</Text>
             <div style={{ marginTop: 6 }}>{renderBlock(run.input_preview)}</div>
           </div>
           <div>
@@ -3034,6 +3046,7 @@ function HistoryPanel({
   loading: boolean;
   onRefresh: () => void;
 }) {
+  const { t } = useI18n();
   const [selectedRun, setSelectedRun] = useState<ImTaskRun | null>(null);
   const formatTs = (ts?: number) => {
     if (!ts) return "-";
@@ -3055,27 +3068,27 @@ function HistoryPanel({
 
   const eventColumns = [
     {
-      title: "Event ID",
+      title: t("imGateway.history.eventId"),
       dataIndex: "event_id",
       key: "event_id",
       width: 160,
       render: (val: string) => renderOverflowText(val, { code: true, width: 130 }),
     },
     {
-      title: "Provider",
+      title: t("imGateway.targets.colProvider"),
       dataIndex: "provider_id",
       key: "provider_id",
       width: 120,
     },
     {
-      title: "Event Type",
+      title: t("imGateway.history.eventType"),
       dataIndex: "event_type",
       key: "event_type",
       width: 170,
       render: (val: string) => <Tag>{val}</Tag>,
     },
     {
-      title: "Source",
+      title: t("imGateway.run.source"),
       key: "source",
       width: 360,
       render: (_: unknown, record: ImEvent) =>
@@ -3084,14 +3097,14 @@ function HistoryPanel({
         }),
     },
     {
-      title: "Message",
+      title: t("imGateway.history.message"),
       key: "message",
       width: 420,
       render: (_: unknown, record: ImEvent) =>
         renderOverflowText(record.message?.text, { width: 390 }),
     },
     {
-      title: "Time",
+      title: t("imGateway.history.time"),
       dataIndex: "received_at",
       key: "received_at",
       width: 160,
@@ -3101,7 +3114,7 @@ function HistoryPanel({
 
   const runColumns = [
     {
-      title: "Run ID",
+      title: t("imGateway.run.runId"),
       dataIndex: "run_id",
       key: "run_id",
       width: 120,
@@ -3112,14 +3125,14 @@ function HistoryPanel({
       ),
     },
     {
-      title: "Trigger",
+      title: t("imGateway.schedules.trigger"),
       dataIndex: "trigger_source",
       key: "trigger_source",
       width: 100,
       render: (val: string) => <Tag>{val}</Tag>,
     },
     {
-      title: "Status",
+      title: t("common.status"),
       dataIndex: "status",
       key: "status",
       width: 100,
@@ -3135,21 +3148,21 @@ function HistoryPanel({
       },
     },
     {
-      title: "Duration",
+      title: t("imGateway.run.duration"),
       dataIndex: "duration_ms",
       key: "duration_ms",
       width: 100,
       render: (val: number) => (val != null ? `${val}ms` : "-"),
     },
     {
-      title: "Exit Code",
+      title: t("imGateway.run.exitCode"),
       dataIndex: "exit_code",
       key: "exit_code",
       width: 80,
       render: (val: number) => (val != null ? val : "-"),
     },
     {
-      title: "Output",
+      title: t("imGateway.history.output"),
       key: "output",
       render: (_: unknown, record: ImTaskRun) => (
         <Text ellipsis style={{ maxWidth: 200, fontSize: 12 }}>
@@ -3158,7 +3171,7 @@ function HistoryPanel({
       ),
     },
     {
-      title: "Time",
+      title: t("imGateway.history.time"),
       dataIndex: "started_at",
       key: "started_at",
       width: 160,
@@ -3169,7 +3182,7 @@ function HistoryPanel({
   const historyTabItems = [
     {
       key: "events",
-      label: "Events",
+      label: t("imGateway.history.events"),
       children: (
         <Table
           dataSource={events}
@@ -3178,14 +3191,14 @@ function HistoryPanel({
           size="small"
           loading={loading}
           pagination={{ pageSize: 20, size: "small", showSizeChanger: false }}
-          locale={{ emptyText: <Empty description="No events recorded" /> }}
+          locale={{ emptyText: <Empty description={t("imGateway.history.noEvents")} /> }}
           scroll={{ x: 1390 }}
         />
       ),
     },
     {
       key: "runs",
-      label: "Task Runs",
+      label: t("imGateway.history.taskRuns"),
       children: (
         <Table
           dataSource={runs}
@@ -3194,7 +3207,7 @@ function HistoryPanel({
           size="small"
           loading={loading}
           pagination={{ pageSize: 20, size: "small", showSizeChanger: false }}
-          locale={{ emptyText: <Empty description="No task runs recorded" /> }}
+          locale={{ emptyText: <Empty description={t("imGateway.history.noTaskRuns")} /> }}
           scroll={{ x: 900 }}
           onRow={(record) => ({
             onClick: () => setSelectedRun(record),
@@ -3215,17 +3228,17 @@ function HistoryPanel({
         }}
       >
         <Button icon={<ReloadOutlined />} onClick={onRefresh} loading={loading}>
-          Refresh
+          {t("common.refresh")}
         </Button>
       </div>
       <Tabs items={historyTabItems} size="small" />
       <Modal
-        title={selectedRun ? `Task Run Detail · ${selectedRun.run_id}` : "Task Run Detail"}
+        title={selectedRun ? `${t("imGateway.history.taskRunDetail")} · ${selectedRun.run_id}` : t("imGateway.history.taskRunDetail")}
         open={!!selectedRun}
         onCancel={() => setSelectedRun(null)}
         footer={[
           <Button key="close" onClick={() => setSelectedRun(null)}>
-            Close
+            {t("common.close")}
           </Button>,
         ]}
         width={920}
@@ -3252,6 +3265,7 @@ export default function ImGatewayTab({
   visibleSections,
   cardGrid = false,
 }: ImGatewayTabProps) {
+  const { t } = useI18n();
   const [searchParams, setSearchParams] = useSearchParams();
   const sectionFromUrl = searchParams.get("imGatewaySection");
   const activeSection =
@@ -3318,11 +3332,11 @@ export default function ImGatewayTab({
       await Promise.all(tasks);
     } catch (err) {
       console.error("Failed to fetch IM Gateway data:", err);
-      message.error(err instanceof Error ? err.message : "Failed to fetch IM Gateway data");
+      message.error(err instanceof Error ? err.message : t("imGateway.fetchFailed"));
     } finally {
       setLoading(false);
     }
-  }, [renderedSections]);
+  }, [renderedSections, t]);
 
   const fetchActiveSectionData = useCallback(async () => {
     setLoading(true);
@@ -3332,11 +3346,11 @@ export default function ImGatewayTab({
           setProviders(await imGatewayApi.listProviders());
           break;
         case "targets": {
-          const [t, p] = await Promise.all([
+          const [targetList, p] = await Promise.all([
             imGatewayApi.listTargets(),
             imGatewayApi.listProviders(),
           ]);
-          setTargets(t);
+          setTargets(targetList);
           setProviders(p);
           break;
         }
@@ -3344,7 +3358,7 @@ export default function ImGatewayTab({
           setRoutes(await imGatewayApi.listRoutes());
           break;
         case "schedules": {
-          const [s, p, t, externalConfig] = await Promise.all([
+          const [s, p, targetList, externalConfig] = await Promise.all([
             imGatewayApi.listSchedules(),
             imGatewayApi.listProviders(),
             imGatewayApi.listTargets(),
@@ -3352,7 +3366,7 @@ export default function ImGatewayTab({
           ]);
           setSchedules(s);
           setProviders(p);
-          setTargets(t);
+          setTargets(targetList);
           setExternalCliConfig(externalConfig);
           break;
         }
@@ -3368,11 +3382,11 @@ export default function ImGatewayTab({
       }
     } catch (err) {
       console.error("Failed to fetch IM Gateway data:", err);
-      message.error(err instanceof Error ? err.message : "Failed to fetch IM Gateway data");
+      message.error(err instanceof Error ? err.message : t("imGateway.fetchFailed"));
     } finally {
       setLoading(false);
     }
-  }, [activeSection]);
+  }, [activeSection, t]);
 
   useEffect(() => {
     if (visibleSections) {
@@ -3398,7 +3412,7 @@ export default function ImGatewayTab({
 
   const nav = (
     <nav
-      aria-label="IM Gateway settings sections"
+      aria-label={t("imGateway.sectionNavAria")}
       data-testid="im-gateway-section-nav"
       style={{
         display: "flex",
@@ -3442,7 +3456,7 @@ export default function ImGatewayTab({
           >
             <Space size={6}>
               {section.icon}
-              <span>{section.label}</span>
+              <span>{t(section.labelKey)}</span>
             </Space>
           </button>
         );

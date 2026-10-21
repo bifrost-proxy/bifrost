@@ -8,6 +8,7 @@ import PinnedFilters from "./PinnedFilters";
 import FilterItem from "./FilterItem";
 import AppIcon from "../AppIcon";
 import { isMacDesktopShell } from "../../runtime";
+import { useI18n } from "../../i18n";
 
 interface FilterPanelProps {
   availableClientIps: string[];
@@ -34,6 +35,7 @@ export default function FilterPanel({
   accountNameCounts,
   domainCounts,
 }: FilterPanelProps) {
+  const { t } = useI18n();
   const { token } = theme.useToken();
   const panelBackground = isMacDesktopShell() ? "transparent" : token.colorBgContainer;
   const headerBackground = isMacDesktopShell() ? "transparent" : token.colorBgLayout;
@@ -73,22 +75,23 @@ export default function FilterPanel({
   const selectionSummary = useMemo(() => {
     const parts: string[] = [];
     if (selectedClientApps.length > 0) {
-      parts.push(`App ${selectedClientApps.length}`);
+      parts.push(t("traffic.filterPanel.summaryApp", { count: selectedClientApps.length }));
     }
     if (selectedAccountNames.length > 0) {
-      parts.push(`Account ${selectedAccountNames.length}`);
+      parts.push(t("traffic.filterPanel.summaryAccount", { count: selectedAccountNames.length }));
     }
     if (selectedDomains.length > 0) {
-      parts.push(`Domain ${selectedDomains.length}`);
+      parts.push(t("traffic.filterPanel.summaryDomain", { count: selectedDomains.length }));
     }
     if (selectedClientIps.length > 0) {
-      parts.push(`IP ${selectedClientIps.length}`);
+      parts.push(t("traffic.filterPanel.summaryIp", { count: selectedClientIps.length }));
     }
     if (selectedProxyPorts.length > 0) {
-      parts.push(`Port ${selectedProxyPorts.length}`);
+      parts.push(t("traffic.filterPanel.summaryPort", { count: selectedProxyPorts.length }));
     }
     return parts.join(" · ");
   }, [
+    t,
     selectedClientApps.length,
     selectedAccountNames.length,
     selectedClientIps.length,
@@ -194,16 +197,19 @@ export default function FilterPanel({
     return [...availableDomains].sort((a, b) => a.localeCompare(b));
   }, [availableDomains]);
 
+  const localIpLabel = t("traffic.filterPanel.localIp");
   const getIpLabel = (ip: string) => {
-    if (ip === "127.0.0.1") return "Local (127.0.0.1)";
+    if (ip === "127.0.0.1") return localIpLabel;
     return ip;
   };
 
   const filteredClientIps = useMemo(() => {
     if (!searchKeyword.trim()) return sortedClientIps;
     const keyword = searchKeyword.toLowerCase();
-    return sortedClientIps.filter((ip) => getIpLabel(ip).toLowerCase().includes(keyword));
-  }, [sortedClientIps, searchKeyword]);
+    return sortedClientIps.filter((ip) =>
+      (ip === "127.0.0.1" ? localIpLabel : ip).toLowerCase().includes(keyword),
+    );
+  }, [sortedClientIps, searchKeyword, localIpLabel]);
 
   const filteredClientApps = useMemo(() => {
     if (!searchKeyword.trim()) return sortedClientApps;
@@ -220,8 +226,10 @@ export default function FilterPanel({
   const filteredProxyPorts = useMemo(() => {
     if (!searchKeyword.trim()) return sortedProxyPorts;
     const keyword = searchKeyword.toLowerCase();
-    return sortedProxyPorts.filter((port) => `Proxy port ${port}`.toLowerCase().includes(keyword));
-  }, [sortedProxyPorts, searchKeyword]);
+    return sortedProxyPorts.filter((port) =>
+      t("traffic.filterPanel.proxyPortSearchText", { port }).toLowerCase().includes(keyword),
+    );
+  }, [sortedProxyPorts, searchKeyword, t]);
 
   const filteredDomains = useMemo(() => {
     if (!searchKeyword.trim()) return sortedDomains;
@@ -243,14 +251,14 @@ export default function FilterPanel({
     <div style={styles.container}>
       <div style={styles.header}>
         <div style={styles.titleGroup}>
-          <span style={styles.title}>Filters</span>
+          <span style={styles.title}>{t("traffic.filterPanel.title")}</span>
           {selectionSummary && (
             <span data-testid="filter-selection-summary" style={styles.summary}>
               {selectionSummary}
             </span>
           )}
         </div>
-        <Tooltip title="Clear active filters">
+        <Tooltip title={t("traffic.filterPanel.clearActive")}>
           <Button
             type="text"
             size="small"
@@ -263,7 +271,7 @@ export default function FilterPanel({
       </div>
       <div style={styles.searchWrapper}>
         <Input
-          placeholder="Search filters..."
+          placeholder={t("traffic.filterPanel.searchPlaceholder")}
           prefix={<SearchOutlined style={{ color: token.colorTextSecondary }} />}
           suffix={
             searchKeyword && (
@@ -283,7 +291,8 @@ export default function FilterPanel({
       <div style={styles.content}>
         {pinnedFilters.length > 0 && !isSearching && (
           <FilterSection
-            title="Pinned"
+            title={t("traffic.filterPanel.sectionPinned")}
+            sectionId="pinned"
             icon="📌"
             collapsed={collapsedSections.pinned}
             onToggle={() => setCollapsedSection("pinned", !collapsedSections.pinned)}
@@ -301,14 +310,15 @@ export default function FilterPanel({
         {isSearching && !hasSearchResults && (
           <Empty
             image={Empty.PRESENTED_IMAGE_SIMPLE}
-            description={`No filters matching "${searchKeyword}"`}
+            description={t("traffic.filterPanel.noMatching", { keyword: searchKeyword })}
             style={{ margin: "24px 0" }}
           />
         )}
 
         {(!isSearching || filteredClientIps.length > 0) && (
           <FilterSection
-            title="Client IP"
+            title={t("traffic.filterPanel.sectionClientIp")}
+            sectionId="client-ip"
             collapsed={isSearching ? false : collapsedSections.clientIp}
             onToggle={() => setCollapsedSection("clientIp", !collapsedSections.clientIp)}
             count={isSearching ? filteredClientIps.length : sortedClientIps.length}
@@ -316,7 +326,7 @@ export default function FilterPanel({
             {filteredClientIps.length === 0 ? (
               <Empty
                 image={Empty.PRESENTED_IMAGE_SIMPLE}
-                description="No clients"
+                description={t("traffic.filterPanel.noClients")}
                 style={{ margin: "12px 0" }}
               />
             ) : (
@@ -345,7 +355,8 @@ export default function FilterPanel({
 
         {showProxyPortSection && (!isSearching || filteredProxyPorts.length > 0) && (
           <FilterSection
-            title="Proxy port"
+            title={t("traffic.filterPanel.sectionProxyPort")}
+            sectionId="proxy-port"
             collapsed={isSearching ? false : collapsedSections.proxyPort ?? false}
             onToggle={() =>
               setCollapsedSection("proxyPort", !(collapsedSections.proxyPort ?? false))
@@ -376,7 +387,8 @@ export default function FilterPanel({
 
         {(!isSearching || filteredClientApps.length > 0) && (
           <FilterSection
-            title="Applications"
+            title={t("traffic.filterPanel.sectionApplications")}
+            sectionId="applications"
             collapsed={isSearching ? false : collapsedSections.clientApp}
             onToggle={() => setCollapsedSection("clientApp", !collapsedSections.clientApp)}
             count={isSearching ? filteredClientApps.length : sortedClientApps.length}
@@ -384,7 +396,7 @@ export default function FilterPanel({
             {filteredClientApps.length === 0 ? (
               <Empty
                 image={Empty.PRESENTED_IMAGE_SIMPLE}
-                description="No applications"
+                description={t("traffic.filterPanel.noApplications")}
                 style={{ margin: "12px 0" }}
               />
             ) : (
@@ -414,7 +426,8 @@ export default function FilterPanel({
 
         {showAccountSection && (!isSearching || filteredAccountNames.length > 0) && (
           <FilterSection
-            title="Accounts"
+            title={t("traffic.filterPanel.sectionAccounts")}
+            sectionId="accounts"
             collapsed={isSearching ? false : collapsedSections.accountName ?? false}
             onToggle={() =>
               setCollapsedSection("accountName", !(collapsedSections.accountName ?? false))
@@ -445,7 +458,8 @@ export default function FilterPanel({
 
         {(!isSearching || filteredDomains.length > 0) && (
           <FilterSection
-            title="Domains"
+            title={t("traffic.filterPanel.sectionDomains")}
+            sectionId="domains"
             collapsed={isSearching ? false : collapsedSections.domain}
             onToggle={() => setCollapsedSection("domain", !collapsedSections.domain)}
             count={isSearching ? filteredDomains.length : sortedDomains.length}
@@ -453,7 +467,7 @@ export default function FilterPanel({
             {filteredDomains.length === 0 ? (
               <Empty
                 image={Empty.PRESENTED_IMAGE_SIMPLE}
-                description="No domains"
+                description={t("traffic.filterPanel.noDomains")}
                 style={{ margin: "12px 0" }}
               />
             ) : (

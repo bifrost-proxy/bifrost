@@ -37,15 +37,16 @@ import type { GroupUserLevel, GroupVisibility, UserInfo } from "../../api/group"
 import { searchUsers, updateGroupSetting, updateGroup as apiUpdateGroup } from "../../api/group";
 import { normalizeApiErrorMessage } from "../../api/client";
 import { isMacDesktopShell } from "../../runtime";
+import { useI18n, type TranslationKey } from "../../i18n";
 
 const { Title, Text } = Typography;
 
 const MEMBERS_PAGE_SIZE = 20;
 
-const LEVEL_LABEL: Record<number, { text: string; color: string }> = {
-  2: { text: "Owner", color: "gold" },
-  1: { text: "Master", color: "blue" },
-  0: { text: "Member", color: "default" },
+const LEVEL_LABEL: Record<number, { textKey: TranslationKey; color: string }> = {
+  2: { textKey: "groups.role.owner", color: "gold" },
+  1: { textKey: "groups.role.master", color: "blue" },
+  0: { textKey: "groups.role.member", color: "default" },
 };
 
 function formatTime(value?: string | null): string {
@@ -76,6 +77,7 @@ export default function GroupDetail() {
   const { id = "" } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const { token } = theme.useToken();
+  const { t } = useI18n();
 
   const {
     currentGroup,
@@ -158,28 +160,28 @@ export default function GroupDetail() {
           });
         }
         await fetchGroupDetail(id, currentUserId ?? undefined);
-        message.success("Group updated");
+        message.success(t("groups.detail.updated"));
         setEditModalOpen(false);
       } catch (e) {
-        message.error(normalizeApiErrorMessage(e) || "Failed to update group");
+        message.error(normalizeApiErrorMessage(e) || t("groups.detail.updateFailed"));
       } finally {
         setEditLoading(false);
       }
     } catch {
       /* validation error */
     }
-  }, [editForm, id, currentGroup, fetchGroupDetail, currentUserId]);
+  }, [editForm, id, currentGroup, fetchGroupDetail, currentUserId, t]);
 
   const handleDelete = useCallback(async () => {
     const success = await deleteGroup(id);
     if (success) {
-      message.success("Group deleted");
+      message.success(t("groups.detail.deleted"));
       navigate("/groups");
     } else {
       const err = useGroupStore.getState().error;
-      message.error(err || "Failed to delete group");
+      message.error(err || t("groups.detail.deleteFailed"));
     }
-  }, [deleteGroup, id, navigate]);
+  }, [deleteGroup, id, navigate, t]);
 
   const handleInvite = useCallback(async () => {
     try {
@@ -192,56 +194,56 @@ export default function GroupDetail() {
         level: values.level,
       });
       if (success) {
-        message.success("Invitation sent");
+        message.success(t("groups.detail.invitationSent"));
         setInviteModalOpen(false);
         inviteForm.resetFields();
         setUserOptions([]);
       } else {
         const err = useGroupStore.getState().error;
-        message.error(err || "Failed to send invitation");
+        message.error(err || t("groups.detail.invitationFailed"));
       }
       setInviteLoading(false);
     } catch {
       setInviteLoading(false);
     }
-  }, [inviteForm, inviteMembers, id]);
+  }, [inviteForm, inviteMembers, id, t]);
 
   const handleRemoveMember = useCallback(
     async (userId: string) => {
       const success = await removeMember(id, userId);
       if (success) {
-        message.success("Member removed");
+        message.success(t("groups.detail.memberRemoved"));
       } else {
         const err = useGroupStore.getState().error;
-        message.error(err || "Failed to remove member");
+        message.error(err || t("groups.detail.removeMemberFailed"));
       }
     },
-    [removeMember, id],
+    [removeMember, id, t],
   );
 
   const handleUpdateLevel = useCallback(
     async (userId: string, level: GroupUserLevel) => {
       const success = await updateMemberLevel(id, userId, level);
       if (success) {
-        message.success("Level updated");
+        message.success(t("groups.detail.levelUpdated"));
       } else {
         const err = useGroupStore.getState().error;
-        message.error(err || "Failed to update level");
+        message.error(err || t("groups.detail.updateLevelFailed"));
       }
     },
-    [updateMemberLevel, id],
+    [updateMemberLevel, id, t],
   );
 
   const handleLeave = useCallback(async () => {
     const success = await leaveGroup(id);
     if (success) {
-      message.success("Left group");
+      message.success(t("groups.detail.leftGroup"));
       navigate("/groups");
     } else {
       const err = useGroupStore.getState().error;
-      message.error(err || "Failed to leave group");
+      message.error(err || t("groups.detail.leaveFailed"));
     }
-  }, [leaveGroup, id, navigate]);
+  }, [leaveGroup, id, navigate, t]);
 
   const handleUserSearch = useCallback((value: string) => {
     if (searchTimerRef.current) {
@@ -325,7 +327,7 @@ export default function GroupDetail() {
           onClick={() => navigate("/groups")}
           style={{ marginBottom: 16 }}
         >
-          Back
+          {t("common.back")}
         </Button>
 
         <Card styles={{ body: { padding: 24 } }}>
@@ -351,17 +353,17 @@ export default function GroupDetail() {
                     {currentGroup.name}
                   </Title>
                   <Tag color={currentGroup.visibility === "public" ? "green" : "orange"}>
-                    {currentGroup.visibility === "public" ? "Public" : "Private"}
+                    {currentGroup.visibility === "public" ? t("groups.public") : t("groups.private")}
                   </Tag>
                   {myLevel != null && (
                     <Tag color={LEVEL_LABEL[myLevel]?.color ?? "default"}>
-                      {LEVEL_LABEL[myLevel]?.text ?? "Member"}
+                      {t(LEVEL_LABEL[myLevel]?.textKey ?? "groups.role.member")}
                     </Tag>
                   )}
                 </Space>
                 <div style={{ marginTop: 4 }}>
                   <Text type="secondary">
-                    {currentGroup.description || "No description"}
+                    {currentGroup.description || t("groups.noDescription")}
                   </Text>
                 </div>
               </div>
@@ -369,19 +371,19 @@ export default function GroupDetail() {
             <Space wrap>
               {isMasterOrOwner && (
                 <Button icon={<EditOutlined />} onClick={handleEdit}>
-                  Edit
+                  {t("common.edit")}
                 </Button>
               )}
               {isOwner && (
                 <Popconfirm
-                  title="Delete Group"
-                  description="Are you sure to delete this group?"
+                  title={t("groups.detail.deleteGroup")}
+                  description={t("groups.detail.deleteGroupConfirm")}
                   onConfirm={handleDelete}
-                  okText="Delete"
+                  okText={t("common.delete")}
                   okType="danger"
                 >
                   <Button danger icon={<DeleteOutlined />}>
-                    Delete
+                    {t("common.delete")}
                   </Button>
                 </Popconfirm>
               )}
@@ -389,10 +391,10 @@ export default function GroupDetail() {
           </div>
 
           <Descriptions column={{ xs: 1, sm: 2 }} style={{ marginTop: 20 }} size="small">
-            <Descriptions.Item label="Created">
+            <Descriptions.Item label={t("groups.detail.createdAt")}>
               {formatTime(currentGroup.create_time)}
             </Descriptions.Item>
-            <Descriptions.Item label="Updated">
+            <Descriptions.Item label={t("groups.detail.updatedAt")}>
               {formatTime(currentGroup.update_time)}
             </Descriptions.Item>
           </Descriptions>
@@ -410,7 +412,9 @@ export default function GroupDetail() {
             }}
           >
             <Title level={5} style={{ margin: 0 }}>
-              Members{membersTotal ? ` (${membersTotal})` : ""}
+              {membersTotal
+                ? t("groups.detail.membersWithCount", { count: membersTotal })
+                : t("groups.detail.members")}
             </Title>
             <Space wrap>
               {isMasterOrOwner && (
@@ -423,18 +427,18 @@ export default function GroupDetail() {
                     setInviteModalOpen(true);
                   }}
                 >
-                  Add Members
+                  {t("groups.detail.addMembers")}
                 </Button>
               )}
               {myLevel != null && !isOwner && (
                 <Popconfirm
-                  title="Leave Group"
-                  description="Are you sure to leave this group?"
+                  title={t("groups.detail.leaveGroup")}
+                  description={t("groups.detail.leaveGroupConfirm")}
                   onConfirm={handleLeave}
-                  okText="Leave"
+                  okText={t("groups.detail.leave")}
                   okType="danger"
                 >
-                  <Button icon={<LogoutOutlined />}>Leave</Button>
+                  <Button icon={<LogoutOutlined />}>{t("groups.detail.leave")}</Button>
                 </Popconfirm>
               )}
             </Space>
@@ -442,7 +446,7 @@ export default function GroupDetail() {
 
           <div style={{ marginBottom: 12 }}>
             <Input
-              placeholder="Search members..."
+              placeholder={t("groups.detail.searchMembers")}
               prefix={<SearchOutlined style={{ color: "#999" }} />}
               value={memberSearch}
               onChange={(e) => handleMemberSearch(e.target.value)}
@@ -454,7 +458,11 @@ export default function GroupDetail() {
           <List
             dataSource={sortedMembers}
             loading={membersLoading}
-            locale={{ emptyText: membersKeyword ? "No matching members" : "No members" }}
+            locale={{
+              emptyText: membersKeyword
+                ? t("groups.detail.noMatchingMembers")
+                : t("groups.detail.noMembers"),
+            }}
             renderItem={(member) => {
               const levelInfo = LEVEL_LABEL[member.level] || LEVEL_LABEL[0];
               const memberAvatarColor = getAvatarColor(member.nickname || member.user_id);
@@ -476,14 +484,14 @@ export default function GroupDetail() {
                               )
                             }
                           >
-                            {isAdmin ? "Remove admin" : "Set admin"}
+                            {isAdmin ? t("groups.detail.removeAdmin") : t("groups.detail.setAdmin")}
                           </Button>,
                           <Popconfirm
                             key="remove"
-                            title="Remove Member"
-                            description="Are you sure to remove this member?"
+                            title={t("groups.detail.removeMember")}
+                            description={t("groups.detail.removeMemberConfirm")}
                             onConfirm={() => handleRemoveMember(member.user_id)}
-                            okText="Remove"
+                            okText={t("common.remove")}
                             okType="danger"
                           >
                             <Button
@@ -492,7 +500,7 @@ export default function GroupDetail() {
                               size="small"
                               icon={<UserDeleteOutlined />}
                             >
-                              Delete
+                              {t("common.delete")}
                             </Button>
                           </Popconfirm>,
                         ]
@@ -516,11 +524,11 @@ export default function GroupDetail() {
                             {member.user_id}
                           </Typography.Text>
                         )}
-                        {isAdmin && <Tag color={levelInfo.color}>{levelInfo.text}</Tag>}
-                        {isSelf && <Tag>You</Tag>}
+                        {isAdmin && <Tag color={levelInfo.color}>{t(levelInfo.textKey)}</Tag>}
+                        {isSelf && <Tag>{t("groups.detail.you")}</Tag>}
                       </Space>
                     }
-                    description={`Joined: ${formatTime(member.create_time)}`}
+                    description={t("groups.detail.joinedAt", { time: formatTime(member.create_time) })}
                   />
                 </List.Item>
               );
@@ -543,7 +551,7 @@ export default function GroupDetail() {
       </div>
 
       <Modal
-        title="Edit Group"
+        title={t("groups.detail.editGroup")}
         open={editModalOpen}
         onOk={handleEditSubmit}
         onCancel={() => setEditModalOpen(false)}
@@ -552,20 +560,20 @@ export default function GroupDetail() {
         <Form form={editForm} layout="vertical">
           <Form.Item
             name="name"
-            label="Name"
-            rules={[{ required: true, message: "Please input group name" }]}
+            label={t("common.name")}
+            rules={[{ required: true, message: t("groups.detail.nameRequired") }]}
           >
             <Input />
           </Form.Item>
-          <Form.Item name="description" label="Description">
+          <Form.Item name="description" label={t("common.description")}>
             <Input.TextArea rows={3} />
           </Form.Item>
           <Form.Item
             name="visibility"
-            label="Visibility"
+            label={t("groups.visibility")}
             extra={
               <span style={{ fontSize: 12 }}>
-                <b>Public</b>: Anyone can discover this group and access its shared rules. <b>Private</b>: Only invited members can see and access the group.
+                <b>{t("groups.public")}</b>{t("groups.visibilityPublicDesc")}<b>{t("groups.private")}</b>{t("groups.visibilityPrivateDesc")}
               </span>
             }
           >
@@ -573,13 +581,13 @@ export default function GroupDetail() {
               <Select.Option value="private">
                 <Space>
                   <LockOutlined />
-                  <span>Private</span>
+                  <span>{t("groups.private")}</span>
                 </Space>
               </Select.Option>
               <Select.Option value="public">
                 <Space>
                   <GlobalOutlined />
-                  <span>Public</span>
+                  <span>{t("groups.public")}</span>
                 </Space>
               </Select.Option>
             </Select>
@@ -588,7 +596,7 @@ export default function GroupDetail() {
       </Modal>
 
       <Modal
-        title="Add Members"
+        title={t("groups.detail.addMembers")}
         open={inviteModalOpen}
         onOk={handleInvite}
         onCancel={() => {
@@ -600,14 +608,14 @@ export default function GroupDetail() {
         <Form form={inviteForm} layout="vertical" initialValues={{ level: 0 }} autoComplete="off">
           <Form.Item
             name="user_id"
-            label="User"
-            rules={[{ required: true, message: "Please select at least one user" }]}
+            label={t("groups.detail.user")}
+            rules={[{ required: true, message: t("groups.detail.userRequired") }]}
           >
             <Select
               mode="multiple"
               showSearch
               filterOption={false}
-              placeholder="Search user by name or ID"
+              placeholder={t("groups.detail.userSearchPlaceholder")}
               loading={userSearchLoading}
               onSearch={handleUserSearch}
               onClear={() => setUserOptions([])}
@@ -634,11 +642,11 @@ export default function GroupDetail() {
               }))}
             />
           </Form.Item>
-          <Form.Item name="level" label="Role">
+          <Form.Item name="level" label={t("groups.detail.role")}>
             <Select
               options={[
-                { label: "Member", value: 0 },
-                { label: "Master", value: 1 },
+                { label: t("groups.role.member"), value: 0 },
+                { label: t("groups.role.master"), value: 1 },
               ]}
             />
           </Form.Item>

@@ -27,6 +27,7 @@ import { useNotificationStore } from '../../stores/useNotificationStore';
 import { useTlsConfigStore } from '../../stores/useTlsConfigStore';
 import type { NotificationRecord, ClientTrustSummary } from '../../api/notifications';
 import { isMacDesktopShell } from '../../runtime';
+import { useI18n, type TFunction } from '../../i18n';
 
 const { Text } = Typography;
 type NotificationFilterStatus = 'all' | 'read' | 'unread';
@@ -38,41 +39,46 @@ function formatTimestamp(ts: number): string {
   return d.toLocaleString();
 }
 
-function trustStatusTag(status: { status: string; reason?: string; confidence?: number }) {
+function trustStatusTag(
+  status: { status: string; reason?: string; confidence?: number },
+  t: TFunction,
+) {
   switch (status.status) {
     case 'trusted':
-      return <Tag color="success">Trusted</Tag>;
+      return <Tag color="success">{t('notify.trust.trusted')}</Tag>;
     case 'not_trusted':
-      return <Tag color="error">Not Trusted</Tag>;
+      return <Tag color="error">{t('notify.trust.notTrusted')}</Tag>;
     case 'possibly_not_trusted':
       return (
-        <Tooltip title="Only one definitive failure detected — needs more data to confirm">
-          <Tag color="blue">Possibly Not Trusted</Tag>
+        <Tooltip title={t('notify.trust.possiblyNotTrustedTip')}>
+          <Tag color="blue">{t('notify.trust.possiblyNotTrusted')}</Tag>
         </Tooltip>
       );
     case 'likely_untrusted':
       return (
         <Tag color="warning">
-          Likely Untrusted ({((status.confidence ?? 0) * 100).toFixed(0)}%)
+          {t('notify.trust.likelyUntrusted', {
+            percent: ((status.confidence ?? 0) * 100).toFixed(0),
+          })}
         </Tag>
       );
     default:
-      return <Tag>Unknown</Tag>;
+      return <Tag>{t('common.unknown')}</Tag>;
   }
 }
 
-function notificationTypeTag(type: string) {
+function notificationTypeTag(type: string, t: TFunction) {
   switch (type) {
     case 'tls_trust_change':
       return (
         <Tag icon={<SafetyCertificateOutlined />} color="orange">
-          TLS Trust
+          {t('notify.tabs.tlsTrust')}
         </Tag>
       );
     case 'pending_authorization':
       return (
         <Tag icon={<WarningOutlined />} color="blue">
-          Authorization
+          {t('notify.tabs.authorization')}
         </Tag>
       );
     default:
@@ -80,14 +86,14 @@ function notificationTypeTag(type: string) {
   }
 }
 
-function statusTag(status: string) {
+function statusTag(status: string, t: TFunction) {
   switch (status) {
     case 'unread':
-      return <Badge status="processing" text="Unread" />;
+      return <Badge status="processing" text={t('notify.status.unread')} />;
     case 'read':
-      return <Badge status="default" text="Read" />;
+      return <Badge status="default" text={t('notify.status.read')} />;
     case 'dismissed':
-      return <Badge status="default" text="Dismissed" />;
+      return <Badge status="default" text={t('notify.status.dismissed')} />;
     default:
       return <Badge status="default" text={status} />;
   }
@@ -123,6 +129,7 @@ function NotificationsTable({
   statusFilter: NotificationFilterStatus;
   onStatusFilterChange: (status: NotificationFilterStatus) => void;
 }) {
+  const { t } = useI18n();
   const { notifications, total, loading, handleUpdateStatus, handleMarkAllRead, activeTab } =
     useNotificationStore();
   const addDomainToPassthrough = useTlsConfigStore((s) => s.addDomainToPassthrough);
@@ -194,14 +201,14 @@ function NotificationsTable({
 
   const columns = [
     {
-      title: 'Type',
+      title: t('notify.table.type'),
       dataIndex: 'notification_type',
       key: 'type',
       width: 130,
-      render: (type: string) => notificationTypeTag(type),
+      render: (type: string) => notificationTypeTag(type, t),
     },
     {
-      title: 'Domain',
+      title: t('notify.table.domain'),
       dataIndex: 'metadata',
       key: 'domain',
       width: 180,
@@ -216,35 +223,35 @@ function NotificationsTable({
       },
     },
     {
-      title: 'Title',
+      title: t('notify.table.title'),
       dataIndex: 'title',
       key: 'title',
       width: 260,
       render: (title: string) => <CopyableCell text={title} />,
     },
     {
-      title: 'Message',
+      title: t('notify.table.message'),
       dataIndex: 'message',
       key: 'message',
       width: 300,
       render: (msg: string) => <CopyableCell text={msg} />,
     },
     {
-      title: 'Status',
+      title: t('common.status'),
       dataIndex: 'status',
       key: 'status',
       width: 100,
-      render: (s: string) => statusTag(s),
+      render: (s: string) => statusTag(s, t),
     },
     {
-      title: 'Time',
+      title: t('notify.table.time'),
       dataIndex: 'created_at',
       key: 'created_at',
       width: 170,
       render: (ts: number) => <Text type="secondary">{formatTimestamp(ts)}</Text>,
     },
     {
-      title: 'Actions',
+      title: t('common.actions'),
       key: 'actions',
       width: 200,
       fixed: 'right' as const,
@@ -259,10 +266,10 @@ function NotificationsTable({
           }
 
           if (record.action_taken === 'passthrough') {
-            return <Tag color="green">Passthrough ✓</Tag>;
+            return <Tag color="green">{t('notify.table.passthroughDone')}</Tag>;
           }
           if (record.action_taken === 'ignored' || record.status === 'dismissed') {
-            return <Tag>Ignored</Tag>;
+            return <Tag>{t('notify.table.ignored')}</Tag>;
           }
           if (domain) {
             return (
@@ -272,10 +279,10 @@ function NotificationsTable({
                   type="primary"
                   onClick={() => handlePassthrough(record.id, domain!)}
                 >
-                  Passthrough
+                  {t('notify.table.passthrough')}
                 </Button>
                 <Button size="small" onClick={() => handleIgnore(record.id)}>
-                  Ignore
+                  {t('notify.table.ignore')}
                 </Button>
               </Space>
             );
@@ -284,7 +291,7 @@ function NotificationsTable({
         return (
           <Space size="small">
             {record.status === 'unread' && (
-              <Tooltip title="Mark as read">
+              <Tooltip title={t('notify.table.markAsRead')}>
                 <Button
                   type="text"
                   size="small"
@@ -294,7 +301,7 @@ function NotificationsTable({
               </Tooltip>
             )}
             {record.status !== 'dismissed' && (
-              <Tooltip title="Dismiss">
+              <Tooltip title={t('notify.table.dismiss')}>
                 <Button
                   type="text"
                   size="small"
@@ -313,15 +320,15 @@ function NotificationsTable({
     <div>
       <div style={{ marginBottom: 12, display: 'flex', justifyContent: 'space-between' }}>
         <Space align="center" size="middle">
-          <Text type="secondary">{total} notification(s)</Text>
+          <Text type="secondary">{t('notify.table.count', { count: total })}</Text>
           <Segmented<NotificationFilterStatus>
             data-testid={`notifications-status-filter-${tabKey}`}
             value={statusFilter}
             onChange={(value) => onStatusFilterChange(value)}
             options={[
-              { label: 'All', value: 'all' },
-              { label: 'Read', value: 'read' },
-              { label: 'Unread', value: 'unread' },
+              { label: t('common.all'), value: 'all' },
+              { label: t('notify.status.read'), value: 'read' },
+              { label: t('notify.status.unread'), value: 'unread' },
             ]}
           />
         </Space>
@@ -329,10 +336,10 @@ function NotificationsTable({
           {pendingTlsItems.length > 0 && (
             <>
               <Button size="small" type="primary" onClick={handleBatchPassthrough}>
-                Passthrough All ({pendingTlsItems.length})
+                {t('notify.table.passthroughAll', { count: pendingTlsItems.length })}
               </Button>
               <Button size="small" onClick={handleBatchIgnore}>
-                Ignore All ({pendingTlsItems.length})
+                {t('notify.table.ignoreAll', { count: pendingTlsItems.length })}
               </Button>
             </>
           )}
@@ -341,7 +348,7 @@ function NotificationsTable({
             icon={<CheckCircleOutlined />}
             onClick={() => handleMarkAllRead(tabKey === 'all' ? undefined : tabKey, statusFilter)}
           >
-            Mark All Read
+            {t('notify.table.markAllRead')}
           </Button>
         </Space>
       </div>
@@ -353,13 +360,14 @@ function NotificationsTable({
         size="small"
         scroll={{ x: 1340 }}
         pagination={{ pageSize: 10, showSizeChanger: false }}
-        locale={{ emptyText: <Empty description="No notifications" /> }}
+        locale={{ emptyText: <Empty description={t('notify.table.empty')} /> }}
       />
     </div>
   );
 }
 
 function ClientTrustTable() {
+  const { t } = useI18n();
   const { clientTrust, untrustedCount, fetchClientTrust } = useNotificationStore();
 
   useEffect(() => {
@@ -368,7 +376,7 @@ function ClientTrustTable() {
 
   const columns = [
     {
-      title: 'Identifier',
+      title: t('notify.client.identifier'),
       dataIndex: 'identifier',
       key: 'identifier',
       render: (id: string, record: ClientTrustSummary) => (
@@ -379,19 +387,19 @@ function ClientTrustTable() {
       ),
     },
     {
-      title: 'Trust Status',
+      title: t('notify.client.trustStatus'),
       key: 'trust_status',
-      render: (_: unknown, record: ClientTrustSummary) => trustStatusTag(record.trust_status),
+      render: (_: unknown, record: ClientTrustSummary) => trustStatusTag(record.trust_status, t),
     },
     {
-      title: 'Success',
+      title: t('notify.client.success'),
       dataIndex: 'handshake_success',
       key: 'success',
       width: 80,
       render: (v: number) => <Text type="success">{v}</Text>,
     },
     {
-      title: 'Fail (Untrust)',
+      title: t('notify.client.failUntrust'),
       key: 'fail_untrust',
       width: 140,
       render: (_: unknown, record: ClientTrustSummary) => {
@@ -400,7 +408,7 @@ function ClientTrustTable() {
         const p = record.handshake_fail_probable_untrust;
         if (d !== undefined && p !== undefined) {
           return total > 0 ? (
-            <Tooltip title={`Definite: ${d}, Probable: ${p}`}>
+            <Tooltip title={t('notify.client.failUntrustTip', { definite: d, probable: p })}>
               <Text type="danger">{total}</Text>
             </Tooltip>
           ) : <Text>{total}</Text>;
@@ -409,13 +417,13 @@ function ClientTrustTable() {
       },
     },
     {
-      title: 'Fail (Other)',
+      title: t('notify.client.failOther'),
       dataIndex: 'handshake_fail_other',
       key: 'fail_other',
       width: 100,
     },
     {
-      title: 'Last Failure',
+      title: t('notify.client.lastFailure'),
       key: 'last_failure',
       render: (_: unknown, record: ClientTrustSummary) =>
         record.last_failure_domain ? (
@@ -427,7 +435,7 @@ function ClientTrustTable() {
         ),
     },
     {
-      title: 'Last Seen',
+      title: t('notify.client.lastSeen'),
       dataIndex: 'last_seen',
       key: 'last_seen',
       width: 180,
@@ -439,13 +447,17 @@ function ClientTrustTable() {
     <div>
       <div style={{ marginBottom: 12, display: 'flex', justifyContent: 'space-between' }}>
         <Space>
-          <Text type="secondary">{clientTrust.length} client(s)</Text>
+          <Text type="secondary">
+            {t('notify.client.count', { count: clientTrust.length })}
+          </Text>
           {untrustedCount > 0 && (
-            <Tag color="warning">{untrustedCount} untrusted</Tag>
+            <Tag color="warning">
+              {t('notify.client.untrustedCount', { count: untrustedCount })}
+            </Tag>
           )}
         </Space>
         <Button size="small" icon={<ReloadOutlined />} onClick={fetchClientTrust}>
-          Refresh
+          {t('common.refresh')}
         </Button>
       </div>
       <Table
@@ -455,7 +467,7 @@ function ClientTrustTable() {
         size="small"
         scroll={{ x: 900 }}
         pagination={{ pageSize: 10, showSizeChanger: false }}
-        locale={{ emptyText: <Empty description="No client trust data" /> }}
+        locale={{ emptyText: <Empty description={t('notify.client.empty')} /> }}
       />
     </div>
   );
@@ -465,6 +477,7 @@ const VALID_TABS = ['all', 'tls_trust_change', 'pending_authorization', 'client_
 
 export default function Notifications() {
   const { token } = theme.useToken();
+  const { t } = useI18n();
   const [searchParams, setSearchParams] = useSearchParams();
   const [statusFilters, setStatusFilters] = useState<NotificationFilterMap>({
     all: 'unread',
@@ -553,7 +566,7 @@ export default function Notifications() {
             label: (
               <Space>
                 <BellOutlined />
-                All Notifications
+                {t('notify.tabs.all')}
                 {unreadCount > 0 && <Badge count={unreadCount} size="small" />}
               </Space>
             ),
@@ -570,7 +583,7 @@ export default function Notifications() {
             label: (
               <Space>
                 <SafetyCertificateOutlined />
-                TLS Trust
+                {t('notify.tabs.tlsTrust')}
               </Space>
             ),
             children: (
@@ -588,7 +601,7 @@ export default function Notifications() {
             label: (
               <Space>
                 <WarningOutlined />
-                Authorization
+                {t('notify.tabs.authorization')}
               </Space>
             ),
             children: (
@@ -606,7 +619,7 @@ export default function Notifications() {
             label: (
               <Space>
                 <SafetyCertificateOutlined />
-                Client Trust Status
+                {t('notify.tabs.clientTrust')}
               </Space>
             ),
             children: <ClientTrustTable />,

@@ -115,6 +115,7 @@ import {
   type KeepAwakeStatus,
   type KeepAwakeMode,
 } from "../../../api/power";
+import { useI18n, type TFunction } from "../../../i18n";
 
 const { Text, Title } = Typography;
 const { TextArea } = Input;
@@ -163,11 +164,6 @@ const callDetailPreStyle: CSSProperties = {
   overflow: "auto",
   whiteSpace: "pre-wrap",
   wordBreak: "break-word",
-};
-
-const SSH_GRANT_MODE: { label: string; value: GrantMode } = {
-  label: "Permanent",
-  value: "permanent",
 };
 
 function formatFingerprint(fp: string): string {
@@ -302,9 +298,6 @@ interface ShellAccessCapability {
 
 interface ShellAccessPresetDefinition {
   mode: Exclude<ShellAccessMode, "custom">;
-  label: string;
-  description: string;
-  capabilities: ShellAccessCapability[];
   policies: ShellPolicyEditorItem[];
   profiles: ShellProfileEditorItem[];
 }
@@ -474,15 +467,6 @@ const DEFAULT_SANDBOX_ENV = {
 function createSandboxPreset(): ShellAccessPresetDefinition {
   return {
     mode: "sandbox",
-    label: "Safe Sandbox (coming soon)",
-    description:
-      "A future locked-down execution mode. Until the sandbox runtime lands, Bifrost will reject shell execution attempts for this preset.",
-    capabilities: [
-      { allowed: true,  text: "Reserved for upcoming isolated sandbox runtime" },
-      { allowed: false, text: "Does not run any commands today (rejects with a clear reason)" },
-      { allowed: false, text: "No stdin / no interactive shells" },
-      { allowed: false, text: "No sudo / no system modification" },
-    ],
     profiles: [
       {
         id: "default-sandbox",
@@ -532,16 +516,6 @@ function createSandboxPreset(): ShellAccessPresetDefinition {
 function createFullAccessPreset(): ShellAccessPresetDefinition {
   return {
     mode: "full-access",
-    label: "Trusted (Full Access)",
-    description:
-      "Trust the remote caller with unrestricted shell execution on this device. Only use for agents you fully trust.",
-    capabilities: [
-      { allowed: true,  text: "Run any command (argv or shell text) with the caller's choice of arguments" },
-      { allowed: true,  text: "Inherit this device's environment variables (PATH, tokens, etc.)" },
-      { allowed: true,  text: "Open interactive terminals and accept stdin" },
-      { allowed: true,  text: "Run long-running commands without a timeout cap" },
-      { allowed: false, text: "Still cannot bypass the file-access scope negotiated in the pairing" },
-    ],
     profiles: [],
     policies: [
       {
@@ -583,6 +557,36 @@ function shellPresetDefinition(
     : createFullAccessPreset();
 }
 
+/** UI copy for a shell access preset (the preset data itself stays untranslated). */
+function shellPresetDisplay(
+  t: TFunction,
+  mode: Exclude<ShellAccessMode, "custom">,
+): { label: string; description: string; capabilities: ShellAccessCapability[] } {
+  if (mode === "sandbox") {
+    return {
+      label: t("remoteInvoke.shellPreset.sandboxLabel"),
+      description: t("remoteInvoke.shellPreset.sandboxDescription"),
+      capabilities: [
+        { allowed: true, text: t("remoteInvoke.shellPreset.sandboxCap1") },
+        { allowed: false, text: t("remoteInvoke.shellPreset.sandboxCap2") },
+        { allowed: false, text: t("remoteInvoke.shellPreset.sandboxCap3") },
+        { allowed: false, text: t("remoteInvoke.shellPreset.sandboxCap4") },
+      ],
+    };
+  }
+  return {
+    label: t("remoteInvoke.shellPreset.fullAccessLabel"),
+    description: t("remoteInvoke.shellPreset.fullAccessDescription"),
+    capabilities: [
+      { allowed: true, text: t("remoteInvoke.shellPreset.fullAccessCap1") },
+      { allowed: true, text: t("remoteInvoke.shellPreset.fullAccessCap2") },
+      { allowed: true, text: t("remoteInvoke.shellPreset.fullAccessCap3") },
+      { allowed: true, text: t("remoteInvoke.shellPreset.fullAccessCap4") },
+      { allowed: false, text: t("remoteInvoke.shellPreset.fullAccessCap5") },
+    ],
+  };
+}
+
 function stableJson(value: unknown): string {
   if (Array.isArray(value)) {
     return `[${value.map((item) => stableJson(item)).join(",")}]`;
@@ -615,14 +619,14 @@ function inferShellAccessMode(
   return "custom";
 }
 
-function shellAccessModeLabel(mode: ShellAccessMode): string {
+function shellAccessModeLabel(t: TFunction, mode: ShellAccessMode): string {
   switch (mode) {
     case "sandbox":
-      return "Safe Sandbox";
+      return t("remoteInvoke.shellMode.sandbox");
     case "full-access":
-      return "Trusted (Full Access)";
+      return t("remoteInvoke.shellPreset.fullAccessLabel");
     default:
-      return "Custom Rules";
+      return t("remoteInvoke.shellMode.custom");
   }
 }
 
@@ -645,26 +649,26 @@ function formatSshFingerprint(fingerprint?: string | null): string {
   return fingerprint.length > 48 ? `${fingerprint.slice(0, 24)}…` : fingerprint;
 }
 
-function formatCallerInfo(info: RemoteInvokeSshCallerInfo | null): string {
-  if (!info) return "No SSH caller has connected yet.";
+function formatCallerInfo(t: TFunction, info: RemoteInvokeSshCallerInfo | null): string {
+  if (!info) return t("remoteInvoke.ssh.noCallerYet");
 
-  const headline = [info.hostname, info.username && `as ${info.username}`]
+  const headline = [info.hostname, info.username && t("remoteInvoke.ssh.callerAsUser", { user: info.username })]
     .filter(Boolean)
     .join(" ");
   const details = [info.source_ip ?? info.ip, info.platform]
     .filter(Boolean)
     .join(" · ");
 
-  return [headline, details].filter(Boolean).join(" — ") || "No SSH caller has connected yet.";
+  return [headline, details].filter(Boolean).join(" — ") || t("remoteInvoke.ssh.noCallerYet");
 }
 
-function formatSshGrantMode(mode: GrantMode): string {
-  return mode === "permanent" ? SSH_GRANT_MODE.label : mode;
+function formatSshGrantMode(t: TFunction, mode: GrantMode): string {
+  return mode === "permanent" ? t("remoteInvoke.grantMode.permanent") : mode;
 }
 
-function formatCountdown(expiresAt: number): string {
+function formatCountdown(t: TFunction, expiresAt: number): string {
   const remaining = Math.max(0, Math.floor((expiresAt - Date.now()) / 1000));
-  if (remaining <= 0) return "Expired";
+  if (remaining <= 0) return t("remoteInvoke.discovery.expired");
   const m = Math.floor(remaining / 60);
   const s = remaining % 60;
   return `${m}:${s.toString().padStart(2, "0")}`;
@@ -674,14 +678,14 @@ function formatCountdown(expiresAt: number): string {
  * Humanize a grant_scope value for display in UI tags.
  * Keeps the raw scope accessible via tooltip for power users.
  */
-function describeGrantScope(scope: string): { label: string; color: string } {
+function describeGrantScope(t: TFunction, scope: string): { label: string; color: string } {
   switch (scope) {
     case "remote_query":
-      return { label: "Read-only", color: "default" };
+      return { label: t("remoteInvoke.grantScope.readOnly"), color: "default" };
     case "remote_shell_exec":
-      return { label: "Can run commands", color: "purple" };
+      return { label: t("remoteInvoke.grantScope.shellExec"), color: "purple" };
     case "remote_shell_interactive":
-      return { label: "Can run commands + interactive", color: "magenta" };
+      return { label: t("remoteInvoke.grantScope.shellInteractive"), color: "magenta" };
     default:
       return { label: scope, color: "default" };
   }
@@ -691,37 +695,40 @@ function describeGrantScope(scope: string): { label: string; color: string } {
  * Humanize a grant_mode value for display in UI tags.
  * Keeps the raw mode accessible via tooltip.
  */
-function describeGrantMode(mode: string): string {
+function describeGrantMode(t: TFunction, mode: string): string {
   switch (mode) {
     case "once":
-      return "One-shot";
+      return t("remoteInvoke.grantMode.once");
     case "30m":
-      return "Valid 30 min";
+      return t("remoteInvoke.grantMode.30m");
     case "1h":
-      return "Valid 1 hour";
+      return t("remoteInvoke.grantMode.1h");
     case "1d":
-      return "Valid 1 day";
+      return t("remoteInvoke.grantMode.1d");
     case "permanent":
-      return "Permanent";
+      return t("remoteInvoke.grantMode.permanent");
     default:
       return mode;
   }
 }
 
-function describeGrantAuthMethod(grant: Grant): { label: string; color: string; tooltip: string } {
+function describeGrantAuthMethod(
+  t: TFunction,
+  grant: Grant,
+): { label: string; color: string; tooltip: string } {
   const method = grant.auth_method;
   if (method === "ssh_publickey" || grant.ssh_key_fingerprint || grant.ssh_key_id) {
     return {
-      label: "SSH key",
+      label: t("remoteInvoke.authMethod.sshKey"),
       color: "purple",
-      tooltip: "Connected with SSH key",
+      tooltip: t("remoteInvoke.authMethod.sshKeyTooltip"),
     };
   }
   if (method === "pair_code" || method == null || method === "") {
     return {
-      label: "Pair code",
+      label: t("remoteInvoke.authMethod.pairCode"),
       color: "cyan",
-      tooltip: "Connected with pair code",
+      tooltip: t("remoteInvoke.authMethod.pairCodeTooltip"),
     };
   }
   return {
@@ -734,12 +741,12 @@ function describeGrantAuthMethod(grant: Grant): { label: string; color: string; 
 /**
  * Humanize an exec_mode value (argv_exec / shell_text) for display.
  */
-function describeExecMode(mode: string): string {
+function describeExecMode(t: TFunction, mode: string): string {
   switch (mode) {
     case "argv_exec":
-      return "Specific command";
+      return t("remoteInvoke.execMode.argvExec");
     case "shell_text":
-      return "Shell text";
+      return t("remoteInvoke.execMode.shellText");
     default:
       return mode;
   }
@@ -813,17 +820,17 @@ function getCallStatusColor(call: Call): string {
   }
 }
 
-function renderStateTag(state: string) {
+function renderStateTag(t: TFunction, state: string) {
   switch (state.toLowerCase()) {
     case "connected":
-      return <Tag color="green">Connected</Tag>;
+      return <Tag color="green">{t("remoteInvoke.state.connected")}</Tag>;
     case "connecting":
     case "registering":
-      return <Tag color="processing">Connecting</Tag>;
+      return <Tag color="processing">{t("remoteInvoke.state.connecting")}</Tag>;
     case "reconnecting":
-      return <Tag color="orange">Reconnecting</Tag>;
+      return <Tag color="orange">{t("remoteInvoke.state.reconnecting")}</Tag>;
     case "disconnected":
-      return <Tag color="default">Disconnected</Tag>;
+      return <Tag color="default">{t("remoteInvoke.state.disconnected")}</Tag>;
     default:
       return <Tag>{state}</Tag>;
   }
@@ -840,6 +847,7 @@ export default function RemoteInvokeTab({
   onGoToSyncTab,
   onSyncSignIn,
 }: RemoteInvokeTabProps = {}) {
+  const { t } = useI18n();
   const { token } = theme.useToken();
   const syncReady = !!syncStatus?.has_session;
   const lockedColStyle = syncReady
@@ -853,7 +861,7 @@ export default function RemoteInvokeTab({
     syncStatus?.user?.email ||
     syncStatus?.user?.nickname ||
     syncStatus?.user?.user_id ||
-    "Signed in";
+    t("remoteInvoke.sync.signedIn");
   const [status, setStatus] = useState<RemoteInvokeStatus | null>(null);
   const [identity, setIdentity] = useState<ClientIdentity | null>(null);
   const [sshKey, setSshKey] = useState<RemoteInvokeSshKeyRecord | null>(null);
@@ -904,7 +912,7 @@ export default function RemoteInvokeTab({
     const command = (shellEditorTestInput[policyId] ?? "").trim();
     const execMode = shellEditorTestMode[policyId] ?? "shell_text";
     if (!command) {
-      message.warning("Enter a command to test");
+      message.warning(t("remoteInvoke.shellTest.enterCommand"));
       return;
     }
     setShellEditorTestLoading((prev) => ({ ...prev, [policyId]: true }));
@@ -1056,9 +1064,9 @@ export default function RemoteInvokeTab({
     : undefined;
   const sshFilePolicyAccessLabel = sshFilePolicy
     ? getFileAccessPolicyAccess(sshFilePolicy) === "read_write"
-      ? "read-write"
-      : "read-only"
-    : "not configured";
+      ? t("remoteInvoke.fileAccess.readWriteShort")
+      : t("remoteInvoke.fileAccess.readOnlyShort")
+    : t("remoteInvoke.fileAccess.notConfigured");
 
   const refresh = useCallback(async () => {
     try {
@@ -1104,11 +1112,11 @@ export default function RemoteInvokeTab({
       const res = await clearCalls();
       setCalls([]);
       setSelectedCall(null);
-      message.success(`Cleared ${res.removed ?? 0} recent calls`);
+      message.success(t("remoteInvoke.calls.cleared", { count: res.removed ?? 0 }));
     } catch {
-      message.error("Failed to clear recent calls");
+      message.error(t("remoteInvoke.calls.clearFailed"));
     }
-  }, []);
+  }, [t]);
 
   const handleOpenCallDetail = useCallback(async (call: Call) => {
     setSelectedCall(call);
@@ -1120,13 +1128,13 @@ export default function RemoteInvokeTab({
     } catch (e) {
       message.warning(
         e instanceof Error
-          ? `Failed to refresh call detail: ${e.message}`
-          : "Failed to refresh call detail",
+          ? t("remoteInvoke.calls.refreshDetailFailedWithReason", { reason: e.message })
+          : t("remoteInvoke.calls.refreshDetailFailed"),
       );
     } finally {
       setCallDetailLoading(false);
     }
-  }, []);
+  }, [t]);
 
   const refreshShellConfig = useCallback(
     async (options?: { silent?: boolean }) => {
@@ -1141,7 +1149,7 @@ export default function RemoteInvokeTab({
       } catch (e) {
         if (!silent && !isConnectionIssueError(e)) {
           message.error(
-            e instanceof Error ? e.message : "Failed to load shell access config",
+            e instanceof Error ? e.message : t("remoteInvoke.shell.loadFailed"),
           );
         }
       } finally {
@@ -1150,7 +1158,7 @@ export default function RemoteInvokeTab({
         }
       }
     },
-    [],
+    [t],
   );
 
   const refreshFileAccessConfig = useCallback(
@@ -1165,7 +1173,7 @@ export default function RemoteInvokeTab({
       } catch (e) {
         if (!silent && !isConnectionIssueError(e)) {
           message.error(
-            e instanceof Error ? e.message : "Failed to load file access config",
+            e instanceof Error ? e.message : t("remoteInvoke.fileAccess.loadFailed"),
           );
         }
       } finally {
@@ -1174,7 +1182,7 @@ export default function RemoteInvokeTab({
         }
       }
     },
-    [],
+    [t],
   );
 
   const refreshSshKey = useCallback(
@@ -1196,7 +1204,7 @@ export default function RemoteInvokeTab({
         }
         if (!silent && !isConnectionIssueError(e)) {
           message.error(
-            e instanceof Error ? e.message : "Failed to load SSH key status",
+            e instanceof Error ? e.message : t("remoteInvoke.ssh.loadFailed"),
           );
         }
       } finally {
@@ -1205,7 +1213,7 @@ export default function RemoteInvokeTab({
         }
       }
     },
-    [],
+    [t],
   );
 
   useEffect(() => {
@@ -1248,12 +1256,12 @@ export default function RemoteInvokeTab({
       return;
     }
     const tick = () => {
-      setCountdown(formatCountdown(session.expires_at));
+      setCountdown(formatCountdown(t, session.expires_at));
     };
     tick();
     const timer = window.setInterval(tick, 1000);
     return () => window.clearInterval(timer);
-  }, [status?.discovery_session]);
+  }, [status?.discovery_session, t]);
 
   const handleEnterDiscovery = async () => {
     setDiscoveryLoading(true);
@@ -1262,10 +1270,10 @@ export default function RemoteInvokeTab({
       setStatus((prev) =>
         prev ? { ...prev, discovery_session: res.session } : prev,
       );
-      message.success("Discovery mode enabled");
+      message.success(t("remoteInvoke.discovery.enabled"));
     } catch (e) {
       message.error(
-        e instanceof Error ? e.message : "Failed to enter discovery mode",
+        e instanceof Error ? e.message : t("remoteInvoke.discovery.enterFailed"),
       );
     } finally {
       setDiscoveryLoading(false);
@@ -1279,10 +1287,10 @@ export default function RemoteInvokeTab({
       setStatus((prev) =>
         prev ? { ...prev, discovery_session: null } : prev,
       );
-      message.success("Discovery mode disabled");
+      message.success(t("remoteInvoke.discovery.disabled"));
     } catch (e) {
       message.error(
-        e instanceof Error ? e.message : "Failed to exit discovery mode",
+        e instanceof Error ? e.message : t("remoteInvoke.discovery.exitFailed"),
       );
     } finally {
       setDiscoveryLoading(false);
@@ -1296,10 +1304,10 @@ export default function RemoteInvokeTab({
       setStatus((prev) =>
         prev ? { ...prev, discovery_session: res.session } : prev,
       );
-      message.success("Pair code refreshed");
+      message.success(t("remoteInvoke.discovery.codeRefreshed"));
     } catch (e) {
       message.error(
-        e instanceof Error ? e.message : "Failed to refresh pair code",
+        e instanceof Error ? e.message : t("remoteInvoke.discovery.refreshCodeFailed"),
       );
     } finally {
       setDiscoveryLoading(false);
@@ -1310,18 +1318,18 @@ export default function RemoteInvokeTab({
     const code = status?.discovery_session?.pair_code;
     if (code) {
       copyToClipboard(code);
-      message.success("Pair code copied");
+      message.success(t("remoteInvoke.discovery.codeCopied"));
     }
   };
 
   const handleRevokeGrant = async (grantId: string) => {
     try {
       await revokeGrant(grantId);
-      message.success("Grant revoked");
+      message.success(t("remoteInvoke.grants.revoked"));
       void refreshGrants();
       void refreshFileAccessConfig({ silent: true });
     } catch (e) {
-      message.error(e instanceof Error ? e.message : "Failed to revoke grant");
+      message.error(e instanceof Error ? e.message : t("remoteInvoke.grants.revokeFailed"));
     }
   };
 
@@ -1360,7 +1368,7 @@ export default function RemoteInvokeTab({
       return;
     }
     if (grantEditorPreset === "custom" && grantEditorAccessMode === "selected" && grantEditorSelectedPolicies.length === 0) {
-      message.error("Choose at least one shell policy");
+      message.error(t("remoteInvoke.grants.choosePolicy"));
       return;
     }
 
@@ -1428,18 +1436,18 @@ export default function RemoteInvokeTab({
     setGrantSaveLoading(true);
     try {
       await updateGrant(editingGrant.grant_id, payload);
-      message.success("Grant access updated");
+      message.success(t("remoteInvoke.grants.updated"));
       setGrantEditorOpen(false);
       setEditingGrant(null);
       void refreshGrants();
     } catch (e) {
-      const rawMsg = e instanceof Error ? e.message : "Failed to update grant";
+      const rawMsg = e instanceof Error ? e.message : t("remoteInvoke.grants.updateFailed");
       // Backend returns HTTP 409 when the grant is no longer active on the relay
       // (common when the caller re-paired and the old grant got rotated out).
       // Auto-refresh the list and surface a friendlier message.
       if (rawMsg.includes("grant_not_active") || rawMsg.includes("not found")) {
         message.warning(
-          "This grant is no longer active on the relay. Refreshing the grants list — please retry on the updated row.",
+          t("remoteInvoke.grants.noLongerActive"),
         );
         setGrantEditorOpen(false);
         setEditingGrant(null);
@@ -1476,15 +1484,15 @@ export default function RemoteInvokeTab({
     const policyIds = new Set<string>();
     for (const policy of shellEditorPolicies) {
       if (!policy.id.trim()) {
-        message.error("Every policy needs an ID");
+        message.error(t("remoteInvoke.shell.policyNeedsId"));
         return;
       }
       if (!policy.name.trim()) {
-        message.error("Every policy needs a name");
+        message.error(t("remoteInvoke.shell.policyNeedsName"));
         return;
       }
       if (policyIds.has(policy.id.trim())) {
-        message.error(`Duplicate policy ID: ${policy.id}`);
+        message.error(t("remoteInvoke.shell.duplicatePolicyId", { id: policy.id }));
         return;
       }
       policyIds.add(policy.id.trim());
@@ -1493,15 +1501,15 @@ export default function RemoteInvokeTab({
     const profileIds = new Set<string>();
     for (const profile of shellEditorProfiles) {
       if (!profile.id.trim()) {
-        message.error("Every profile needs an ID");
+        message.error(t("remoteInvoke.shell.profileNeedsId"));
         return;
       }
       if (!profile.name.trim()) {
-        message.error("Every profile needs a name");
+        message.error(t("remoteInvoke.shell.profileNeedsName"));
         return;
       }
       if (profileIds.has(profile.id.trim())) {
-        message.error(`Duplicate profile ID: ${profile.id}`);
+        message.error(t("remoteInvoke.shell.duplicateProfileId", { id: profile.id }));
         return;
       }
       profileIds.add(profile.id.trim());
@@ -1509,7 +1517,7 @@ export default function RemoteInvokeTab({
 
     for (const policy of shellEditorPolicies) {
       if (policy.profile_id && !profileIds.has(policy.profile_id)) {
-        message.error(`Policy ${policy.name} references a missing profile`);
+        message.error(t("remoteInvoke.shell.missingProfile", { name: policy.name }));
         return;
       }
     }
@@ -1539,11 +1547,11 @@ export default function RemoteInvokeTab({
       const saved = await updateRemoteShellConfig(parsed);
       setShellConfig(saved);
       setShellEditorOpen(false);
-      message.success("Shell access config saved");
+      message.success(t("remoteInvoke.shell.saved"));
       void refreshGrants();
     } catch (e) {
       message.error(
-        e instanceof Error ? e.message : "Failed to save shell access config",
+        e instanceof Error ? e.message : t("remoteInvoke.shell.saveFailed"),
       );
     } finally {
       setShellSaveLoading(false);
@@ -1585,7 +1593,7 @@ export default function RemoteInvokeTab({
       .map((root) => root.trim())
       .filter(Boolean);
     if (sshFilePolicyRootScope === "selected" && roots.length === 0) {
-      message.error("Enter at least one allowed directory");
+      message.error(t("remoteInvoke.fileAccess.enterDirectory"));
       return;
     }
 
@@ -1617,10 +1625,10 @@ export default function RemoteInvokeTab({
       });
       setFileAccessConfig(saved);
       setSshFilePolicyOpen(false);
-      message.success("SSH key default file policy saved");
+      message.success(t("remoteInvoke.ssh.filePolicySaved"));
     } catch (e) {
       message.error(
-        e instanceof Error ? e.message : "Failed to save SSH key file policy",
+        e instanceof Error ? e.message : t("remoteInvoke.ssh.filePolicySaveFailed"),
       );
     } finally {
       setSshFilePolicySaving(false);
@@ -1633,14 +1641,14 @@ export default function RemoteInvokeTab({
     }
     const grantId = fileAccessEditingGrant.grant_id;
     if (!activeGrants.some((grant) => grant.grant_id === grantId)) {
-      message.error(`Grant is not connected: ${grantId}`);
+      message.error(t("remoteInvoke.grants.notConnected", { id: grantId }));
       return;
     }
     if (
       getFileAccessPolicyRootScope(fileAccessDraft) === "selected" &&
       (fileAccessDraft.roots?.filter((root) => root.trim()).length ?? 0) === 0
     ) {
-      message.error("Enter at least one allowed directory");
+      message.error(t("remoteInvoke.fileAccess.enterDirectory"));
       return;
     }
 
@@ -1670,10 +1678,10 @@ export default function RemoteInvokeTab({
       setFileAccessEditorOpen(false);
       setFileAccessEditingGrant(null);
       setFileAccessDraft(null);
-      message.success("File access config saved");
+      message.success(t("remoteInvoke.fileAccess.saved"));
     } catch (e) {
       message.error(
-        e instanceof Error ? e.message : "Failed to save file access config",
+        e instanceof Error ? e.message : t("remoteInvoke.fileAccess.saveFailed"),
       );
     } finally {
       setFileAccessSaveLoading(false);
@@ -1693,18 +1701,15 @@ export default function RemoteInvokeTab({
     mode: "created" | "downloaded" | "reset",
   ) => {
     const titleMap = {
-      created: "SSH key created",
-      downloaded: "Bifrost key file",
-      reset: "SSH key rotated",
-    } as const;
+      created: t("remoteInvoke.ssh.created"),
+      downloaded: t("remoteInvoke.ssh.keyFileTitle"),
+      reset: t("remoteInvoke.ssh.rotated"),
+    };
     const descriptionMap = {
-      created:
-        "This Bifrost key file contains the device code and private key. Copy it now and store it securely.",
-      downloaded:
-        "Only trusted administrators should retrieve this file. Share it only with approved callers.",
-      reset:
-        "A new key pair is active now. Any previous SSH grants tied to the old key should be treated as revoked.",
-    } as const;
+      created: t("remoteInvoke.ssh.createdDescription"),
+      downloaded: t("remoteInvoke.ssh.downloadedDescription"),
+      reset: t("remoteInvoke.ssh.rotatedDescription"),
+    };
 
     setSecretModal({
       title: titleMap[mode],
@@ -1744,12 +1749,12 @@ export default function RemoteInvokeTab({
         seed_policy: seedPolicy,
       });
       presentSecretPayload(payload, "created");
-      message.success("SSH key created");
+      message.success(t("remoteInvoke.ssh.created"));
       setEditorOpen(false);
       await refreshSshKey({ silent: true });
     } catch (e) {
       message.error(
-        e instanceof Error ? e.message : "Failed to save SSH key settings",
+        e instanceof Error ? e.message : t("remoteInvoke.ssh.saveFailed"),
       );
     } finally {
       setSshAction(null);
@@ -1762,10 +1767,10 @@ export default function RemoteInvokeTab({
       const payload = await getRemoteInvokeSshPrivateKey();
       presentSecretPayload(payload, "downloaded");
       const copied = await copyToClipboard(payload.bifrost_key_file);
-      message.success(copied ? "Key file copied" : "SSH key file loaded");
+      message.success(copied ? t("remoteInvoke.ssh.keyFileCopied") : t("remoteInvoke.ssh.keyFileLoaded"));
     } catch (e) {
       message.error(
-        e instanceof Error ? e.message : "Failed to fetch key file",
+        e instanceof Error ? e.message : t("remoteInvoke.ssh.fetchKeyFileFailed"),
       );
     } finally {
       setSshAction(null);
@@ -1779,10 +1784,10 @@ export default function RemoteInvokeTab({
       presentSecretPayload(payload, "reset");
       await refreshSshKey({ silent: true });
       void refreshGrants();
-      message.success("SSH key rotated");
+      message.success(t("remoteInvoke.ssh.rotated"));
     } catch (e) {
       message.error(
-        e instanceof Error ? e.message : "Failed to rotate SSH key",
+        e instanceof Error ? e.message : t("remoteInvoke.ssh.rotateFailed"),
       );
     } finally {
       setSshAction(null);
@@ -1795,10 +1800,10 @@ export default function RemoteInvokeTab({
       await revokeRemoteInvokeSshKey();
       setSshKey(null);
       void refreshGrants();
-      message.success("SSH key revoked");
+      message.success(t("remoteInvoke.ssh.revoked"));
     } catch (e) {
       message.error(
-        e instanceof Error ? e.message : "Failed to revoke SSH key",
+        e instanceof Error ? e.message : t("remoteInvoke.ssh.revokeFailed"),
       );
     } finally {
       setSshAction(null);
@@ -1831,8 +1836,8 @@ export default function RemoteInvokeTab({
           <Alert
             showIcon
             type="info"
-            message="Remote Command Bridge"
-            description="Allows authorized callers to execute read-only queries on this Bifrost instance via a relay server. Enter discovery mode and share the pair code to begin."
+            message={t("remoteInvoke.intro.title")}
+            description={t("remoteInvoke.intro.description")}
           />
         </Col>
 
@@ -1842,7 +1847,7 @@ export default function RemoteInvokeTab({
             title={
               <Space>
                 <ApiOutlined />
-                <span>Remote Status</span>
+                <span>{t("remoteInvoke.status.title")}</span>
               </Space>
             }
             extra={
@@ -1891,18 +1896,16 @@ export default function RemoteInvokeTab({
                         fontSize: 14,
                       }}
                     >
-                      Sign in to Sync to enable Remote Invoke
+                      {t("remoteInvoke.sync.signInTitle")}
                     </Text>
                     <Text type="secondary" style={{ fontSize: 12 }}>
-                      Remote Invoke relies on your Sync session for relay
-                      authorization. Sign in first, then return here to pair
-                      devices, manage SSH keys and shell policies.
+                      {t("remoteInvoke.sync.signInDescription")}
                     </Text>
                   </div>
                 </Space>
                 {syncStatus?.remote_base_url ? (
                   <Descriptions size="small" column={1}>
-                    <Descriptions.Item label="Sync Server">
+                    <Descriptions.Item label={t("remoteInvoke.sync.server")}>
                       <Text code style={{ fontSize: 11 }}>
                         {syncStatus.remote_base_url}
                       </Text>
@@ -1919,7 +1922,7 @@ export default function RemoteInvokeTab({
                     disabled={!onSyncSignIn}
                     data-testid="settings-remote-invoke-sync-signin-btn"
                   >
-                    Sign in
+                    {t("remoteInvoke.sync.signIn")}
                   </Button>
                   <Button
                     icon={<ExportOutlined />}
@@ -1929,7 +1932,7 @@ export default function RemoteInvokeTab({
                     disabled={!onGoToSyncTab}
                     data-testid="settings-remote-invoke-sync-goto-btn"
                   >
-                    Open Sync Settings
+                    {t("remoteInvoke.sync.openSettings")}
                   </Button>
                 </Space>
               </div>
@@ -1942,21 +1945,21 @@ export default function RemoteInvokeTab({
               }}
             >
               <Text strong style={{ display: "block", marginBottom: 12 }}>
-                Connection Status
+                {t("remoteInvoke.status.connectionStatus")}
               </Text>
               <Descriptions size="small" column={1}>
-                <Descriptions.Item label="Relay Connection">
-                  {status ? renderStateTag(status.state) : <Tag>Loading</Tag>}
+                <Descriptions.Item label={t("remoteInvoke.status.relayConnection")}>
+                  {status ? renderStateTag(t, status.state) : <Tag>{t("remoteInvoke.status.loading")}</Tag>}
                 </Descriptions.Item>
-                <Descriptions.Item label="Instance ID">
+                <Descriptions.Item label={t("remoteInvoke.status.instanceId")}>
                   <Text code style={{ fontSize: 11 }}>
                     {identity?.instance_id ?? "-"}
                   </Text>
                 </Descriptions.Item>
-                <Descriptions.Item label="Device">
+                <Descriptions.Item label={t("remoteInvoke.status.device")}>
                   {identity?.device_name ?? "-"} ({identity?.platform ?? "-"})
                 </Descriptions.Item>
-                <Descriptions.Item label="Sync Account">
+                <Descriptions.Item label={t("remoteInvoke.sync.account")}>
                   <Space size={4}>
                     <CloudOutlined style={{ color: "#52c41a" }} />
                     <Text style={{ fontSize: 12 }}>{syncAccountLabel}</Text>
@@ -1990,7 +1993,8 @@ export default function RemoteInvokeTab({
                   style={{ width: "100%", justifyContent: "space-between", marginBottom: 8 }}
                 >
                   <Text strong>
-                    <ThunderboltOutlined style={{ marginRight: 6 }} />Keep Awake
+                    <ThunderboltOutlined style={{ marginRight: 6 }} />
+                    {t("remoteInvoke.keepAwake.title")}
                   </Text>
                   <Switch
                     data-testid="settings-remote-invoke-keepawake-switch"
@@ -2008,7 +2012,7 @@ export default function RemoteInvokeTab({
                         await refreshPowerStatus();
                       } catch (e) {
                         message.error(
-                          e instanceof Error ? e.message : "Failed to toggle Keep Awake",
+                          e instanceof Error ? e.message : t("remoteInvoke.keepAwake.toggleFailed"),
                         );
                       } finally {
                         setPowerLoading(false);
@@ -2020,13 +2024,13 @@ export default function RemoteInvokeTab({
                   <Alert
                     type="info"
                     showIcon
-                    message="Keep Awake is only supported on macOS in this version."
+                    message={t("remoteInvoke.keepAwake.unsupported")}
                     style={{ marginTop: 4 }}
                   />
                 ) : (
                   <>
                     <Text type="secondary" style={{ fontSize: 12, display: "block", marginBottom: 8 }}>
-                      Prevent this Mac from sleeping (including lid-close) while remote invoke calls are in flight. Uses IOKit IOPMAssertion, no sudo required.
+                      {t("remoteInvoke.keepAwake.description")}
                     </Text>
                     <Radio.Group
                       data-testid="settings-remote-invoke-keepawake-mode"
@@ -2041,28 +2045,28 @@ export default function RemoteInvokeTab({
                           await refreshPowerStatus();
                         } catch (err) {
                           message.error(
-                            err instanceof Error ? err.message : "Failed to set mode",
+                            err instanceof Error ? err.message : t("remoteInvoke.keepAwake.setModeFailed"),
                           );
                         } finally {
                           setPowerLoading(false);
                         }
                       }}
                     >
-                      <Radio.Button value="off">Off</Radio.Button>
-                      <Radio.Button value="auto">Auto</Radio.Button>
-                      <Radio.Button value="force_on">Force On</Radio.Button>
+                      <Radio.Button value="off">{t("remoteInvoke.keepAwake.modeOff")}</Radio.Button>
+                      <Radio.Button value="auto">{t("remoteInvoke.keepAwake.modeAuto")}</Radio.Button>
+                      <Radio.Button value="force_on">{t("remoteInvoke.keepAwake.modeForceOn")}</Radio.Button>
                     </Radio.Group>
                     {powerStatus ? (
                       <Descriptions size="small" column={1} style={{ marginTop: 8 }}>
-                        <Descriptions.Item label="Active">
+                        <Descriptions.Item label={t("remoteInvoke.keepAwake.active")}>
                           {powerStatus.active ? (
-                            <Tag color="green">Holding assertion</Tag>
+                            <Tag color="green">{t("remoteInvoke.keepAwake.holding")}</Tag>
                           ) : (
-                            <Tag>Idle</Tag>
+                            <Tag>{t("remoteInvoke.keepAwake.idle")}</Tag>
                           )}
                         </Descriptions.Item>
                         {powerStatus.battery_warning ? (
-                          <Descriptions.Item label="Battery">
+                          <Descriptions.Item label={t("remoteInvoke.keepAwake.battery")}>
                             <Text type="warning" style={{ fontSize: 12 }}>{powerStatus.battery_warning}</Text>
                           </Descriptions.Item>
                         ) : null}
@@ -2084,7 +2088,7 @@ export default function RemoteInvokeTab({
               }}
             >
               <Text strong style={{ display: "block", marginBottom: 12 }}>
-                Discovery Mode
+                {t("remoteInvoke.discovery.title")}
               </Text>
               {discoverySession ? (
                 <Space
@@ -2109,10 +2113,10 @@ export default function RemoteInvokeTab({
                       {discoverySession.pair_code}
                     </Title>
                     <Text type="secondary">
-                      {countdown === "Expired" ? (
-                        <Tag color="red">Expired</Tag>
+                      {countdown === t("remoteInvoke.discovery.expired") ? (
+                        <Tag color="red">{t("remoteInvoke.discovery.expired")}</Tag>
                       ) : (
-                        <>Expires in {countdown}</>
+                        <>{t("remoteInvoke.discovery.expiresIn", { countdown })}</>
                       )}
                     </Text>
                   </div>
@@ -2122,7 +2126,7 @@ export default function RemoteInvokeTab({
                       onClick={handleCopyCode}
                       size="small"
                     >
-                      Copy Code
+                      {t("remoteInvoke.discovery.copyCode")}
                     </Button>
                     <Button
                       icon={<ReloadOutlined />}
@@ -2130,7 +2134,7 @@ export default function RemoteInvokeTab({
                       loading={discoveryLoading}
                       size="small"
                     >
-                      Refresh
+                      {t("common.refresh")}
                     </Button>
                     <Button
                       icon={<StopOutlined />}
@@ -2139,7 +2143,7 @@ export default function RemoteInvokeTab({
                       danger
                       size="small"
                     >
-                      Exit Discovery
+                      {t("remoteInvoke.discovery.exit")}
                     </Button>
                   </Space>
                 </Space>
@@ -2159,8 +2163,7 @@ export default function RemoteInvokeTab({
                     style={{ fontSize: 32, color: "#bfbfbf" }}
                   />
                   <Text type="secondary">
-                    Not in discovery mode. Enter discovery to generate a pair
-                    code.
+                    {t("remoteInvoke.discovery.notActive")}
                   </Text>
                   <Button
                     type="primary"
@@ -2169,11 +2172,11 @@ export default function RemoteInvokeTab({
                     loading={discoveryLoading}
                     disabled={status?.state?.toLowerCase() !== "connected"}
                   >
-                    Enter Discovery Mode
+                    {t("remoteInvoke.discovery.enter")}
                   </Button>
                   {status?.state?.toLowerCase() !== "connected" && (
                     <Text type="warning" style={{ fontSize: 12 }}>
-                      Relay must be connected before entering discovery mode.
+                      {t("remoteInvoke.discovery.relayRequired")}
                     </Text>
                   )}
                 </Space>
@@ -2189,7 +2192,7 @@ export default function RemoteInvokeTab({
             title={
               <Space>
                 <KeyOutlined />
-                <span>SSH Key</span>
+                <span>{t("remoteInvoke.ssh.title")}</span>
               </Space>
             }
             extra={
@@ -2207,8 +2210,8 @@ export default function RemoteInvokeTab({
               <Alert
                 showIcon
                 type="warning"
-                message="SSH key management is not available yet"
-                description="This client does not expose the SSH key endpoints yet. Once the backend lands, this section will light up without further UI changes."
+                message={t("remoteInvoke.ssh.unavailableTitle")}
+                description={t("remoteInvoke.ssh.unavailableDescription")}
               />
             ) : sshKey ? (
               <Space direction="vertical" size={16} style={{ width: "100%" }}>
@@ -2218,12 +2221,12 @@ export default function RemoteInvokeTab({
                   items={[
                     {
                       key: "label",
-                      label: "Label",
+                      label: t("remoteInvoke.ssh.label"),
                       children: sshKey.label,
                     },
                     {
                       key: "device_code",
-                      label: "Device Code",
+                      label: t("remoteInvoke.ssh.deviceCode"),
                       children: (
                         <Space size={8} wrap>
                           <Text code>{sshKey.device_code}</Text>
@@ -2232,18 +2235,18 @@ export default function RemoteInvokeTab({
                             icon={<CopyOutlined />}
                             onClick={async () => {
                               const ok = await copyToClipboard(sshKey.device_code);
-                              if (ok) message.success("Device code copied");
-                              else message.error("Copy failed");
+                              if (ok) message.success(t("remoteInvoke.ssh.deviceCodeCopied"));
+                              else message.error(t("common.copyFailed"));
                             }}
                           >
-                            Copy
+                            {t("common.copy")}
                           </Button>
                         </Space>
                       ),
                     },
                     {
                       key: "fingerprint",
-                      label: "Fingerprint",
+                      label: t("remoteInvoke.ssh.fingerprint"),
                       children: (
                         <Text code style={{ fontSize: 11 }}>
                           {formatSshFingerprint(sshKey.ssh_key_fingerprint)}
@@ -2252,12 +2255,12 @@ export default function RemoteInvokeTab({
                     },
                     {
                       key: "grant_mode",
-                      label: "SSH Access",
-                      children: `${formatSshGrantMode(sshKey.grant_mode)} until key revoke`,
+                      label: t("remoteInvoke.ssh.access"),
+                      children: t("remoteInvoke.ssh.untilRevoke", { mode: formatSshGrantMode(t, sshKey.grant_mode) }),
                     },
                     {
                       key: "file_policy",
-                      label: "File Access",
+                      label: t("remoteInvoke.fileAccess.title"),
                       children: (
                         <Space size={8} wrap>
                           <Tag color={sshFilePolicy ? "orange" : "default"}>
@@ -2266,8 +2269,8 @@ export default function RemoteInvokeTab({
                           {sshFilePolicy?.roots?.length ? (
                             <Text type="secondary">
                               {getFileAccessPolicyRootScope(sshFilePolicy) === "all"
-                                ? "all directories"
-                                : `${sshFilePolicy.roots.length} root(s)`}
+                                ? t("remoteInvoke.fileAccess.allDirectories")
+                                : t("remoteInvoke.fileAccess.rootCount", { count: sshFilePolicy.roots.length })}
                             </Text>
                           ) : null}
                           <Button
@@ -2275,14 +2278,14 @@ export default function RemoteInvokeTab({
                             icon={<FileOutlined />}
                             onClick={openSshFilePolicyEditor}
                           >
-                            Configure
+                            {t("remoteInvoke.action.configure")}
                           </Button>
                         </Space>
                       ),
                     },
                     {
                       key: "status",
-                      label: "Status",
+                      label: t("common.status"),
                       children: (
                         <Tag color={sshKey.status === "active" ? "green" : "default"}>
                           {sshKey.status}
@@ -2291,15 +2294,15 @@ export default function RemoteInvokeTab({
                     },
                     {
                       key: "last_used_at",
-                      label: "Last Used",
+                      label: t("remoteInvoke.ssh.lastUsed"),
                       children: formatTimestamp(sshKey.last_used_at),
                     },
                     {
                       key: "last_caller",
-                      label: "Last Caller",
+                      label: t("remoteInvoke.ssh.lastCaller"),
                       children: (
                         <Text type={sshKey.last_caller_info ? undefined : "secondary"}>
-                          {formatCallerInfo(sshKey.last_caller_info)}
+                          {formatCallerInfo(t, sshKey.last_caller_info)}
                         </Text>
                       ),
                     },
@@ -2312,24 +2315,24 @@ export default function RemoteInvokeTab({
                     onClick={() => void handleFetchPrivateKey()}
                     loading={sshAction === "download"}
                   >
-                    Copy Key File
+                    {t("remoteInvoke.ssh.copyKeyFile")}
                   </Button>
                   <Popconfirm
-                    title="Rotate SSH key?"
-                    description="This creates a new key pair, replaces the device code, and should revoke grants tied to the old key."
-                    okText="Rotate"
-                    cancelText="Cancel"
+                    title={t("remoteInvoke.ssh.rotateConfirmTitle")}
+                    description={t("remoteInvoke.ssh.rotateConfirmDescription")}
+                    okText={t("remoteInvoke.ssh.rotate")}
+                    cancelText={t("common.cancel")}
                     onConfirm={() => void handleResetSshKey()}
                   >
                     <Button loading={sshAction === "reset"}>
-                      Reset Key
+                      {t("remoteInvoke.ssh.resetKey")}
                     </Button>
                   </Popconfirm>
                   <Popconfirm
-                    title="Revoke SSH key?"
-                    description="SSH callers will lose access until a new key is created."
-                    okText="Revoke"
-                    cancelText="Cancel"
+                    title={t("remoteInvoke.ssh.revokeConfirmTitle")}
+                    description={t("remoteInvoke.ssh.revokeConfirmDescription")}
+                    okText={t("remoteInvoke.action.revoke")}
+                    cancelText={t("common.cancel")}
                     onConfirm={() => void handleRevokeSshKey()}
                   >
                     <Button
@@ -2337,7 +2340,7 @@ export default function RemoteInvokeTab({
                       icon={<DeleteOutlined />}
                       loading={sshAction === "revoke"}
                     >
-                      Revoke Key
+                      {t("remoteInvoke.ssh.revokeKey")}
                     </Button>
                   </Popconfirm>
                 </Space>
@@ -2350,14 +2353,14 @@ export default function RemoteInvokeTab({
               >
                 <KeyOutlined style={{ fontSize: 32, color: "#bfbfbf" }} />
                 <Text type="secondary">
-                  No active SSH key. Create one to provision long-lived callers without pair codes.
+                  {t("remoteInvoke.ssh.empty")}
                 </Text>
                 <Button
                   type="primary"
                   onClick={openCreateModal}
                   loading={sshAction === "create"}
                 >
-                  Create SSH Key
+                  {t("remoteInvoke.ssh.create")}
                 </Button>
               </Space>
             )}
@@ -2370,7 +2373,7 @@ export default function RemoteInvokeTab({
             title={
               <Space>
                 <SafetyOutlined />
-                <span>Shell Access</span>
+                <span>{t("remoteInvoke.shell.title")}</span>
               </Space>
             }
             extra={
@@ -2388,7 +2391,7 @@ export default function RemoteInvokeTab({
                   disabled={shellLoading}
                   data-testid="settings-remote-invoke-manage-shell-access"
                 >
-                  Manage Access
+                  {t("remoteInvoke.shell.manageAccess")}
                 </Button>
               </Space>
             }
@@ -2398,36 +2401,36 @@ export default function RemoteInvokeTab({
               showIcon
               type="info"
               style={{ marginBottom: 16 }}
-              message="Shell execution is governed by local policies and profiles on this device"
-              description="Policies decide what the caller may execute, while profiles define sandbox boundaries such as cwd, env allowlist, timeout, stdin, and interactive mode."
+              message={t("remoteInvoke.shell.infoTitle")}
+              description={t("remoteInvoke.shell.infoDescription")}
             />
             <Descriptions size="small" column={2} style={{ marginBottom: 16 }}>
-              <Descriptions.Item label="Configuration Mode">
+              <Descriptions.Item label={t("remoteInvoke.shell.configurationMode")}>
                 <Tag color={shellAccessMode === "custom" ? "default" : "blue"}>
-                  {shellAccessModeLabel(shellAccessMode)}
+                  {shellAccessModeLabel(t, shellAccessMode)}
                 </Tag>
               </Descriptions.Item>
-              <Descriptions.Item label="Policy Set Version">
+              <Descriptions.Item label={t("remoteInvoke.shell.policySetVersion")}>
                 {shellConfig?.version ?? "-"}
               </Descriptions.Item>
-              <Descriptions.Item label="Schema Version">
+              <Descriptions.Item label={t("remoteInvoke.shell.schemaVersion")}>
                 {shellConfig?.schema_version ?? "-"}
               </Descriptions.Item>
-              <Descriptions.Item label="Policies">
-                {shellConfig?.policies.length ?? 0} total · {enabledPolicyCount} enabled
+              <Descriptions.Item label={t("remoteInvoke.shell.policies")}>
+                {t("remoteInvoke.shell.totalEnabled", { total: shellConfig?.policies.length ?? 0, enabled: enabledPolicyCount })}
               </Descriptions.Item>
-              <Descriptions.Item label="Profiles">
-                {shellConfig?.profiles.length ?? 0} total · {enabledProfileCount} enabled
+              <Descriptions.Item label={t("remoteInvoke.shell.profiles")}>
+                {t("remoteInvoke.shell.totalEnabled", { total: shellConfig?.profiles.length ?? 0, enabled: enabledProfileCount })}
               </Descriptions.Item>
             </Descriptions>
 
             <Row gutter={[16, 16]}>
               <Col xs={24} lg={12}>
-                <Card size="small" title="Policies">
+                <Card size="small" title={t("remoteInvoke.shell.policies")}>
                   {!shellConfig || shellConfig.policies.length === 0 ? (
                     <Empty
                       image={Empty.PRESENTED_IMAGE_SIMPLE}
-                      description="No shell policies configured"
+                      description={t("remoteInvoke.shell.noPolicies")}
                     />
                   ) : (
                     <List
@@ -2454,7 +2457,7 @@ export default function RemoteInvokeTab({
                                 <Space wrap>
                                   <Text strong>{policy.name}</Text>
                                   <Tag color={policy.enabled ? "green" : "default"}>
-                                    {policy.enabled ? "enabled" : "disabled"}
+                                    {policy.enabled ? t("remoteInvoke.state.enabled") : t("remoteInvoke.state.disabled")}
                                   </Tag>
                                   <Tag>{policy.id}</Tag>
                                   {execMode && <Tag color="blue">{execMode}</Tag>}
@@ -2464,17 +2467,17 @@ export default function RemoteInvokeTab({
                                 <Space size={4} wrap>
                                   {policy.profile_id && (
                                     <Text type="secondary" style={{ fontSize: 11 }}>
-                                      profile {policy.profile_id}
+                                      {t("remoteInvoke.shell.profileRef", { id: policy.profile_id })}
                                     </Text>
                                   )}
                                   {allowedExecutables.length > 0 && (
                                     <Text type="secondary" style={{ fontSize: 11 }}>
-                                      · executables {allowedExecutables.length}
+                                      {t("remoteInvoke.shell.executablesCount", { count: allowedExecutables.length })}
                                     </Text>
                                   )}
                                   {allowedShellPatterns.length > 0 && (
                                     <Text type="secondary" style={{ fontSize: 11 }}>
-                                      · shell regex {allowedShellPatterns.length}
+                                      {t("remoteInvoke.shell.regexCount", { count: allowedShellPatterns.length })}
                                     </Text>
                                   )}
                                 </Space>
@@ -2489,11 +2492,11 @@ export default function RemoteInvokeTab({
               </Col>
 
               <Col xs={24} lg={12}>
-                <Card size="small" title="Profiles">
+                <Card size="small" title={t("remoteInvoke.shell.profiles")}>
                   {!shellConfig || shellConfig.profiles.length === 0 ? (
                     <Empty
                       image={Empty.PRESENTED_IMAGE_SIMPLE}
-                      description="No shell profiles configured"
+                      description={t("remoteInvoke.shell.noProfiles")}
                     />
                   ) : (
                     <List
@@ -2521,7 +2524,7 @@ export default function RemoteInvokeTab({
                                 <Space wrap>
                                   <Text strong>{profile.name}</Text>
                                   <Tag color={profile.enabled ? "green" : "default"}>
-                                    {profile.enabled ? "enabled" : "disabled"}
+                                    {profile.enabled ? t("remoteInvoke.state.enabled") : t("remoteInvoke.state.disabled")}
                                   </Tag>
                                   <Tag>{profile.id}</Tag>
                                 </Space>
@@ -2530,22 +2533,22 @@ export default function RemoteInvokeTab({
                                 <Space size={4} wrap>
                                   {cwdAllowlist.length > 0 && (
                                     <Text type="secondary" style={{ fontSize: 11 }}>
-                                      cwd {cwdAllowlist.length}
+                                      {t("remoteInvoke.shell.cwdCount", { count: cwdAllowlist.length })}
                                     </Text>
                                   )}
                                   {envAllowlist.length > 0 && (
                                     <Text type="secondary" style={{ fontSize: 11 }}>
-                                      · env {envAllowlist.length}
+                                      {t("remoteInvoke.shell.envCount", { count: envAllowlist.length })}
                                     </Text>
                                   )}
                                   {defaultCwd && (
                                     <Text type="secondary" style={{ fontSize: 11 }}>
-                                      · default cwd {defaultCwd}
+                                      {t("remoteInvoke.shell.defaultCwdValue", { cwd: defaultCwd })}
                                     </Text>
                                   )}
                                   {timeoutMs != null && (
                                     <Text type="secondary" style={{ fontSize: 11 }}>
-                                      · timeout {timeoutMs}ms
+                                      {t("remoteInvoke.shell.timeoutValue", { ms: timeoutMs })}
                                     </Text>
                                   )}
                                 </Space>
@@ -2566,7 +2569,7 @@ export default function RemoteInvokeTab({
           <Card
             title={
               <Space>
-                <span>Pending Pairing Requests</span>
+                <span>{t("remoteInvoke.pairing.title")}</span>
                 <Badge count={pairingList.length} />
               </Space>
             }
@@ -2582,7 +2585,7 @@ export default function RemoteInvokeTab({
             {pairingList.length === 0 ? (
               <Empty
                 image={Empty.PRESENTED_IMAGE_SIMPLE}
-                description="No pending pairing requests"
+                description={t("remoteInvoke.pairing.empty")}
               />
             ) : (
               <List
@@ -2597,7 +2600,7 @@ export default function RemoteInvokeTab({
                         icon={<EyeOutlined />}
                         onClick={() => setReviewPairing(p)}
                       >
-                        Review
+                        {t("remoteInvoke.pairing.review")}
                       </Button>,
                     ]}
                   >
@@ -2612,11 +2615,11 @@ export default function RemoteInvokeTab({
                       title={
                         <Space>
                           <Text>
-                            {p.caller_info.display_name || "Unknown Caller"}
+                            {p.caller_info.display_name || t("remoteInvoke.pairing.unknownCaller")}
                           </Text>
                           {p.caller_info.source_ip && (
                             <Text type="secondary" style={{ fontSize: 12 }}>
-                              from {p.caller_info.source_ip}
+                              {t("remoteInvoke.pairing.fromIp", { ip: p.caller_info.source_ip })}
                             </Text>
                           )}
                         </Space>
@@ -2647,10 +2650,10 @@ export default function RemoteInvokeTab({
             title={
               <Space>
                 <SafetyOutlined />
-                <span>Grants</span>
+                <span>{t("remoteInvoke.grants.title")}</span>
                 <Badge count={grants.filter((g) => g.status === "active").length} />
                 <Text type="secondary" style={{ fontSize: 11, fontWeight: "normal" }}>
-                  Total commands: {grants.reduce((sum, g) => sum + (g.use_count ?? 0), 0)}
+                  {t("remoteInvoke.grants.totalCommands", { count: grants.reduce((sum, g) => sum + (g.use_count ?? 0), 0) })}
                 </Text>
               </Space>
             }
@@ -2668,7 +2671,7 @@ export default function RemoteInvokeTab({
             {grants.length === 0 ? (
               <Empty
                 image={Empty.PRESENTED_IMAGE_SIMPLE}
-                description="No active grants"
+                description={t("remoteInvoke.grants.empty")}
               />
             ) : (
               <List
@@ -2681,7 +2684,7 @@ export default function RemoteInvokeTab({
                   showSizeChanger: false,
                 }}
                 renderItem={(g) => {
-                  const authMethod = describeGrantAuthMethod(g);
+                  const authMethod = describeGrantAuthMethod(t, g);
                   return (
                     <List.Item
                       actions={g.status === "removed" ? [] : [
@@ -2692,7 +2695,7 @@ export default function RemoteInvokeTab({
                           onClick={() => openFileAccessEditor(g)}
                           loading={fileAccessLoading}
                         >
-                          File Access
+                          {t("remoteInvoke.fileAccess.title")}
                         </Button>,
                         <Button
                           key="edit"
@@ -2700,22 +2703,22 @@ export default function RemoteInvokeTab({
                           icon={<EditOutlined />}
                           onClick={() => openGrantEditor(g)}
                         >
-                          Edit Access
+                          {t("remoteInvoke.grants.editAccess")}
                         </Button>,
                         <Popconfirm
                           key="revoke"
-                          title="Revoke this grant?"
-                          description="The caller will need to pair again."
+                          title={t("remoteInvoke.grants.revokeConfirmTitle")}
+                          description={t("remoteInvoke.grants.revokeConfirmDescription")}
                           onConfirm={() => void handleRevokeGrant(g.grant_id)}
-                          okText="Revoke"
-                          cancelText="Cancel"
+                          okText={t("remoteInvoke.action.revoke")}
+                          cancelText={t("common.cancel")}
                         >
                           <Button
                             danger
                             size="small"
                             icon={<DeleteOutlined />}
                           >
-                            Revoke
+                            {t("remoteInvoke.action.revoke")}
                           </Button>
                         </Popconfirm>,
                       ]}
@@ -2731,21 +2734,21 @@ export default function RemoteInvokeTab({
                               <Tag color={authMethod.color}>{authMethod.label}</Tag>
                             </Tooltip>
                             <Tooltip title={`grant_mode: ${g.grant_mode}`}>
-                              <Tag>{describeGrantMode(g.grant_mode)}</Tag>
+                              <Tag>{describeGrantMode(t, g.grant_mode)}</Tag>
                             </Tooltip>
                             <Tooltip title={`grant_scope: ${g.grant_scope}`}>
-                              <Tag color={describeGrantScope(g.grant_scope).color}>
-                                {describeGrantScope(g.grant_scope).label}
+                              <Tag color={describeGrantScope(t, g.grant_scope).color}>
+                                {describeGrantScope(t, g.grant_scope).label}
                               </Tag>
                             </Tooltip>
                             {g.file_access && g.file_access !== "none" && (
                               <Tag color="blue">
-                                {g.file_access === "read_write" ? "File: R/W" : "File: Read"}
+                                {g.file_access === "read_write" ? t("remoteInvoke.grants.fileRw") : t("remoteInvoke.grants.fileRead")}
                               </Tag>
                             )}
                             {g.shell_policy_set_version_snapshot != null && (
                               <Tag color="blue">
-                                shell set v{g.shell_policy_set_version_snapshot}
+                                {t("remoteInvoke.grants.shellSetVersion", { version: g.shell_policy_set_version_snapshot })}
                               </Tag>
                             )}
                           </Space>
@@ -2753,13 +2756,13 @@ export default function RemoteInvokeTab({
                         description={
                           <Space size={4} wrap>
                             <Text type="secondary" style={{ fontSize: 11 }}>
-                              Used {g.use_count ?? 0}x
+                              {t("remoteInvoke.grants.usedCount", { count: g.use_count ?? 0 })}
                             </Text>
                             <Text type="secondary" style={{ fontSize: 11 }}>
-                              · connected {formatTimestamp(g.first_connected_at ?? g.first_authorized_at ?? g.created_at)}
+                              {t("remoteInvoke.grants.connectedAt", { time: formatTimestamp(g.first_connected_at ?? g.first_authorized_at ?? g.created_at) })}
                             </Text>
                             <Text type="secondary" style={{ fontSize: 11 }}>
-                              · last command {formatTimestamp(g.last_command_at)}
+                              {t("remoteInvoke.grants.lastCommandAt", { time: formatTimestamp(g.last_command_at) })}
                             </Text>
                             {(g.os_version || g.arch) && (
                               <Text type="secondary" style={{ fontSize: 11 }}>
@@ -2768,7 +2771,7 @@ export default function RemoteInvokeTab({
                             )}
                             {g.expires_at != null && (
                               <Text type="secondary" style={{ fontSize: 11 }}>
-                                · expires {new Date(g.expires_at).toLocaleDateString()}
+                                {t("remoteInvoke.grants.expiresAt", { date: new Date(g.expires_at).toLocaleDateString() })}
                               </Text>
                             )}
                             <Tooltip title={g.caller_fingerprint}>
@@ -2778,12 +2781,12 @@ export default function RemoteInvokeTab({
                             </Tooltip>
                             {g.stdin_allowed != null && (
                               <Text type="secondary" style={{ fontSize: 11 }}>
-                                · stdin {g.stdin_allowed ? "on" : "off"}
+                                {g.stdin_allowed ? t("remoteInvoke.grants.stdinOn") : t("remoteInvoke.grants.stdinOff")}
                               </Text>
                             )}
                             {g.interactive_allowed != null && (
                               <Text type="secondary" style={{ fontSize: 11 }}>
-                                · interactive {g.interactive_allowed ? "on" : "off"}
+                                {g.interactive_allowed ? t("remoteInvoke.grants.interactiveOn") : t("remoteInvoke.grants.interactiveOff")}
                               </Text>
                             )}
                           </Space>
@@ -2802,15 +2805,15 @@ export default function RemoteInvokeTab({
             title={
               <Space>
                 <HistoryOutlined />
-                <span>Recent Calls</span>
+                <span>{t("remoteInvoke.calls.title")}</span>
                 <Badge count={calls.length} />
               </Space>
             }
             extra={
               <Space size={4}>
                 <Popconfirm
-                  title="Clear recent calls?"
-                  okText="Clear"
+                  title={t("remoteInvoke.calls.clearConfirm")}
+                  okText={t("common.clear")}
                   okButtonProps={{ danger: true }}
                   onConfirm={() => void handleClearCalls()}
                 >
@@ -2833,7 +2836,7 @@ export default function RemoteInvokeTab({
             {calls.length === 0 ? (
               <Empty
                 image={Empty.PRESENTED_IMAGE_SIMPLE}
-                description="No recent calls"
+                description={t("remoteInvoke.calls.empty")}
               />
             ) : (
               <List
@@ -2918,7 +2921,7 @@ export default function RemoteInvokeTab({
                                     fontSize: 11,
                                   }}
                                 >
-                                  by {c.caller_display_name}
+                                  {t("remoteInvoke.calls.byCaller", { caller: c.caller_display_name })}
                                 </Text>
                               </Tooltip>
                             )}
@@ -2948,13 +2951,13 @@ export default function RemoteInvokeTab({
                                     whiteSpace: "nowrap",
                                   }}
                                 >
-                                  {describeExecMode(c.exec_mode)}
+                                  {describeExecMode(t, c.exec_mode)}
                                 </Tag>
                               </Tooltip>
                             )}
                           </div>
 
-                          <Tooltip title="View call detail">
+                          <Tooltip title={t("remoteInvoke.calls.viewDetail")}>
                             <Button
                               size="small"
                               icon={<EyeOutlined />}
@@ -2984,7 +2987,7 @@ export default function RemoteInvokeTab({
       />
       <Modal
         open={callDetailOpen}
-        title="Call Detail"
+        title={t("remoteInvoke.calls.detailTitle")}
         footer={null}
         width={820}
         onCancel={() => {
@@ -3003,13 +3006,13 @@ export default function RemoteInvokeTab({
                 items={[
                   {
                     key: "call_id",
-                    label: "Call ID",
+                    label: t("remoteInvoke.calls.callId"),
                     span: 2,
                     children: <Text code copyable>{selectedCall.call_id}</Text>,
                   },
                   {
                     key: "status",
-                    label: "Status",
+                    label: t("common.status"),
                     children: (
                       <Tag color={getCallStatusColor(selectedCall)}>
                         {selectedCall.status}
@@ -3022,12 +3025,12 @@ export default function RemoteInvokeTab({
                   },
                   {
                     key: "started_at",
-                    label: "Started",
+                    label: t("remoteInvoke.calls.started"),
                     children: new Date(selectedCall.started_at).toLocaleString(),
                   },
                   {
                     key: "duration",
-                    label: "Duration",
+                    label: t("remoteInvoke.calls.duration"),
                     children:
                       selectedCall.duration_ms != null
                         ? `${selectedCall.duration_ms}ms`
@@ -3035,24 +3038,24 @@ export default function RemoteInvokeTab({
                   },
                   {
                     key: "bytes_out",
-                    label: "Bytes Out",
+                    label: t("remoteInvoke.calls.bytesOut"),
                     children: formatBytes(selectedCall.bytes_out) ?? "-",
                   },
                   {
                     key: "grant_id",
-                    label: "Grant",
+                    label: t("remoteInvoke.calls.grant"),
                     span: 2,
                     children: <Text code>{selectedCall.grant_id}</Text>,
                   },
                   {
                     key: "client",
-                    label: "Client",
+                    label: t("remoteInvoke.calls.client"),
                     span: 2,
                     children: <Text code>{selectedCall.client_instance_id}</Text>,
                   },
                   {
                     key: "caller",
-                    label: "Caller",
+                    label: t("remoteInvoke.calls.caller"),
                     span: 2,
                     children:
                       selectedCall.caller_display_name ||
@@ -3060,7 +3063,7 @@ export default function RemoteInvokeTab({
                   },
                   {
                     key: "policy",
-                    label: "Policy",
+                    label: t("remoteInvoke.calls.policy"),
                     children: selectedCall.policy_id ? (
                       <Tag color="purple">{selectedCall.policy_id}</Tag>
                     ) : (
@@ -3069,10 +3072,10 @@ export default function RemoteInvokeTab({
                   },
                   {
                     key: "exec_mode",
-                    label: "Exec Mode",
+                    label: t("remoteInvoke.calls.execMode"),
                     children: selectedCall.exec_mode ? (
                       <Tooltip title={`exec_mode: ${selectedCall.exec_mode}`}>
-                        <Tag color="blue">{describeExecMode(selectedCall.exec_mode)}</Tag>
+                        <Tag color="blue">{describeExecMode(t, selectedCall.exec_mode)}</Tag>
                       </Tooltip>
                     ) : (
                       "-"
@@ -3081,21 +3084,21 @@ export default function RemoteInvokeTab({
                 ]}
               />
               <div>
-                <Text strong>Command</Text>
+                <Text strong>{t("remoteInvoke.calls.command")}</Text>
                 {renderCallDetailBlock(getCallCommandPreview(selectedCall))}
               </div>
               <div>
-                <Text strong>Arguments</Text>
+                <Text strong>{t("remoteInvoke.calls.arguments")}</Text>
                 {renderCallDetailBlock(getCallArgsPreviewSource(selectedCall))}
               </div>
               {selectedCall.command_detail && (
                 <div>
-                  <Text strong>Command Detail</Text>
+                  <Text strong>{t("remoteInvoke.calls.commandDetail")}</Text>
                   {renderCallDetailBlock(selectedCall.command_detail)}
                 </div>
               )}
               <div>
-                <Text strong>Raw Command</Text>
+                <Text strong>{t("remoteInvoke.calls.rawCommand")}</Text>
                 {renderCallDetailBlock(selectedCall.command)}
               </div>
             </Space>
@@ -3104,9 +3107,9 @@ export default function RemoteInvokeTab({
       </Modal>
       <Modal
         open={grantEditorOpen}
-        title="Edit Grant Access"
-        okText="Save"
-        cancelText="Cancel"
+        title={t("remoteInvoke.grantEditor.title")}
+        okText={t("common.save")}
+        cancelText={t("common.cancel")}
         onCancel={() => {
           setGrantEditorOpen(false);
           setEditingGrant(null);
@@ -3123,12 +3126,12 @@ export default function RemoteInvokeTab({
             items={[
               {
                 key: "grant",
-                label: "Grant",
+                label: t("remoteInvoke.calls.grant"),
                 children: <Text code>{editingGrant?.grant_id ?? "-"}</Text>,
               },
               {
                 key: "caller",
-                label: "Caller",
+                label: t("remoteInvoke.calls.caller"),
                 children:
                   editingGrant?.caller_display_name ||
                   formatFingerprint(editingGrant?.caller_fingerprint ?? ""),
@@ -3142,12 +3145,12 @@ export default function RemoteInvokeTab({
           >
             <Space direction="vertical" style={{ width: "100%" }} size={2}>
               {([
-                { value: "full" as const, icon: <ThunderboltOutlined />, name: "Full trust", desc: "Run any command, read & write files, open interactive terminals", disabled: false },
-                { value: "shell_only" as const, icon: <CodeOutlined />, name: "Run commands & read/write files", desc: "Can execute commands, edit files, and inspect traffic. No interactive shells.", disabled: false },
-                { value: "file_only" as const, icon: <FileOutlined />, name: "Files only", desc: "Can read & write files and inspect traffic. Cannot run any shell commands.", disabled: false },
-                { value: "query" as const, icon: <SearchOutlined />, name: "Read-only watch", desc: "Can see status and traffic. Cannot run commands and cannot touch files.", disabled: false },
-                { value: "custom" as const, icon: <SettingOutlined />, name: "Custom", desc: "Pick shell + file + terminal access individually", disabled: false },
-              ] as const).map((opt) => (
+                { value: "full" as const, icon: <ThunderboltOutlined />, name: t("remoteInvoke.grantEditor.fullName"), desc: t("remoteInvoke.grantEditor.fullDesc"), disabled: false },
+                { value: "shell_only" as const, icon: <CodeOutlined />, name: t("remoteInvoke.grantEditor.shellOnlyName"), desc: t("remoteInvoke.grantEditor.shellOnlyDesc"), disabled: false },
+                { value: "file_only" as const, icon: <FileOutlined />, name: t("remoteInvoke.grantEditor.fileOnlyName"), desc: t("remoteInvoke.grantEditor.fileOnlyDesc"), disabled: false },
+                { value: "query" as const, icon: <SearchOutlined />, name: t("remoteInvoke.grantEditor.queryName"), desc: t("remoteInvoke.grantEditor.queryDesc"), disabled: false },
+                { value: "custom" as const, icon: <SettingOutlined />, name: t("remoteInvoke.grantEditor.customName"), desc: t("remoteInvoke.grantEditor.customDesc"), disabled: false },
+              ]).map((opt) => (
                 <Radio key={opt.value} value={opt.value} disabled={opt.disabled} style={{ display: "flex", alignItems: "flex-start", width: "100%", padding: "6px 0" }}>
                   <div>
                     <div style={{ fontWeight: 600, lineHeight: "22px" }}>
@@ -3169,7 +3172,7 @@ export default function RemoteInvokeTab({
                 ? "success"
                 : "info"
             }
-            message="Preview — what this caller will be able to do"
+            message={t("remoteInvoke.grantEditor.previewTitle")}
             description={
               <ul style={{ margin: 0, paddingLeft: 18 }}>
                 {(() => {
@@ -3195,44 +3198,44 @@ export default function RemoteInvokeTab({
 
                   if (shellAllowed) {
                     if (grantEditorPreset === "full" || grantEditorPreset === "shell_only") {
-                      bullets.push("Run commands from any of: Full Access");
+                      bullets.push(t("remoteInvoke.grantEditor.bulletRunFullAccess"));
                     } else if (grantEditorPreset === "custom" && grantEditorAccessMode === "selected") {
                       const names = enabledShellPolicies
                         .filter((p) => grantEditorSelectedPolicies.includes(p.id))
                         .map((p) => p.name || p.id);
                       bullets.push(
                         names.length
-                          ? "Run commands from: " + names.join(", ")
-                          : "Run commands from: (none selected — pick groups below)"
+                          ? t("remoteInvoke.grantEditor.bulletRunFrom", { names: names.join(", ") })
+                          : t("remoteInvoke.grantEditor.bulletRunFromNone")
                       );
                     } else {
                       const names = enabledShellPolicies.map((p) => p.name || p.id);
                       bullets.push(
                         names.length
-                          ? "Run commands from any of: " + names.join(", ")
-                          : "No command groups are enabled yet; add one in Shell Access settings"
+                          ? t("remoteInvoke.grantEditor.bulletRunFromAny", { names: names.join(", ") })
+                          : t("remoteInvoke.grantEditor.bulletNoGroups")
                       );
                     }
                     bullets.push(
                       interactive
-                        ? "Can open an interactive terminal"
+                        ? t("remoteInvoke.grantEditor.bulletInteractive")
                         : stdin
-                        ? "Can send stdin (one-shot input) but no interactive terminal"
-                        : "No stdin, no interactive terminal"
+                        ? t("remoteInvoke.grantEditor.bulletStdin")
+                        : t("remoteInvoke.grantEditor.bulletNoStdin")
                     );
                   } else {
-                    bullets.push("Cannot run any shell commands");
+                    bullets.push(t("remoteInvoke.grantEditor.bulletNoShell"));
                   }
 
                   if (fileScope === "read_write") {
-                    bullets.push("Can read and write files on this device");
+                    bullets.push(t("remoteInvoke.grantEditor.bulletFileRw"));
                   } else if (fileScope === "read") {
-                    bullets.push("Can read files but cannot modify them");
+                    bullets.push(t("remoteInvoke.grantEditor.bulletFileRead"));
                   } else {
-                    bullets.push("No file access");
+                    bullets.push(t("remoteInvoke.grantEditor.bulletNoFile"));
                   }
 
-                  bullets.push("Can see connection status and inspect traffic records");
+                  bullets.push(t("remoteInvoke.grantEditor.bulletTraffic"));
 
                   return bullets.map((b, i) => <li key={i}>{b}</li>);
                 })()}
@@ -3250,21 +3253,21 @@ export default function RemoteInvokeTab({
             >
               <Space direction="vertical" size={8} style={{ width: "100%" }}>
                 <div>
-                  <Text type="secondary" style={{ fontSize: 12 }}>Shell Access</Text>
+                  <Text type="secondary" style={{ fontSize: 12 }}>{t("remoteInvoke.shell.title")}</Text>
                   <Select
                     value={grantEditorAccessMode}
                     onChange={setGrantEditorAccessMode}
                     style={{ width: "100%", marginTop: 4 }}
                     options={[
-                      { value: "query", label: "Just watch traffic (no commands)" },
+                      { value: "query", label: t("remoteInvoke.grantEditor.accessQuery") },
                       {
                         value: "selected",
-                        label: "Run only commands from selected groups",
+                        label: t("remoteInvoke.grantEditor.accessSelected"),
                         disabled: enabledShellPolicies.length === 0,
                       },
                       {
                         value: "all",
-                        label: "Run commands from any enabled group",
+                        label: t("remoteInvoke.grantEditor.accessAll"),
                         disabled: enabledShellPolicies.length === 0,
                       },
                     ]}
@@ -3273,7 +3276,7 @@ export default function RemoteInvokeTab({
                 {grantEditorAccessMode === "selected" && (
                   <Select
                     mode="multiple"
-                    placeholder="Choose shell policies"
+                    placeholder={t("remoteInvoke.grantEditor.choosePolicies")}
                     value={grantEditorSelectedPolicies}
                     onChange={setGrantEditorSelectedPolicies}
                     style={{ width: "100%" }}
@@ -3285,12 +3288,12 @@ export default function RemoteInvokeTab({
                 )}
                 {grantEditorAccessMode !== "query" && (
                   <Space>
-                    <Text type="secondary">Allow stdin</Text>
+                    <Text type="secondary">{t("remoteInvoke.shell.allowStdin")}</Text>
                     <Switch
                       checked={grantEditorStdinAllowed}
                       onChange={setGrantEditorStdinAllowed}
                     />
-                    <Text type="secondary">Interactive</Text>
+                    <Text type="secondary">{t("remoteInvoke.grantEditor.interactive")}</Text>
                     <Switch
                       checked={grantEditorInteractiveAllowed}
                       onChange={setGrantEditorInteractiveAllowed}
@@ -3298,15 +3301,15 @@ export default function RemoteInvokeTab({
                   </Space>
                 )}
                 <div>
-                  <Text type="secondary" style={{ fontSize: 12 }}>File Access</Text>
+                  <Text type="secondary" style={{ fontSize: 12 }}>{t("remoteInvoke.fileAccess.title")}</Text>
                   <Select
                     value={grantEditorFileAccess}
                     onChange={setGrantEditorFileAccess}
                     style={{ width: "100%", marginTop: 4 }}
                     options={[
-                      { value: "none", label: "No file access (cannot read or write files)" },
-                      { value: "read", label: "Read-only (can open files, cannot modify)" },
-                      { value: "read_write", label: "Read & write (can modify files)" },
+                      { value: "none", label: t("remoteInvoke.grantEditor.fileNone") },
+                      { value: "read", label: t("remoteInvoke.grantEditor.fileRead") },
+                      { value: "read_write", label: t("remoteInvoke.grantEditor.fileReadWrite") },
                     ]}
                   />
                 </div>
@@ -3317,9 +3320,9 @@ export default function RemoteInvokeTab({
       </Modal>
       <Modal
         open={shellEditorOpen}
-        title="Shell access — what remote agents can run on this device"
-        okText="Save"
-        cancelText="Cancel"
+        title={t("remoteInvoke.shellEditor.title")}
+        okText={t("common.save")}
+        cancelText={t("common.cancel")}
         onCancel={() => setShellEditorOpen(false)}
         onOk={() => void handleSaveShellConfig()}
         confirmLoading={shellSaveLoading}
@@ -3330,15 +3333,16 @@ export default function RemoteInvokeTab({
           showIcon
           type="warning"
           style={{ marginBottom: 16 }}
-          message="Changing shell access rules may require callers to re-authorize"
-          description="Policy set version is bound into shell grants. If you tighten or rename policies, existing shell authorizations may stop working until the caller reconnects."
+          message={t("remoteInvoke.shellEditor.warningTitle")}
+          description={t("remoteInvoke.shellEditor.warningDescription")}
         />
         <Space direction="vertical" size={20} style={{ width: "100%" }}>
-          <Card size="small" title="Access Mode">
+          <Card size="small" title={t("remoteInvoke.shellEditor.accessMode")}>
             <Space direction="vertical" size={12} style={{ width: "100%" }}>
               <Text type="secondary">
-                Pick a preset for the common cases, or choose <b>Custom Rules</b>
-                to define exactly which commands and folders are allowed.
+                {t("remoteInvoke.shellEditor.pickPresetPrefix")}
+                <b>{t("remoteInvoke.shellMode.custom")}</b>
+                {t("remoteInvoke.shellEditor.pickPresetSuffix")}
               </Text>
               <Radio.Group
                 value={shellEditorMode}
@@ -3347,24 +3351,28 @@ export default function RemoteInvokeTab({
                 buttonStyle="solid"
                 style={{ display: "flex", flexWrap: "wrap", gap: 8 }}
               >
-                <Radio.Button value="sandbox">Safe Sandbox</Radio.Button>
-                <Radio.Button value="full-access">Trusted (Full Access)</Radio.Button>
-                <Radio.Button value="custom">Custom Rules</Radio.Button>
+                <Radio.Button value="sandbox">{t("remoteInvoke.shellMode.sandbox")}</Radio.Button>
+                <Radio.Button value="full-access">{t("remoteInvoke.shellPreset.fullAccessLabel")}</Radio.Button>
+                <Radio.Button value="custom">{t("remoteInvoke.shellMode.custom")}</Radio.Button>
               </Radio.Group>
               {shellEditorMode === "custom" ? (
                 <Alert
                   showIcon
                   type="info"
-                  message="Custom rules"
+                  message={t("remoteInvoke.shellEditor.customTitle")}
                   description={
                     <div>
                       <div style={{ marginBottom: 4 }}>
-                        Define exactly which commands an agent can run and where.
+                        {t("remoteInvoke.shellEditor.customIntro")}
                       </div>
                       <ul style={{ margin: 0, paddingLeft: 18 }}>
-                        <li>Create one or more <b>command groups</b> below.</li>
-                        <li>Each group is a set of allowed commands + an execution environment.</li>
-                        <li>Bind a group to a caller when you approve a pairing request.</li>
+                        <li>
+                          {t("remoteInvoke.shellEditor.customBullet1Prefix")}
+                          <b>{t("remoteInvoke.shellEditor.customBullet1Bold")}</b>
+                          {t("remoteInvoke.shellEditor.customBullet1Suffix")}
+                        </li>
+                        <li>{t("remoteInvoke.shellEditor.customBullet2")}</li>
+                        <li>{t("remoteInvoke.shellEditor.customBullet3")}</li>
                       </ul>
                     </div>
                   }
@@ -3373,14 +3381,14 @@ export default function RemoteInvokeTab({
                 <Alert
                   showIcon
                   type={shellEditorMode === "full-access" ? "warning" : "success"}
-                  message={shellPresetDefinition(shellEditorMode).label}
+                  message={shellPresetDisplay(t, shellEditorMode).label}
                   description={
                     <div>
                       <div style={{ marginBottom: 6 }}>
-                        {shellPresetDefinition(shellEditorMode).description}
+                        {shellPresetDisplay(t, shellEditorMode).description}
                       </div>
                       <ul style={{ margin: 0, paddingLeft: 18 }}>
-                        {shellPresetDefinition(shellEditorMode).capabilities.map((cap, idx) => (
+                        {shellPresetDisplay(t, shellEditorMode).capabilities.map((cap, idx) => (
                           <li
                             key={idx}
                             style={{
@@ -3410,12 +3418,12 @@ export default function RemoteInvokeTab({
                 onChange={setShellEditorExpertMode}
                 size="small"
               />
-              <Text>Expert mode</Text>
-              <Tooltip title="Show the raw Profiles (execution environments) and Policies (command whitelists) as separate sections. Leave this off for the simpler unified Command groups view.">
-                <Text type="secondary" style={{ fontSize: 12, cursor: "help" }}>(what is this?)</Text>
+              <Text>{t("remoteInvoke.shellEditor.expertMode")}</Text>
+              <Tooltip title={t("remoteInvoke.shellEditor.expertModeTooltip")}>
+                <Text type="secondary" style={{ fontSize: 12, cursor: "help" }}>{t("remoteInvoke.shellEditor.whatIsThis")}</Text>
               </Tooltip>
               <Button size="small" onClick={openCliPreview}>
-                Generate CLI command
+                {t("remoteInvoke.shellEditor.generateCli")}
               </Button>
             </Space>
           </div>
@@ -3426,7 +3434,8 @@ export default function RemoteInvokeTab({
               style={{ width: "100%", justifyContent: "space-between" }}
             >
               <Title level={5} style={{ margin: 0 }}>
-                Execution environments <Text type="secondary" style={{ fontWeight: 400, fontSize: 13 }}>(profiles)</Text>
+                {t("remoteInvoke.shellEditor.executionEnvironments")}{" "}
+                <Text type="secondary" style={{ fontWeight: 400, fontSize: 13 }}>{t("remoteInvoke.shellEditor.profilesHint")}</Text>
               </Title>
               <Button
                 icon={<PlusOutlined />}
@@ -3454,13 +3463,12 @@ export default function RemoteInvokeTab({
                   ]);
                 }}
               >
-                Add execution environment
+                {t("remoteInvoke.shellEditor.addExecutionEnvironment")}
               </Button>
             </Space>
             <Text type="secondary">
-              <b>Execution environments</b> — how the agent's commands will run:
-              which folders, which environment variables it can see, timeout, and
-              whether stdin / interactive terminals are allowed.
+              <b>{t("remoteInvoke.shellEditor.executionEnvironments")}</b>
+              {t("remoteInvoke.shellEditor.executionEnvironmentsHint")}
             </Text>
             <Divider style={{ margin: "12px 0" }} />
 
@@ -3468,14 +3476,14 @@ export default function RemoteInvokeTab({
               {shellEditorProfiles.length === 0 ? (
                 <Empty
                   image={Empty.PRESENTED_IMAGE_SIMPLE}
-                  description="No profiles yet"
+                  description={t("remoteInvoke.shellEditor.noProfiles")}
                 />
               ) : (
                 shellEditorProfiles.map((profile, index) => (
                   <Card
                     key={`profile-editor-${profile.id}-${index}`}
                     size="small"
-                    title={profile.name || profile.id || `Profile ${index + 1}`}
+                    title={profile.name || profile.id || t("remoteInvoke.shellEditor.defaultProfileName", { index: index + 1 })}
                     extra={
                       <Button
                         size="small"
@@ -3487,13 +3495,13 @@ export default function RemoteInvokeTab({
                           )
                         }
                       >
-                        Remove
+                        {t("common.remove")}
                       </Button>
                     }
                   >
                     <Row gutter={[12, 12]}>
                       <Col xs={24} md={10}>
-                        <Text type="secondary">Profile name</Text>
+                        <Text type="secondary">{t("remoteInvoke.shellEditor.profileName")}</Text>
                         <Input
                           value={profile.name}
                           onChange={(e) =>
@@ -3508,14 +3516,14 @@ export default function RemoteInvokeTab({
                         />
                       </Col>
                       <Col xs={24} md={10}>
-                        <Text type="secondary">Profile ID</Text>
+                        <Text type="secondary">{t("remoteInvoke.shellEditor.profileId")}</Text>
                         <Input
                           value={profile.id}
                           readOnly
                         />
                       </Col>
                       <Col xs={24} md={4}>
-                        <Text type="secondary">Enabled</Text>
+                        <Text type="secondary">{t("common.enabled")}</Text>
                         <div>
                           <Switch
                             checked={profile.enabled}
@@ -3532,7 +3540,7 @@ export default function RemoteInvokeTab({
                         </div>
                       </Col>
                       <Col xs={24}>
-                        <Text type="secondary">Description</Text>
+                        <Text type="secondary">{t("common.description")}</Text>
                         <Input
                           value={profile.description}
                           onChange={(e) =>
@@ -3547,7 +3555,7 @@ export default function RemoteInvokeTab({
                         />
                       </Col>
                       <Col xs={24} md={12}>
-                        <Text type="secondary">Allowed working directories</Text>
+                        <Text type="secondary">{t("remoteInvoke.shellEditor.allowedCwd")}</Text>
                         <Select
                           mode="tags"
                           style={{ width: "100%" }}
@@ -3562,11 +3570,11 @@ export default function RemoteInvokeTab({
                             )
                           }
                           tokenSeparators={[","]}
-                          placeholder="Add allowed cwd prefixes"
+                          placeholder={t("remoteInvoke.shellEditor.allowedCwdPlaceholder")}
                         />
                       </Col>
                       <Col xs={24} md={12}>
-                        <Text type="secondary">Allowed environment keys</Text>
+                        <Text type="secondary">{t("remoteInvoke.shellEditor.allowedEnv")}</Text>
                         <Select
                           mode="tags"
                           style={{ width: "100%" }}
@@ -3581,11 +3589,11 @@ export default function RemoteInvokeTab({
                             )
                           }
                           tokenSeparators={[","]}
-                          placeholder="Add allowed env keys"
+                          placeholder={t("remoteInvoke.shellEditor.allowedEnvPlaceholder")}
                         />
                       </Col>
                       <Col xs={24} md={12}>
-                        <Text type="secondary">Default working directory</Text>
+                        <Text type="secondary">{t("remoteInvoke.shellEditor.defaultCwd")}</Text>
                         <Input
                           value={profile.default_cwd}
                           onChange={(e) =>
@@ -3600,7 +3608,7 @@ export default function RemoteInvokeTab({
                         />
                       </Col>
                       <Col xs={24} md={12}>
-                        <Text type="secondary">Max timeout (ms)</Text>
+                        <Text type="secondary">{t("remoteInvoke.shellEditor.maxTimeout")}</Text>
                         <InputNumber
                           style={{ width: "100%" }}
                           min={1}
@@ -3620,11 +3628,11 @@ export default function RemoteInvokeTab({
                               ),
                             )
                           }
-                          placeholder="Optional"
+                          placeholder={t("common.optional")}
                         />
                       </Col>
                       <Col xs={12} md={6}>
-                        <Text type="secondary">Allow stdin</Text>
+                        <Text type="secondary">{t("remoteInvoke.shell.allowStdin")}</Text>
                         <div>
                           <Switch
                             checked={profile.stdin_allowed}
@@ -3641,7 +3649,7 @@ export default function RemoteInvokeTab({
                         </div>
                       </Col>
                       <Col xs={12} md={6}>
-                        <Text type="secondary">Allow interactive</Text>
+                        <Text type="secondary">{t("remoteInvoke.shellEditor.allowInteractive")}</Text>
                         <div>
                           <Switch
                             checked={profile.interactive_allowed}
@@ -3670,9 +3678,9 @@ export default function RemoteInvokeTab({
               style={{ width: "100%", justifyContent: "space-between" }}
             >
               <Title level={5} style={{ margin: 0 }}>
-                Command groups
+                {t("remoteInvoke.shellEditor.commandGroups")}
                 {shellEditorExpertMode && (
-                  <Text type="secondary" style={{ fontWeight: 400, fontSize: 13 }}> (policies)</Text>
+                  <Text type="secondary" style={{ fontWeight: 400, fontSize: 13 }}>{t("remoteInvoke.shellEditor.policiesHint")}</Text>
                 )}
               </Title>
               <Button
@@ -3731,11 +3739,11 @@ export default function RemoteInvokeTab({
                   ]);
                 }}
               >
-                Add command group
+                {t("remoteInvoke.shellEditor.addCommandGroup")}
               </Button>
             </Space>
             <Text type="secondary">
-              Policies define what callers may execute and which profile applies.
+              {t("remoteInvoke.shellEditor.policiesDescription")}
             </Text>
             <Divider style={{ margin: "12px 0" }} />
 
@@ -3743,14 +3751,14 @@ export default function RemoteInvokeTab({
               {shellEditorPolicies.length === 0 ? (
                 <Empty
                   image={Empty.PRESENTED_IMAGE_SIMPLE}
-                  description="No policies yet"
+                  description={t("remoteInvoke.shellEditor.noPolicies")}
                 />
               ) : (
                 shellEditorPolicies.map((policy, index) => (
                   <Card
                     key={`policy-editor-${policy.id}-${index}`}
                     size="small"
-                    title={policy.name || policy.id || `Policy ${index + 1}`}
+                    title={policy.name || policy.id || t("remoteInvoke.shellEditor.defaultPolicyName", { index: index + 1 })}
                     extra={
                       <Button
                         size="small"
@@ -3762,13 +3770,13 @@ export default function RemoteInvokeTab({
                           )
                         }
                       >
-                        Remove
+                        {t("common.remove")}
                       </Button>
                     }
                   >
                     <Row gutter={[12, 12]}>
                       <Col xs={24} md={8}>
-                        <Text type="secondary">Policy name</Text>
+                        <Text type="secondary">{t("remoteInvoke.shellEditor.policyName")}</Text>
                         <Input
                           value={policy.name}
                           onChange={(e) =>
@@ -3783,14 +3791,14 @@ export default function RemoteInvokeTab({
                         />
                       </Col>
                       <Col xs={24} md={8}>
-                        <Text type="secondary">Policy ID</Text>
+                        <Text type="secondary">{t("remoteInvoke.shellEditor.policyId")}</Text>
                         <Input
                           value={policy.id}
                           readOnly
                         />
                       </Col>
                       <Col xs={24} md={4}>
-                        <Text type="secondary">Enabled</Text>
+                        <Text type="secondary">{t("common.enabled")}</Text>
                         <div>
                           <Switch
                             checked={policy.enabled}
@@ -3807,8 +3815,8 @@ export default function RemoteInvokeTab({
                         </div>
                       </Col>
                       <Col xs={24} md={6}>
-                        <Tooltip title="Match commands by exact program name (argv_exec) or by a shell text pattern (shell_text). Underlying field: exec_mode">
-                          <Text type="secondary">Match by</Text>
+                        <Tooltip title={t("remoteInvoke.shellEditor.matchByTooltip")}>
+                          <Text type="secondary">{t("remoteInvoke.shellEditor.matchBy")}</Text>
                         </Tooltip>
                         <Select
                           style={{ width: "100%" }}
@@ -3823,12 +3831,12 @@ export default function RemoteInvokeTab({
                             )
                           }
                         >
-                          <Option value="argv_exec">Specific commands (argv list)</Option>
-                          <Option value="shell_text">Shell text pattern (regex)</Option>
+                          <Option value="argv_exec">{t("remoteInvoke.shellEditor.matchArgv")}</Option>
+                          <Option value="shell_text">{t("remoteInvoke.shellEditor.matchShellText")}</Option>
                         </Select>
                       </Col>
                       <Col xs={24}>
-                        <Text type="secondary">Description</Text>
+                        <Text type="secondary">{t("common.description")}</Text>
                         <Input
                           value={policy.description}
                           onChange={(e) =>
@@ -3843,7 +3851,7 @@ export default function RemoteInvokeTab({
                         />
                       </Col>
                       <Col xs={24} md={12}>
-                        <Text type="secondary">Sandbox profile</Text>
+                        <Text type="secondary">{t("remoteInvoke.shellEditor.sandboxProfile")}</Text>
                         <Select
                           allowClear
                           style={{ width: "100%" }}
@@ -3858,11 +3866,11 @@ export default function RemoteInvokeTab({
                               ),
                             )
                           }
-                          placeholder="Choose a profile"
+                          placeholder={t("remoteInvoke.shellEditor.chooseProfile")}
                         />
                       </Col>
                       <Col xs={24} md={12}>
-                        <Text type="secondary">Allowed executables</Text>
+                        <Text type="secondary">{t("remoteInvoke.shellEditor.allowedExecutables")}</Text>
                         <Select
                           mode="tags"
                           style={{ width: "100%" }}
@@ -3877,17 +3885,17 @@ export default function RemoteInvokeTab({
                             )
                           }
                           tokenSeparators={[","]}
-                          placeholder="Add executable paths"
+                          placeholder={t("remoteInvoke.shellEditor.allowedExecutablesPlaceholder")}
                         />
                       </Col>
                       <Col xs={24} md={12}>
-                        <Tooltip title="Each row allows one shell command. Use 'Starts with' for a literal command prefix (recommended), or switch to 'Regex' for full control.">
-                          <Text type="secondary">Allowed shell patterns</Text>
+                        <Tooltip title={t("remoteInvoke.shellEditor.patternsTooltip")}>
+                          <Text type="secondary">{t("remoteInvoke.shellEditor.allowedPatterns")}</Text>
                         </Tooltip>
                         <Space direction="vertical" size={6} style={{ width: "100%" }}>
                           {policy.allowed_shell_patterns.length === 0 && (
                             <Text type="secondary" style={{ fontSize: 12 }}>
-                              No patterns yet. Click Add to allow a command.
+                              {t("remoteInvoke.shellEditor.noPatterns")}
                             </Text>
                           )}
                           {policy.allowed_shell_patterns.map((pat, patIdx) => {
@@ -3937,14 +3945,14 @@ export default function RemoteInvokeTab({
                                     }
                                   }}
                                   options={[
-                                    { value: "prefix", label: "Starts with" },
-                                    { value: "regex", label: "Regex" },
+                                    { value: "prefix", label: t("remoteInvoke.shellEditor.patternPrefix") },
+                                    { value: "regex", label: t("remoteInvoke.shellEditor.patternRegex") },
                                   ]}
                                 />
                                 <Input
                                   style={{ flex: 1 }}
                                   value={isPrefix ? (decoded as string) : pat}
-                                  placeholder={isPrefix ? "e.g. git status" : "e.g. ^ls(\\s|$)"}
+                                  placeholder={isPrefix ? t("remoteInvoke.shellEditor.prefixPlaceholder") : t("remoteInvoke.shellEditor.regexPlaceholder")}
                                   onChange={(e) => {
                                     const raw = e.target.value;
                                     setShellEditorPolicies((prev) =>
@@ -4014,13 +4022,13 @@ export default function RemoteInvokeTab({
                                 )
                               }
                             >
-                              Add command
+                              {t("remoteInvoke.shellEditor.addCommand")}
                             </Button>
                           </Space>
                         </Space>
                       </Col>
                       <Col xs={24} md={12}>
-                        <Text type="secondary">Allowed working directories</Text>
+                        <Text type="secondary">{t("remoteInvoke.shellEditor.allowedCwd")}</Text>
                         <Select
                           mode="tags"
                           style={{ width: "100%" }}
@@ -4035,11 +4043,11 @@ export default function RemoteInvokeTab({
                             )
                           }
                           tokenSeparators={[","]}
-                          placeholder="Optional extra cwd restrictions"
+                          placeholder={t("remoteInvoke.shellEditor.extraCwdPlaceholder")}
                         />
                       </Col>
                       <Col xs={24} md={12}>
-                        <Text type="secondary">Allowed environment keys</Text>
+                        <Text type="secondary">{t("remoteInvoke.shellEditor.allowedEnv")}</Text>
                         <Select
                           mode="tags"
                           style={{ width: "100%" }}
@@ -4054,11 +4062,11 @@ export default function RemoteInvokeTab({
                             )
                           }
                           tokenSeparators={[","]}
-                          placeholder="Optional env restrictions"
+                          placeholder={t("remoteInvoke.shellEditor.extraEnvPlaceholder")}
                         />
                       </Col>
                       <Col xs={24} md={12}>
-                        <Text type="secondary">Default working directory</Text>
+                        <Text type="secondary">{t("remoteInvoke.shellEditor.defaultCwd")}</Text>
                         <Input
                           value={policy.default_cwd}
                           onChange={(e) =>
@@ -4073,7 +4081,7 @@ export default function RemoteInvokeTab({
                         />
                       </Col>
                       <Col xs={24} md={12}>
-                        <Text type="secondary">Max timeout (ms)</Text>
+                        <Text type="secondary">{t("remoteInvoke.shellEditor.maxTimeout")}</Text>
                         <InputNumber
                           style={{ width: "100%" }}
                           min={1}
@@ -4093,11 +4101,11 @@ export default function RemoteInvokeTab({
                               ),
                             )
                           }
-                          placeholder="Optional"
+                          placeholder={t("common.optional")}
                         />
                       </Col>
                       <Col xs={12} md={6}>
-                        <Text type="secondary">Allow stdin</Text>
+                        <Text type="secondary">{t("remoteInvoke.shell.allowStdin")}</Text>
                         <div>
                           <Switch
                             checked={policy.stdin_allowed}
@@ -4114,7 +4122,7 @@ export default function RemoteInvokeTab({
                         </div>
                       </Col>
                       <Col xs={12} md={6}>
-                        <Text type="secondary">Allow interactive</Text>
+                        <Text type="secondary">{t("remoteInvoke.shellEditor.allowInteractive")}</Text>
                         <div>
                           <Switch
                             checked={policy.interactive_allowed}
@@ -4134,9 +4142,9 @@ export default function RemoteInvokeTab({
 
                     <Divider style={{ margin: "12px 0" }} />
                     <div>
-                      <Text strong>🧪 Test this group</Text>
+                      <Text strong>{t("remoteInvoke.shellEditor.testGroup")}</Text>
                       <Text type="secondary" style={{ marginLeft: 8, fontSize: 12 }}>
-                        Check whether a sample command would be allowed by the currently-saved policy set.
+                        {t("remoteInvoke.shellEditor.testGroupHint")}
                       </Text>
                       <Row gutter={[8, 8]} style={{ marginTop: 8 }} align="middle">
                         <Col xs={24} md={6}>
@@ -4147,14 +4155,14 @@ export default function RemoteInvokeTab({
                               setShellEditorTestMode((prev) => ({ ...prev, [policy.id]: value }))
                             }
                             options={[
-                              { value: "shell_text", label: "Shell text" },
-                              { value: "argv_exec", label: "Argv exec" },
+                              { value: "shell_text", label: t("remoteInvoke.execMode.shellText") },
+                              { value: "argv_exec", label: t("remoteInvoke.shellEditor.argvExec") },
                             ]}
                           />
                         </Col>
                         <Col xs={24} md={12}>
                           <Input
-                            placeholder="e.g. ls -la /tmp"
+                            placeholder={t("remoteInvoke.shellEditor.testPlaceholder")}
                             value={shellEditorTestInput[policy.id] ?? ""}
                             onChange={(e) =>
                               setShellEditorTestInput((prev) => ({
@@ -4172,7 +4180,7 @@ export default function RemoteInvokeTab({
                             loading={shellEditorTestLoading[policy.id] ?? false}
                             onClick={() => runShellPolicyTest(policy.id)}
                           >
-                            Test
+                            {t("remoteInvoke.shellEditor.test")}
                           </Button>
                         </Col>
                       </Row>
@@ -4190,15 +4198,15 @@ export default function RemoteInvokeTab({
                           message={
                             shellEditorTestResult[policy.id]!.matched
                               ? shellEditorTestResult[policy.id]!.matched_policy_id === policy.id
-                                ? `✓ Matched this group (policy '${shellEditorTestResult[policy.id]!.matched_policy_id}')`
-                                : `⚠ Matched a different group: '${shellEditorTestResult[policy.id]!.matched_policy_id}'`
-                              : "✗ Not allowed by any enabled policy"
+                                ? t("remoteInvoke.shellEditor.testMatchedThis", { id: shellEditorTestResult[policy.id]!.matched_policy_id })
+                                : t("remoteInvoke.shellEditor.testMatchedOther", { id: shellEditorTestResult[policy.id]!.matched_policy_id })
+                              : t("remoteInvoke.shellEditor.testNotAllowed")
                           }
                           description={shellEditorTestResult[policy.id]!.reason}
                         />
                       )}
                       <Text type="secondary" style={{ fontSize: 11, display: "block", marginTop: 6 }}>
-                        Tests run against the saved config on this device. Save your edits first to include them.
+                        {t("remoteInvoke.shellEditor.testFootnote")}
                       </Text>
                     </div>
                   </Card>
@@ -4208,20 +4216,20 @@ export default function RemoteInvokeTab({
           </div>
           </>
           ) : (
-            <Card size="small" title="Preset Preview">
+            <Card size="small" title={t("remoteInvoke.shellEditor.presetPreview")}>
               <Space direction="vertical" size={16} style={{ width: "100%" }}>
                 <Descriptions size="small" column={1} bordered>
-                  <Descriptions.Item label="Mode">
-                    {shellPresetDefinition(shellEditorMode).label}
+                  <Descriptions.Item label={t("remoteInvoke.shellEditor.mode")}>
+                    {shellPresetDisplay(t, shellEditorMode).label}
                   </Descriptions.Item>
-                  <Descriptions.Item label="Policies">
+                  <Descriptions.Item label={t("remoteInvoke.shell.policies")}>
                     {shellEditorPolicies.map((policy) => (
                       <Tag key={policy.id} color="blue" style={{ marginBottom: 4 }}>
                         {policy.name} ({policy.id})
                       </Tag>
                     ))}
                   </Descriptions.Item>
-                  <Descriptions.Item label="Profiles">
+                  <Descriptions.Item label={t("remoteInvoke.shell.profiles")}>
                     {shellEditorProfiles.length > 0 ? (
                       shellEditorProfiles.map((profile) => (
                         <Tag key={profile.id} color="green" style={{ marginBottom: 4 }}>
@@ -4229,15 +4237,15 @@ export default function RemoteInvokeTab({
                         </Tag>
                       ))
                     ) : (
-                      <Text type="secondary">No extra profile. Policy metadata applies directly.</Text>
+                      <Text type="secondary">{t("remoteInvoke.shellEditor.noExtraProfile")}</Text>
                     )}
                   </Descriptions.Item>
                 </Descriptions>
                 <Alert
                   showIcon
                   type="info"
-                  message="This preset still saves into the standard shell policy store"
-                  description="You can switch back to <b>Custom Rules</b> any time to fine-tune allowed commands, folders, timeouts, stdin, or interactive terminals."
+                  message={t("remoteInvoke.shellEditor.presetStoreTitle")}
+                  description={t("remoteInvoke.shellEditor.presetStoreDescription")}
                 />
               </Space>
             </Card>
@@ -4246,7 +4254,7 @@ export default function RemoteInvokeTab({
       </Modal>
       <Modal
         open={cliPreviewOpen}
-        title="Equivalent CLI commands"
+        title={t("remoteInvoke.cliPreview.title")}
         onCancel={() => setCliPreviewOpen(false)}
         width={820}
         footer={[
@@ -4256,16 +4264,16 @@ export default function RemoteInvokeTab({
             onClick={async () => {
               const ok = await copyToClipboard(cliPreviewText);
               if (ok) {
-                message.success("Copied");
+                message.success(t("common.copied"));
               } else {
-                message.error("Copy failed");
+                message.error(t("common.copyFailed"));
               }
             }}
           >
-            Copy
+            {t("common.copy")}
           </Button>,
           <Button key="close" onClick={() => setCliPreviewOpen(false)}>
-            Close
+            {t("common.close")}
           </Button>,
         ]}
       >
@@ -4273,8 +4281,8 @@ export default function RemoteInvokeTab({
           showIcon
           type="info"
           style={{ marginBottom: 12 }}
-          message="Run on the target device"
-          description="These commands reproduce the current editor state via the local Bifrost CLI. They are NOT executed automatically — copy and run them on the device you want to control."
+          message={t("remoteInvoke.cliPreview.runOnTarget")}
+          description={t("remoteInvoke.cliPreview.description")}
         />
         <pre
           style={{
@@ -4287,21 +4295,22 @@ export default function RemoteInvokeTab({
             whiteSpace: "pre-wrap",
           }}
         >
-          {cliPreviewText || "(empty)"}
+          {cliPreviewText || t("remoteInvoke.cliPreview.empty")}
         </pre>
       </Modal>
       <Modal
         open={fileAccessEditorOpen}
         title={
           fileAccessEditingGrant
-            ? `File Access: ${
-                fileAccessEditingGrant.caller_display_name ||
-                formatFingerprint(fileAccessEditingGrant.caller_fingerprint)
-              }`
-            : "File Access"
+            ? t("remoteInvoke.fileAccess.editorTitle", {
+                caller:
+                  fileAccessEditingGrant.caller_display_name ||
+                  formatFingerprint(fileAccessEditingGrant.caller_fingerprint),
+              })
+            : t("remoteInvoke.fileAccess.title")
         }
-        okText="Save"
-        cancelText="Cancel"
+        okText={t("common.save")}
+        cancelText={t("common.cancel")}
         onCancel={() => {
           setFileAccessEditorOpen(false);
           setFileAccessEditingGrant(null);
@@ -4316,21 +4325,21 @@ export default function RemoteInvokeTab({
           showIcon
           type="info"
           style={{ marginBottom: 16 }}
-          message="This policy is bound to the selected grant"
-          description="Choose the access type and directory scope for this active grant. When the grant is revoked, its file access policy is removed with it."
+          message={t("remoteInvoke.fileAccess.boundTitle")}
+          description={t("remoteInvoke.fileAccess.boundDescription")}
         />
         {fileAccessEditingGrant && fileAccessDraft ? (
           <Space direction="vertical" size={16} style={{ width: "100%" }}>
             <Row gutter={12}>
               <Col xs={24} md={12}>
-                <Text type="secondary" style={{ fontSize: 12 }}>Grant ID</Text>
+                <Text type="secondary" style={{ fontSize: 12 }}>{t("remoteInvoke.fileAccess.grantId")}</Text>
                 <Input value={fileAccessEditingGrant.grant_id} disabled />
               </Col>
               <Col xs={24} md={12}>
-                <Text type="secondary" style={{ fontSize: 12 }}>Name</Text>
+                <Text type="secondary" style={{ fontSize: 12 }}>{t("common.name")}</Text>
                 <Input
                   value={fileAccessDraft.name ?? ""}
-                  placeholder="Human-readable label"
+                  placeholder={t("remoteInvoke.fileAccess.namePlaceholder")}
                   onChange={(e) => {
                     const name = e.target.value;
                     setFileAccessDraft((prev) => prev ? { ...prev, name } : prev);
@@ -4341,7 +4350,7 @@ export default function RemoteInvokeTab({
 
             <Row gutter={12}>
               <Col xs={24} md={12}>
-                <Text type="secondary" style={{ fontSize: 12 }}>Type</Text>
+                <Text type="secondary" style={{ fontSize: 12 }}>{t("common.type")}</Text>
                 <Radio.Group
                   style={{ width: "100%" }}
                   value={getFileAccessPolicyAccess(fileAccessDraft)}
@@ -4355,13 +4364,13 @@ export default function RemoteInvokeTab({
                   optionType="button"
                   buttonStyle="solid"
                   options={[
-                    { label: "Read Only", value: "read" },
-                    { label: "Read Write", value: "read_write" },
+                    { label: t("remoteInvoke.fileAccess.readOnly"), value: "read" },
+                    { label: t("remoteInvoke.fileAccess.readWrite"), value: "read_write" },
                   ]}
                 />
               </Col>
               <Col xs={24} md={12}>
-                <Text type="secondary" style={{ fontSize: 12 }}>Directories</Text>
+                <Text type="secondary" style={{ fontSize: 12 }}>{t("remoteInvoke.fileAccess.directories")}</Text>
                 <Radio.Group
                   style={{ width: "100%" }}
                   value={getFileAccessPolicyRootScope(fileAccessDraft)}
@@ -4379,8 +4388,8 @@ export default function RemoteInvokeTab({
                   optionType="button"
                   buttonStyle="solid"
                   options={[
-                    { label: "Selected", value: "selected" },
-                    { label: "All", value: "all" },
+                    { label: t("remoteInvoke.fileAccess.selected"), value: "selected" },
+                    { label: t("common.all"), value: "all" },
                   ]}
                 />
               </Col>
@@ -4388,7 +4397,7 @@ export default function RemoteInvokeTab({
 
             {getFileAccessPolicyRootScope(fileAccessDraft) === "selected" && (
               <div>
-                <Text type="secondary" style={{ fontSize: 12 }}>Allowed Roots (one per line)</Text>
+                <Text type="secondary" style={{ fontSize: 12 }}>{t("remoteInvoke.fileAccess.allowedRoots")}</Text>
                 <TextArea
                   data-testid="file-access-roots-input"
                   autoSize={{ minRows: 3, maxRows: 6 }}
@@ -4403,7 +4412,7 @@ export default function RemoteInvokeTab({
             )}
 
             <div>
-              <Text type="secondary" style={{ fontSize: 12 }}>Deny Patterns (one per line)</Text>
+              <Text type="secondary" style={{ fontSize: 12 }}>{t("remoteInvoke.fileAccess.denyPatterns")}</Text>
               <TextArea
                 autoSize={{ minRows: 2, maxRows: 4 }}
                 value={(fileAccessDraft.denies ?? []).join("\n")}
@@ -4416,7 +4425,7 @@ export default function RemoteInvokeTab({
             </div>
 
             <div>
-              <Text type="secondary" style={{ fontSize: 12 }}>Write Deny Patterns (one per line)</Text>
+              <Text type="secondary" style={{ fontSize: 12 }}>{t("remoteInvoke.fileAccess.writeDenyPatterns")}</Text>
               <TextArea
                 autoSize={{ minRows: 1, maxRows: 4 }}
                 value={(fileAccessDraft.write_denies ?? []).join("\n")}
@@ -4430,7 +4439,7 @@ export default function RemoteInvokeTab({
 
             <Row gutter={12}>
               <Col xs={24} md={8}>
-                <Text type="secondary" style={{ fontSize: 12 }}>Max Read Bytes</Text>
+                <Text type="secondary" style={{ fontSize: 12 }}>{t("remoteInvoke.fileAccess.maxReadBytes")}</Text>
                 <InputNumber
                   style={{ width: "100%" }}
                   value={fileAccessDraft.max_read_bytes}
@@ -4444,7 +4453,7 @@ export default function RemoteInvokeTab({
                 />
               </Col>
               <Col xs={24} md={8}>
-                <Text type="secondary" style={{ fontSize: 12 }}>Max Write Bytes</Text>
+                <Text type="secondary" style={{ fontSize: 12 }}>{t("remoteInvoke.fileAccess.maxWriteBytes")}</Text>
                 <InputNumber
                   style={{ width: "100%" }}
                   value={fileAccessDraft.max_write_bytes}
@@ -4469,7 +4478,7 @@ export default function RemoteInvokeTab({
                         );
                       }}
                     />
-                    <Text type="secondary" style={{ fontSize: 12 }}>Respect .gitignore</Text>
+                    <Text type="secondary" style={{ fontSize: 12 }}>{t("remoteInvoke.fileAccess.respectGitignore")}</Text>
                   </Space>
                   <Space>
                     <Switch
@@ -4481,7 +4490,7 @@ export default function RemoteInvokeTab({
                         );
                       }}
                     />
-                    <Text type="secondary" style={{ fontSize: 12 }}>Allow Overwrite</Text>
+                    <Text type="secondary" style={{ fontSize: 12 }}>{t("remoteInvoke.fileAccess.allowOverwrite")}</Text>
                   </Space>
                   <Space>
                     <Switch
@@ -4493,21 +4502,21 @@ export default function RemoteInvokeTab({
                         );
                       }}
                     />
-                    <Text type="secondary" style={{ fontSize: 12 }}>Allow Recursive Delete</Text>
+                    <Text type="secondary" style={{ fontSize: 12 }}>{t("remoteInvoke.fileAccess.allowRecursiveDelete")}</Text>
                   </Space>
                 </Space>
               </Col>
             </Row>
           </Space>
         ) : (
-          <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No grant selected" />
+          <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={t("remoteInvoke.fileAccess.noGrantSelected")} />
         )}
       </Modal>
       <Modal
         open={sshFilePolicyOpen}
-        title="SSH Key Default File Policy"
-        okText="Save"
-        cancelText="Cancel"
+        title={t("remoteInvoke.sshFilePolicy.title")}
+        okText={t("common.save")}
+        cancelText={t("common.cancel")}
         onCancel={() => setSshFilePolicyOpen(false)}
         onOk={() => void handleSaveSshFilePolicy()}
         confirmLoading={sshFilePolicySaving}
@@ -4517,12 +4526,12 @@ export default function RemoteInvokeTab({
           showIcon
           type="info"
           style={{ marginBottom: 16 }}
-          message="Applies to callers connected through the current SSH key"
-          description="The policy is matched by SSH key fingerprint, so new grants created by this key inherit these file roots and operations."
+          message={t("remoteInvoke.sshFilePolicy.infoTitle")}
+          description={t("remoteInvoke.sshFilePolicy.infoDescription")}
         />
         <Space direction="vertical" size={16} style={{ width: "100%" }}>
           <div>
-            <Text type="secondary" style={{ fontSize: 12 }}>Access</Text>
+            <Text type="secondary" style={{ fontSize: 12 }}>{t("remoteInvoke.sshFilePolicy.access")}</Text>
             <Radio.Group
               style={{ width: "100%" }}
               value={sshFilePolicyAccess}
@@ -4530,13 +4539,13 @@ export default function RemoteInvokeTab({
               optionType="button"
               buttonStyle="solid"
               options={[
-                { label: "Read Only", value: "read" },
-                { label: "Read Write", value: "read_write" },
+                { label: t("remoteInvoke.fileAccess.readOnly"), value: "read" },
+                { label: t("remoteInvoke.fileAccess.readWrite"), value: "read_write" },
               ]}
             />
           </div>
           <div>
-            <Text type="secondary" style={{ fontSize: 12 }}>Directories</Text>
+            <Text type="secondary" style={{ fontSize: 12 }}>{t("remoteInvoke.fileAccess.directories")}</Text>
             <Radio.Group
               style={{ width: "100%" }}
               value={sshFilePolicyRootScope}
@@ -4544,14 +4553,14 @@ export default function RemoteInvokeTab({
               optionType="button"
               buttonStyle="solid"
               options={[
-                { label: "Selected", value: "selected" },
-                { label: "All", value: "all" },
+                { label: t("remoteInvoke.fileAccess.selected"), value: "selected" },
+                { label: t("common.all"), value: "all" },
               ]}
             />
           </div>
           {sshFilePolicyRootScope === "selected" && (
             <div>
-              <Text type="secondary" style={{ fontSize: 12 }}>Allowed Roots (one per line)</Text>
+              <Text type="secondary" style={{ fontSize: 12 }}>{t("remoteInvoke.fileAccess.allowedRoots")}</Text>
               <TextArea
                 autoSize={{ minRows: 3, maxRows: 6 }}
                 value={sshFilePolicyRoots}
@@ -4567,7 +4576,7 @@ export default function RemoteInvokeTab({
                 checked={sshFilePolicyAllowOverwrite}
                 onChange={setSshFilePolicyAllowOverwrite}
               />
-              <Text type="secondary">Allow overwriting existing files</Text>
+              <Text type="secondary">{t("remoteInvoke.fileAccess.allowOverwriteLong")}</Text>
             </Space>
             <Space>
               <Switch
@@ -4575,16 +4584,16 @@ export default function RemoteInvokeTab({
                 checked={sshFilePolicyAllowRecursiveDelete}
                 onChange={setSshFilePolicyAllowRecursiveDelete}
               />
-              <Text type="secondary">Allow recursive directory deletion</Text>
+              <Text type="secondary">{t("remoteInvoke.fileAccess.allowRecursiveDeleteLong")}</Text>
             </Space>
           </Space>
         </Space>
       </Modal>
       <Modal
         open={editorOpen}
-        title="Create SSH key"
-        okText="Create"
-        cancelText="Cancel"
+        title={t("remoteInvoke.sshCreate.title")}
+        okText={t("common.create")}
+        cancelText={t("common.cancel")}
         onCancel={() => setEditorOpen(false)}
         onOk={() => void handleSubmitSshForm()}
         confirmLoading={sshAction === "create"}
@@ -4594,8 +4603,8 @@ export default function RemoteInvokeTab({
           showIcon
           type="info"
           style={{ marginBottom: 16 }}
-          message="Only one active SSH key is supported, and SSH grants stay active until rotation or revoke"
-          description="Creating a new key should automatically revoke the previous SSH key and its grants on the backend. SSH mode ignores time-based grant TTL, so callers keep access until you rotate or revoke this SSH key."
+          message={t("remoteInvoke.sshCreate.infoTitle")}
+          description={t("remoteInvoke.sshCreate.infoDescription")}
         />
         <Form
           form={sshForm}
@@ -4610,11 +4619,11 @@ export default function RemoteInvokeTab({
           }}
         >
           <Form.Item
-            label="Label"
+            label={t("remoteInvoke.ssh.label")}
             name="label"
             rules={[
-              { required: true, message: "Please enter a label" },
-              { max: 80, message: "Label must be 80 characters or fewer" },
+              { required: true, message: t("remoteInvoke.sshCreate.labelRequired") },
+              { max: 80, message: t("remoteInvoke.sshCreate.labelMax") },
             ]}
           >
             <Input placeholder="CI Agent" maxLength={80} />
@@ -4623,26 +4632,26 @@ export default function RemoteInvokeTab({
             <Input />
           </Form.Item>
           <Divider plain style={{ marginTop: 8 }}>
-            File access scope
+            {t("remoteInvoke.sshCreate.fileScope")}
           </Divider>
           <Alert
             showIcon
             type="info"
             style={{ marginBottom: 12 }}
-            message="SSH Key authorization has no pair-code confirm dialog"
-            description="File permissions below are written into file-access.toml at key-creation time so coding-agent flows (file.read / file.write / file.edit / file.patch) work out of the box. Narrow the roots or ops here if you want to restrict this key."
+            message={t("remoteInvoke.sshCreate.noConfirmTitle")}
+            description={t("remoteInvoke.sshCreate.noConfirmDescription")}
           />
           <Form.Item
-            label="Root directories"
+            label={t("remoteInvoke.sshCreate.rootDirs")}
             name="seed_roots"
-            tooltip="Comma-separated absolute paths. Leave empty to default to $HOME on the target machine."
+            tooltip={t("remoteInvoke.sshCreate.rootDirsTooltip")}
           >
             <Input placeholder="~/work, /opt/projects" />
           </Form.Item>
           <Form.Item
-            label="Allowed file operations"
+            label={t("remoteInvoke.sshCreate.allowedOps")}
             name="seed_ops"
-            tooltip="Operations the caller may invoke via bifrost remote file. Uncheck to narrow."
+            tooltip={t("remoteInvoke.sshCreate.allowedOpsTooltip")}
           >
             <Checkbox.Group
               options={REMOTE_INVOKE_FILE_OPS.map((op) => ({
@@ -4652,17 +4661,17 @@ export default function RemoteInvokeTab({
             />
           </Form.Item>
           <Form.Item
-            label="Allow overwriting existing files"
+            label={t("remoteInvoke.fileAccess.allowOverwriteLong")}
             name="seed_allow_overwrite"
             valuePropName="checked"
           >
             <Switch />
           </Form.Item>
           <Form.Item
-            label="Allow recursive directory deletion"
+            label={t("remoteInvoke.fileAccess.allowRecursiveDeleteLong")}
             name="seed_allow_recursive_delete"
             valuePropName="checked"
-            tooltip="Default OFF. Only enable for CI/agent keys that need to clean up build artefacts."
+            tooltip={t("remoteInvoke.sshCreate.recursiveDeleteTooltip")}
           >
             <Switch />
           </Form.Item>
@@ -4671,7 +4680,7 @@ export default function RemoteInvokeTab({
       <Modal
         open={secretModal !== null}
         title={secretModal?.title}
-        okText="Close"
+        okText={t("common.close")}
         cancelButtonProps={{ style: { display: "none" } }}
         onOk={() => setSecretModal(null)}
         onCancel={() => setSecretModal(null)}
@@ -4685,12 +4694,12 @@ export default function RemoteInvokeTab({
             items={[
               {
                 key: "device_code",
-                label: "Device Code",
+                label: t("remoteInvoke.ssh.deviceCode"),
                 children: <Text code>{secretModal?.payload.device_code ?? "-"}</Text>,
               },
               {
                 key: "fingerprint",
-                label: "Fingerprint",
+                label: t("remoteInvoke.ssh.fingerprint"),
                 children: (
                   <Text code style={{ fontSize: 11 }}>
                     {formatSshFingerprint(secretModal?.payload.ssh_key_fingerprint)}
@@ -4701,18 +4710,18 @@ export default function RemoteInvokeTab({
           />
           <div>
             <Space style={{ marginBottom: 8 }}>
-              <Text strong>Bifrost key file</Text>
+              <Text strong>{t("remoteInvoke.ssh.keyFileTitle")}</Text>
               <Button
                 size="small"
                 icon={<CopyOutlined />}
                 onClick={async () => {
                   if (!secretModal?.payload.bifrost_key_file) return;
                   const ok = await copyToClipboard(secretModal.payload.bifrost_key_file);
-                  if (ok) message.success("Key file copied");
-                  else message.error("Copy failed");
+                  if (ok) message.success(t("remoteInvoke.ssh.keyFileCopied"));
+                  else message.error(t("common.copyFailed"));
                 }}
               >
-                Copy
+                {t("common.copy")}
               </Button>
             </Space>
             <TextArea
@@ -4722,7 +4731,7 @@ export default function RemoteInvokeTab({
             />
           </div>
           <div>
-            <Text strong>CLI Example</Text>
+            <Text strong>{t("remoteInvoke.ssh.cliExample")}</Text>
             <div style={{ marginTop: 8 }}>
               <Text code>bifrost remote connect --ssh-key /path/to/bifrost.key</Text>
             </div>

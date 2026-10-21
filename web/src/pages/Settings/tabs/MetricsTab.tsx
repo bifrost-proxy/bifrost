@@ -20,6 +20,7 @@ import type {
   MetricsSnapshot,
   MetricsAggregateSummary,
 } from "../../../types";
+import { useI18n } from "../../../i18n";
 
 const { Text } = Typography;
 
@@ -70,6 +71,7 @@ function MetricsContent({
   formatBytes,
   formatBytesRate,
 }: MetricsContentProps) {
+  const { t } = useI18n();
   const { token } = theme.useToken();
 
   return (
@@ -82,7 +84,7 @@ function MetricsContent({
             style={{ background: token.colorBgLayout }}
           >
             <Statistic
-              title="Active Connections"
+              title={t("settings.metrics.activeConnections")}
               value={activeConnections}
               prefix={<SwapOutlined />}
             />
@@ -95,7 +97,7 @@ function MetricsContent({
             style={{ background: token.colorBgLayout }}
           >
             <Statistic
-              title="Total Requests"
+              title={t("settings.metrics.totalRequests")}
               value={totalRequests}
               prefix={<ApiOutlined />}
             />
@@ -108,12 +110,12 @@ function MetricsContent({
             style={{ background: token.colorBgLayout }}
           >
             <Statistic
-              title="Current QPS"
+              title={t("settings.metrics.currentQps")}
               value={qps.toFixed(2)}
               prefix={<DashboardOutlined />}
               suffix={
                 <Text type="secondary" style={{ fontSize: 12 }}>
-                  max: {maxQps.toFixed(2)}
+                  {t("settings.metrics.maxLower", { value: maxQps.toFixed(2) })}
                 </Text>
               }
             />
@@ -126,7 +128,7 @@ function MetricsContent({
             style={{ background: token.colorBgLayout }}
           >
             <Statistic
-              title="Recorded Traffic"
+              title={t("settings.metrics.recordedTraffic")}
               value={recordedTraffic}
               prefix={<DatabaseOutlined />}
             />
@@ -142,12 +144,12 @@ function MetricsContent({
             style={{ background: token.colorBgLayout }}
           >
             <Statistic
-              title="Upload Rate"
+              title={t("settings.metrics.uploadRate")}
               value={formatBytesRate(bytesSentRate)}
               prefix={<CloudUploadOutlined style={{ color: token.colorSuccess }} />}
             />
             <Text type="secondary" style={{ fontSize: 12 }}>
-              Max: {formatBytesRate(maxBytesSentRate)}
+              {t("settings.metrics.max", { value: formatBytesRate(maxBytesSentRate) })}
             </Text>
           </Card>
         </Col>
@@ -158,12 +160,12 @@ function MetricsContent({
             style={{ background: token.colorBgLayout }}
           >
             <Statistic
-              title="Download Rate"
+              title={t("settings.metrics.downloadRate")}
               value={formatBytesRate(bytesReceivedRate)}
               prefix={<CloudDownloadOutlined style={{ color: token.colorInfo }} />}
             />
             <Text type="secondary" style={{ fontSize: 12 }}>
-              Max: {formatBytesRate(maxBytesReceivedRate)}
+              {t("settings.metrics.max", { value: formatBytesRate(maxBytesReceivedRate) })}
             </Text>
           </Card>
         </Col>
@@ -174,7 +176,7 @@ function MetricsContent({
             style={{ background: token.colorBgLayout }}
           >
             <Statistic
-              title="Total Upload"
+              title={t("settings.metrics.totalUpload")}
               value={formatBytes(bytesSent)}
               prefix={<CloudUploadOutlined style={{ color: token.colorSuccess }} />}
             />
@@ -187,7 +189,7 @@ function MetricsContent({
             style={{ background: token.colorBgLayout }}
           >
             <Statistic
-              title="Total Download"
+              title={t("settings.metrics.totalDownload")}
               value={formatBytes(bytesReceived)}
               prefix={<CloudDownloadOutlined style={{ color: token.colorInfo }} />}
             />
@@ -204,6 +206,7 @@ interface TrafficTypeContentProps {
 }
 
 function TrafficTypeContent({ metrics, formatBytes }: TrafficTypeContentProps) {
+  const { t } = useI18n();
   const { token } = theme.useToken();
   const data = metrics || {
     requests: 0,
@@ -221,7 +224,7 @@ function TrafficTypeContent({ metrics, formatBytes }: TrafficTypeContentProps) {
           style={{ background: token.colorBgLayout }}
         >
           <Statistic
-            title="Active Connections"
+            title={t("settings.metrics.activeConnections")}
             value={data.active_connections}
             prefix={<SwapOutlined />}
           />
@@ -234,7 +237,7 @@ function TrafficTypeContent({ metrics, formatBytes }: TrafficTypeContentProps) {
           style={{ background: token.colorBgLayout }}
         >
           <Statistic
-            title="Total Requests"
+            title={t("settings.metrics.totalRequests")}
             value={data.requests}
             prefix={<ApiOutlined />}
           />
@@ -247,7 +250,7 @@ function TrafficTypeContent({ metrics, formatBytes }: TrafficTypeContentProps) {
           style={{ background: token.colorBgLayout }}
         >
           <Statistic
-            title="Total Upload"
+            title={t("settings.metrics.totalUpload")}
             value={formatBytes(data.bytes_sent)}
             prefix={<CloudUploadOutlined style={{ color: token.colorSuccess }} />}
           />
@@ -260,7 +263,7 @@ function TrafficTypeContent({ metrics, formatBytes }: TrafficTypeContentProps) {
           style={{ background: token.colorBgLayout }}
         >
           <Statistic
-            title="Total Download"
+            title={t("settings.metrics.totalDownload")}
             value={formatBytes(data.bytes_received)}
             prefix={<CloudDownloadOutlined style={{ color: token.colorInfo }} />}
           />
@@ -285,11 +288,12 @@ function AppMetricsContent({
   formatBytes,
   onRefresh,
 }: AppMetricsContentProps) {
+  const { t } = useI18n();
   const { token } = theme.useToken();
 
   const columns: ColumnsType<AppMetrics> = [
     {
-      title: "Application",
+      title: t("settings.metrics.application"),
       dataIndex: "app_name",
       key: "app_name",
       fixed: "left" as const,
@@ -302,7 +306,7 @@ function AppMetricsContent({
       ),
     },
     {
-      title: "Requests",
+      title: t("settings.metrics.requests"),
       dataIndex: "requests",
       key: "requests",
       width: 100,
@@ -310,7 +314,7 @@ function AppMetricsContent({
       render: (val: number) => val.toLocaleString(),
     },
     {
-      title: "Active",
+      title: t("settings.metrics.active"),
       dataIndex: "active_connections",
       key: "active_connections",
       width: 100,
@@ -318,7 +322,7 @@ function AppMetricsContent({
       render: (val: number) => val.toLocaleString(),
     },
     {
-      title: "Upload",
+      title: t("settings.metrics.upload"),
       dataIndex: "bytes_sent",
       key: "bytes_sent",
       width: 100,
@@ -326,7 +330,7 @@ function AppMetricsContent({
       render: (val: number) => formatBytes(val),
     },
     {
-      title: "Download",
+      title: t("settings.metrics.download"),
       dataIndex: "bytes_received",
       key: "bytes_received",
       width: 100,
@@ -348,7 +352,7 @@ function AppMetricsContent({
       render: (val: number) => val.toLocaleString(),
     },
     {
-      title: "Tunnel",
+      title: t("settings.metrics.tunnel"),
       dataIndex: "tunnel_requests",
       key: "tunnel_requests",
       width: 80,
@@ -394,7 +398,7 @@ function AppMetricsContent({
             style={{ background: token.colorBgLayout }}
           >
             <Statistic
-              title="Total Applications"
+              title={t("settings.metrics.totalApplications")}
               value={summary.total}
               prefix={<LaptopOutlined />}
             />
@@ -407,7 +411,7 @@ function AppMetricsContent({
             style={{ background: token.colorBgLayout }}
           >
             <Statistic
-              title="Total Requests"
+              title={t("settings.metrics.totalRequests")}
               value={summary.requests.toLocaleString()}
               prefix={<ApiOutlined />}
             />
@@ -420,7 +424,7 @@ function AppMetricsContent({
             style={{ background: token.colorBgLayout }}
           >
             <Statistic
-              title="Total Traffic"
+              title={t("settings.metrics.totalTraffic")}
               value={formatBytes(summary.total_traffic_bytes)}
               prefix={<SwapOutlined />}
             />
@@ -436,7 +440,7 @@ function AppMetricsContent({
         }}
       >
         <Button icon={<ReloadOutlined />} onClick={onRefresh} loading={loading} size="small">
-          Refresh
+          {t("common.refresh")}
         </Button>
       </div>
 
@@ -450,7 +454,7 @@ function AppMetricsContent({
         pagination={{
           pageSize: 10,
           showSizeChanger: false,
-          showTotal: (total) => `Total ${total} applications`,
+          showTotal: (total) => t("settings.metrics.totalApplicationsCount", { total }),
         }}
       />
     </div>
@@ -472,11 +476,12 @@ function HostMetricsContent({
   formatBytes,
   onRefresh,
 }: HostMetricsContentProps) {
+  const { t } = useI18n();
   const { token } = theme.useToken();
 
   const columns: ColumnsType<HostMetrics> = [
     {
-      title: "Host",
+      title: t("settings.metrics.host"),
       dataIndex: "host",
       key: "host",
       fixed: "left" as const,
@@ -489,7 +494,7 @@ function HostMetricsContent({
       ),
     },
     {
-      title: "Requests",
+      title: t("settings.metrics.requests"),
       dataIndex: "requests",
       key: "requests",
       width: 100,
@@ -497,7 +502,7 @@ function HostMetricsContent({
       render: (val: number) => val.toLocaleString(),
     },
     {
-      title: "Active",
+      title: t("settings.metrics.active"),
       dataIndex: "active_connections",
       key: "active_connections",
       width: 100,
@@ -505,7 +510,7 @@ function HostMetricsContent({
       render: (val: number) => val.toLocaleString(),
     },
     {
-      title: "Upload",
+      title: t("settings.metrics.upload"),
       dataIndex: "bytes_sent",
       key: "bytes_sent",
       width: 100,
@@ -513,7 +518,7 @@ function HostMetricsContent({
       render: (val: number) => formatBytes(val),
     },
     {
-      title: "Download",
+      title: t("settings.metrics.download"),
       dataIndex: "bytes_received",
       key: "bytes_received",
       width: 100,
@@ -535,7 +540,7 @@ function HostMetricsContent({
       render: (val: number) => val.toLocaleString(),
     },
     {
-      title: "Tunnel",
+      title: t("settings.metrics.tunnel"),
       dataIndex: "tunnel_requests",
       key: "tunnel_requests",
       width: 80,
@@ -581,7 +586,7 @@ function HostMetricsContent({
             style={{ background: token.colorBgLayout }}
           >
             <Statistic
-              title="Total Hosts"
+              title={t("settings.metrics.totalHosts")}
               value={summary.total}
               prefix={<GlobalOutlined />}
             />
@@ -594,7 +599,7 @@ function HostMetricsContent({
             style={{ background: token.colorBgLayout }}
           >
             <Statistic
-              title="Total Requests"
+              title={t("settings.metrics.totalRequests")}
               value={summary.requests.toLocaleString()}
               prefix={<ApiOutlined />}
             />
@@ -607,7 +612,7 @@ function HostMetricsContent({
             style={{ background: token.colorBgLayout }}
           >
             <Statistic
-              title="Total Traffic"
+              title={t("settings.metrics.totalTraffic")}
               value={formatBytes(summary.total_traffic_bytes)}
               prefix={<SwapOutlined />}
             />
@@ -623,7 +628,7 @@ function HostMetricsContent({
         }}
       >
         <Button icon={<ReloadOutlined />} onClick={onRefresh} loading={loading} size="small">
-          Refresh
+          {t("common.refresh")}
         </Button>
       </div>
 
@@ -637,7 +642,7 @@ function HostMetricsContent({
         pagination={{
           pageSize: 10,
           showSizeChanger: false,
-          showTotal: (total) => `Total ${total} hosts`,
+          showTotal: (total) => t("settings.metrics.totalHostsCount", { total }),
         }}
       />
     </div>
@@ -659,18 +664,19 @@ export default function MetricsTab({
   onRefreshAppMetrics,
   onRefreshHostMetrics,
 }: MetricsTabProps) {
+  const { t } = useI18n();
   const { token } = theme.useToken();
 
   return (
     <div>
-      <Card title="Performance Metrics" size="small">
+      <Card title={t("settings.metrics.title")} size="small">
         <Tabs
           defaultActiveKey="overview"
           size="small"
           items={[
             {
               key: "overview",
-              label: "Overview",
+              label: t("settings.metrics.overview"),
               children: (
                 <MetricsContent
                   activeConnections={overview?.metrics.active_connections || 0}
@@ -711,7 +717,7 @@ export default function MetricsTab({
             },
             {
               key: "tunnel",
-              label: "Tunnel",
+              label: t("settings.metrics.tunnel"),
               children: (
                 <TrafficTypeContent
                   metrics={overview?.metrics.tunnel}
@@ -761,7 +767,7 @@ export default function MetricsTab({
             },
             {
               key: "apps",
-              label: "Applications",
+              label: t("settings.metrics.applications"),
               children: (
                 <AppMetricsContent
                   appMetrics={appMetrics}
@@ -774,7 +780,7 @@ export default function MetricsTab({
             },
             {
               key: "hosts",
-              label: "Hosts",
+              label: t("settings.metrics.hosts"),
               children: (
                 <HostMetricsContent
                   hostMetrics={hostMetrics}
@@ -795,7 +801,7 @@ export default function MetricsTab({
               bordered={false}
               style={{ background: token.colorBgLayout }}
             >
-              <Text strong>CPU Usage</Text>
+              <Text strong>{t("settings.metrics.cpuUsage")}</Text>
               <Progress
                 percent={Number((overview?.metrics.cpu_usage || 0).toFixed(1))}
                 status={
@@ -814,7 +820,7 @@ export default function MetricsTab({
               {history.length > 0 && (
                 <div style={{ marginTop: 12 }}>
                   <Text type="secondary" style={{ fontSize: 12 }}>
-                    Last Hour
+                    {t("settings.metrics.lastHour")}
                   </Text>
                   <MetricsChart data={history} type="cpu" height={120} />
                 </div>
@@ -827,7 +833,7 @@ export default function MetricsTab({
               bordered={false}
               style={{ background: token.colorBgLayout }}
             >
-              <Text strong>Memory Usage</Text>
+              <Text strong>{t("settings.metrics.memoryUsage")}</Text>
               <Progress
                 percent={Number(memoryPercent.toFixed(1))}
                 status={memoryPercent > 80 ? "exception" : "normal"}
@@ -842,7 +848,7 @@ export default function MetricsTab({
               {history.length > 0 && (
                 <div style={{ marginTop: 12 }}>
                   <Text type="secondary" style={{ fontSize: 12 }}>
-                    Last Hour
+                    {t("settings.metrics.lastHour")}
                   </Text>
                   <MetricsChart data={history} type="memory" height={120} />
                 </div>
@@ -855,18 +861,18 @@ export default function MetricsTab({
       <Row gutter={[16, 16]} style={{ marginTop: 16 }}>
         <Col xs={24} sm={12} lg={6}>
           <Card size="small">
-            <Statistic title="Total Rules" value={overview?.rules.total || 0} />
+            <Statistic title={t("settings.metrics.totalRules")} value={overview?.rules.total || 0} />
           </Card>
         </Col>
         <Col xs={24} sm={12} lg={6}>
           <Card size="small">
-            <Statistic title="Enabled Rules" value={overview?.rules.enabled || 0} />
+            <Statistic title={t("settings.metrics.enabledRules")} value={overview?.rules.enabled || 0} />
           </Card>
         </Col>
         <Col xs={24} sm={12} lg={6}>
           <Card size="small">
             <Statistic
-              title="Recorded Traffic"
+              title={t("settings.metrics.recordedTraffic")}
               value={overview?.traffic.recorded || 0}
             />
           </Card>
@@ -874,7 +880,7 @@ export default function MetricsTab({
         <Col xs={24} sm={12} lg={6}>
           <Card size="small">
             <Statistic
-              title="Total Requests"
+              title={t("settings.metrics.totalRequests")}
               value={overview?.metrics.total_requests || 0}
             />
           </Card>

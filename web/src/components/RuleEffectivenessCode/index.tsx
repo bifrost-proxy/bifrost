@@ -4,6 +4,7 @@ import {
   analyzeRuleEffectiveness,
   type RuleLineEffect,
 } from "../../utils/ruleEffectiveness";
+import { useI18n, type TranslationKey } from "../../i18n";
 import styles from "./index.module.css";
 
 interface RuleEffectivenessCodeProps {
@@ -14,18 +15,18 @@ interface RuleEffectivenessCodeProps {
   "data-testid"?: string;
 }
 
-const statusLabel: Record<RuleLineEffect["status"], string> = {
-  active: "Effective",
-  partial: "Partially effective",
-  shadowed: "Covered",
-  neutral: "Informational",
+const statusLabelKey: Record<RuleLineEffect["status"], TranslationKey> = {
+  active: "rules.effect.active",
+  partial: "rules.effect.partial",
+  shadowed: "rules.effect.shadowed",
+  neutral: "rules.effect.neutral",
 };
 
 const RuleEffectivenessCode = forwardRef<HTMLPreElement, RuleEffectivenessCodeProps>(
   function RuleEffectivenessCode(
     {
       content,
-      emptyText = "# No active rules",
+      emptyText,
       className,
       style,
       "data-testid": testId,
@@ -33,10 +34,13 @@ const RuleEffectivenessCode = forwardRef<HTMLPreElement, RuleEffectivenessCodePr
     ref,
   ) {
     const { token } = theme.useToken();
-    const displayContent = content.trim() || emptyText;
+    const { t, locale } = useI18n();
+    const displayContent = content.trim() || (emptyText ?? t("rules.effect.emptyText"));
     const effects = useMemo(
       () => analyzeRuleEffectiveness(displayContent),
-      [displayContent],
+      // analyzeRuleEffectiveness renders its tooltips with the current locale.
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+      [displayContent, locale],
     );
 
     return (
@@ -69,10 +73,11 @@ const RuleEffectivenessCode = forwardRef<HTMLPreElement, RuleEffectivenessCodePr
 export default RuleEffectivenessCode;
 
 function RuleLine({ effect }: { effect: RuleLineEffect }) {
+  const { t } = useI18n();
   const hasEffect = effect.status !== "neutral";
   const tooltip = (
     <div className={styles.tooltip}>
-      <div className={styles.tooltipTitle}>{statusLabel[effect.status]}</div>
+      <div className={styles.tooltipTitle}>{t(statusLabelKey[effect.status])}</div>
       <div className={styles.tooltipMeta}>{effect.summary}</div>
       {effect.details.map((detail) => (
         <div className={styles.tooltipMeta} key={detail}>

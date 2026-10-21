@@ -13,6 +13,7 @@ import { ThunderboltOutlined } from "@ant-design/icons";
 import type { SearchResultItem } from "../../types";
 import { TrafficFlags } from "../../types";
 import AppIcon from "../AppIcon";
+import { useI18n } from "../../i18n";
 
 interface SearchResultsListProps {
   results: SearchResultItem[];
@@ -99,12 +100,13 @@ const MatchPreview = ({
   keyword: string;
   highlightColor: string;
 }) => {
+  const { t } = useI18n();
   const fieldLabels: Record<string, string> = {
     url: "URL",
-    request_header: "Req Header",
-    response_header: "Res Header",
-    request_body: "Req Body",
-    response_body: "Res Body",
+    request_header: t("traffic.search.fieldReqHeader"),
+    response_header: t("traffic.search.fieldResHeader"),
+    request_body: t("traffic.search.scopeReqBody"),
+    response_body: t("traffic.search.scopeResBody"),
   };
 
   return (
@@ -154,6 +156,7 @@ export default function SearchResultsList({
   hasMore,
   isLoadingMore,
 }: SearchResultsListProps) {
+  const { t } = useI18n();
   const { token } = theme.useToken();
   const parentRef = useRef<HTMLDivElement>(null);
   const attemptedPages = useRef(new Set<string>());
@@ -320,8 +323,9 @@ export default function SearchResultsList({
                     data-testid={`search-breakpoint-${breakpointPhase}-indicator`}
                     style={{ margin: 0, fontSize: 10, lineHeight: "16px" }}
                   >
-                    Breakpoint ·{" "}
-                    {breakpointPhase === "request" ? "Request" : "Response"}
+                    {breakpointPhase === "request"
+                      ? t("traffic.search.breakpointRequest")
+                      : t("traffic.search.breakpointResponse")}
                   </Tag>
                 )}
                 <span
@@ -367,7 +371,9 @@ export default function SearchResultsList({
                       padding: "0 4px",
                     }}
                   >
-                    +{item.matches.length - 2} more
+                    {t("traffic.search.moreMatches", {
+                      count: item.matches.length - 2,
+                    })}
                   </Tag>
                 )}
               </div>

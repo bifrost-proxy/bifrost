@@ -3,6 +3,7 @@ import type { IRange } from 'monaco-editor';
 import { getDynamicData, type ReferenceLocation, type ReferenceType } from './dynamic';
 import { getProtocolDoc, formatProtocolHover } from './protocol-docs';
 import { findRuleReferenceAtColumn } from './ruleReference';
+import { t } from '../../../i18n';
 
 export interface ReferenceMatch {
   name: string;
@@ -211,17 +212,17 @@ export function getReferenceLocation(
 function getTypeLabel(type: ReferenceType): string {
   switch (type) {
     case 'value':
-      return 'Global Value';
+      return t('rules.monaco.typeGlobalValue');
     case 'requestScript':
-      return 'Request Script';
+      return t('rules.monaco.typeRequestScript');
     case 'responseScript':
-      return 'Response Script';
+      return t('rules.monaco.typeResponseScript');
     case 'responseStreamScript':
-      return 'Response Stream Script';
+      return t('rules.monaco.typeResponseStreamScript');
     case 'parserScript':
-      return 'Parser Script';
+      return t('rules.monaco.typeParserScript');
     case 'rule':
-      return 'Rule Reference';
+      return t('rules.monaco.typeRuleReference');
   }
 }
 
@@ -285,7 +286,10 @@ export const hoverProvider: languages.HoverProvider = {
           range: reference.range,
           contents: [
             {
-              value: `**Rule reference error**: \`@${reference.name}\`\n\n${errorMessage}`,
+              value: t('rules.monaco.ruleReferenceErrorHover', {
+                name: reference.name,
+                message: errorMessage,
+              }),
             },
           ],
         };
@@ -296,7 +300,10 @@ export const hoverProvider: languages.HoverProvider = {
           range: reference.range,
           contents: [
             {
-              value: `**Rule reference error**: \`@${reference.name}\`\n\nRule reference '@${reference.name}' was not found.`,
+              value: t('rules.monaco.ruleReferenceErrorHover', {
+                name: reference.name,
+                message: t('rules.editor.referenceNotFound', { name: reference.name }),
+              }),
             },
           ],
         };
@@ -309,15 +316,15 @@ export const hoverProvider: languages.HoverProvider = {
     const typeLabel = getTypeLabel(reference.type);
     const actionText =
       reference.type === 'rule'
-        ? "Click to expand inline, F12 to open"
+        ? t('rules.monaco.actionExpandInline')
         : location.navigationType === "page"
-        ? "Go to definition"
-        : "Jump to definition";
+        ? t('rules.monaco.actionGoToDefinition')
+        : t('rules.monaco.actionJumpToDefinition');
 
     const displayTypeLabel = reference.type === 'value' && location.navigationType === 'editor'
-      ? 'Local Variable'
+      ? t('rules.monaco.typeLocalVariable')
       : typeLabel;
-    const hintText = reference.type === 'rule' ? '' : '(F12 or Cmd+Click)';
+    const hintText = reference.type === 'rule' ? '' : t('rules.monaco.actionHint');
     const contents = [
       {
         value: `**${displayTypeLabel}**: \`${reference.name}\`\n\n${actionText} ${hintText}`.trim(),

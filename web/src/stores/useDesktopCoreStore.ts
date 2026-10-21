@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { t } from "../i18n";
 
 export type DesktopCorePhase =
   | "idle"
@@ -34,7 +35,7 @@ export const useDesktopCoreStore = create<DesktopCoreState>((set) => ({
       visible: true,
       phase: "saving",
       targetPort: port,
-      detail: `Preparing proxy listener switch to port ${port}`,
+      detail: t("shared.core.preparingPortSwitch", { port }),
       readyOnce: false,
     }),
   showBooting: (detail) =>
@@ -48,7 +49,7 @@ export const useDesktopCoreStore = create<DesktopCoreState>((set) => ({
           visible: false,
           phase: "booting",
           targetPort: null,
-          detail: detail ?? "Bifrost core is starting. Reconnecting the interface...",
+          detail: detail ?? t("shared.core.starting"),
           readyOnce: false,
         };
       }
@@ -59,7 +60,7 @@ export const useDesktopCoreStore = create<DesktopCoreState>((set) => ({
           ? state.phase
           : "booting",
         targetPort: state.targetPort,
-        detail: detail ?? "Bifrost core is starting. Reconnecting the interface...",
+        detail: detail ?? t("shared.core.starting"),
         readyOnce: state.readyOnce,
       };
     }),

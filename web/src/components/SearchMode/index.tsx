@@ -39,6 +39,7 @@ import type {
   TrafficSummary,
 } from "../../types";
 import SearchResultsList from "./SearchResultsList";
+import { useI18n } from "../../i18n";
 
 const { Text } = Typography;
 
@@ -57,6 +58,7 @@ export default function SearchMode({
   breakpointPhases,
   pendingOnly = false,
 }: SearchModeProps) {
+  const { t } = useI18n();
   const { token } = theme.useToken();
 
   const {
@@ -332,14 +334,14 @@ export default function SearchMode({
   );
 
   const scopeOptions = [
-    { key: "all", label: "All" },
+    { key: "all", label: t("common.all") },
     { key: "url", label: "URL" },
-    { key: "request_headers", label: "Req Headers" },
-    { key: "response_headers", label: "Res Headers" },
-    { key: "request_body", label: "Req Body" },
-    { key: "response_body", label: "Res Body" },
-    { key: "websocket_messages", label: "WS Messages" },
-    { key: "sse_events", label: "SSE Events" },
+    { key: "request_headers", label: t("traffic.search.scopeReqHeaders") },
+    { key: "response_headers", label: t("traffic.search.scopeResHeaders") },
+    { key: "request_body", label: t("traffic.search.scopeReqBody") },
+    { key: "response_body", label: t("traffic.search.scopeResBody") },
+    { key: "websocket_messages", label: t("traffic.search.scopeWsMessages") },
+    { key: "sse_events", label: t("traffic.search.scopeSseEvents") },
   ];
 
   return (
@@ -347,7 +349,7 @@ export default function SearchMode({
       <div style={styles.header}>
         <div style={styles.searchRow}>
           <Input
-            placeholder="Enter keyword to search all content..."
+            placeholder={t("traffic.search.placeholder")}
             value={keyword}
             onChange={(e) => setKeyword(e.target.value)}
             onKeyDown={handleKeyDown}
@@ -371,17 +373,17 @@ export default function SearchMode({
             icon={<SearchOutlined />}
             disabled={!canSearch}
           >
-            Search
+            {t("common.search")}
           </Button>
           {(isSearching || isLoadingMore) && (
             <Button onClick={handleCancelSearch} icon={<StopOutlined />} danger>
-              Stop
+              {t("common.stop")}
             </Button>
           )}
-          <Button onClick={handleExitSearch}>Exit</Button>
+          <Button onClick={handleExitSearch}>{t("traffic.search.exit")}</Button>
         </div>
         <div style={styles.scopeRow}>
-          <span style={styles.scopeLabel}>Search in:</span>
+          <span style={styles.scopeLabel}>{t("traffic.search.searchIn")}</span>
           {scopeOptions.map((opt) => (
             <Checkbox
               key={opt.key}
@@ -408,13 +410,19 @@ export default function SearchMode({
         <div style={styles.statsRow}>
           <Space>
             <Text type="secondary">
-              Found <Text strong>{totalMatched}</Text> matches
+              {t("traffic.search.foundPrefix")}{" "}
+              <Text strong>{totalMatched}</Text>{" "}
+              {t("traffic.search.foundSuffix")}
             </Text>
-            <Text type="secondary">(searched {totalSearched} records)</Text>
+            <Text type="secondary">
+              {t("traffic.search.searchedRecordsParen", {
+                count: totalSearched,
+              })}
+            </Text>
             {isSearching && (
               <Space size={6}>
                 <LoadingOutlined style={{ color: token.colorTextSecondary }} />
-                <Text type="secondary">Searching...</Text>
+                <Text type="secondary">{t("traffic.search.searching")}</Text>
               </Space>
             )}
           </Space>
@@ -424,7 +432,7 @@ export default function SearchMode({
               onClick={handleLoadMore}
               loading={isLoadingMore}
             >
-              Load More
+              {t("traffic.search.loadMore")}
             </Button>
           )}
         </div>
@@ -434,14 +442,19 @@ export default function SearchMode({
         {isSearching && results.length === 0 ? (
           <div style={styles.emptyWrapper}>
             <Space direction="vertical" align="center" size={8}>
-              <Spin indicator={<LoadingOutlined spin />} tip="Searching..." />
-              <Text type="secondary">searched {totalSearched} records</Text>
+              <Spin
+                indicator={<LoadingOutlined spin />}
+                tip={t("traffic.search.searching")}
+              />
+              <Text type="secondary">
+                {t("traffic.search.searchedRecords", { count: totalSearched })}
+              </Text>
               <Button
                 onClick={handleCancelSearch}
                 icon={<StopOutlined />}
                 danger
               >
-                Stop
+                {t("common.stop")}
               </Button>
             </Space>
           </div>
@@ -450,8 +463,8 @@ export default function SearchMode({
             <Empty
               description={
                 keyword.trim()
-                  ? "No results found. Try a different keyword."
-                  : "Enter a keyword to search all traffic content."
+                  ? t("traffic.search.noResults")
+                  : t("traffic.search.enterKeyword")
               }
             />
           </div>

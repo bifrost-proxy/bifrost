@@ -2,6 +2,7 @@ import { Alert, Descriptions, List, Modal, Space, Tag, Typography } from "antd";
 import TrafficDetail from "../TrafficDetail";
 import type { NetworkPreviewDetail, PreviewResponse } from "../../api/bifrost-file";
 import type { TrafficRecord } from "../../types";
+import { t as translate, useI18n } from "../../i18n";
 
 interface BifrostFilePreviewPanelProps {
   filename: string;
@@ -15,10 +16,10 @@ export function confirmBifrostFileImport(
   return new Promise((resolve) => {
     let settled = false;
     Modal.confirm({
-      title: `Preview ${filename}`,
+      title: translate("trafficDetail.filePreview.title", { filename }),
       width: preview.network?.single_record ? 1040 : 760,
-      okText: "Import",
-      cancelText: "Cancel",
+      okText: translate("common.import"),
+      cancelText: translate("common.cancel"),
       centered: true,
       content: <BifrostFilePreviewPanel filename={filename} preview={preview} />,
       onOk: () => {
@@ -39,26 +40,27 @@ export function confirmBifrostFileImport(
 }
 
 function BifrostFilePreviewPanel({ filename, preview }: BifrostFilePreviewPanelProps) {
+  const { t } = useI18n();
   if (preview.rules) {
     return (
       <div style={{ marginTop: 12 }}>
         <Descriptions size="small" column={1} bordered>
-          <Descriptions.Item label="File">{filename}</Descriptions.Item>
-          <Descriptions.Item label="Rule name">{preview.rules.name}</Descriptions.Item>
-          <Descriptions.Item label="Status">
+          <Descriptions.Item label={t("trafficDetail.filePreview.file")}>{filename}</Descriptions.Item>
+          <Descriptions.Item label={t("trafficDetail.filePreview.ruleName")}>{preview.rules.name}</Descriptions.Item>
+          <Descriptions.Item label={t("common.status")}>
             <Tag color={preview.rules.enabled ? "green" : "default"}>
-              {preview.rules.enabled ? "Enabled" : "Disabled"}
+              {preview.rules.enabled ? t("common.enabled") : t("common.disabled")}
             </Tag>
           </Descriptions.Item>
-          <Descriptions.Item label="Lines">{preview.rules.line_count}</Descriptions.Item>
+          <Descriptions.Item label={t("trafficDetail.filePreview.lines")}>{preview.rules.line_count}</Descriptions.Item>
           {preview.rules.description ? (
-            <Descriptions.Item label="Description">
+            <Descriptions.Item label={t("common.description")}>
               {preview.rules.description}
             </Descriptions.Item>
           ) : null}
         </Descriptions>
         <Typography.Text strong style={{ display: "block", marginTop: 16 }}>
-          Rule content
+          {t("trafficDetail.filePreview.ruleContent")}
         </Typography.Text>
         <pre
           style={{
@@ -73,7 +75,7 @@ function BifrostFilePreviewPanel({ filename, preview }: BifrostFilePreviewPanelP
             wordBreak: "break-word",
           }}
         >
-          {preview.rules.content || "(empty rule)"}
+          {preview.rules.content || t("trafficDetail.filePreview.emptyRule")}
         </pre>
       </div>
     );
@@ -94,7 +96,9 @@ function BifrostFilePreviewPanel({ filename, preview }: BifrostFilePreviewPanelP
         <Alert
           type="info"
           showIcon
-          message={`${preview.network.record_count} request(s) will be imported into Network`}
+          message={t("trafficDetail.filePreview.requestsWillImport", {
+            count: preview.network.record_count,
+          })}
           description={
             preview.network.hosts.length > 0 ? (
               <Space size={[4, 4]} wrap style={{ marginTop: 8 }}>
@@ -103,7 +107,7 @@ function BifrostFilePreviewPanel({ filename, preview }: BifrostFilePreviewPanelP
                 ))}
               </Space>
             ) : (
-              "No host information found in this package."
+              t("trafficDetail.filePreview.noHostInfo")
             )
           }
         />
@@ -126,7 +130,7 @@ function BifrostFilePreviewPanel({ filename, preview }: BifrostFilePreviewPanelP
                 <Space size={8} wrap>
                   <Tag color="blue">{record.method}</Tag>
                   <Tag color={record.status >= 400 ? "red" : "green"}>{record.status}</Tag>
-                  <Typography.Text strong>{record.host || "(unknown host)"}</Typography.Text>
+                  <Typography.Text strong>{record.host || t("trafficDetail.filePreview.unknownHost")}</Typography.Text>
                   {record.client_app ? <Tag>{record.client_app}</Tag> : null}
                 </Space>
                 <Typography.Text type="secondary" ellipsis>
@@ -145,8 +149,8 @@ function BifrostFilePreviewPanel({ filename, preview }: BifrostFilePreviewPanelP
       style={{ marginTop: 12 }}
       type="info"
       showIcon
-      message={`${preview.file_type} package`}
-      description={`${preview.item_count ?? 0} item(s) will be imported.`}
+      message={t("trafficDetail.filePreview.package", { type: preview.file_type })}
+      description={t("trafficDetail.filePreview.itemsWillImport", { count: preview.item_count ?? 0 })}
     />
   );
 }
@@ -158,14 +162,15 @@ function SingleNetworkPreview({
   detail: NetworkPreviewDetail;
   warnings: string[];
 }) {
+  const { t } = useI18n();
   const record = normalizePreviewTrafficRecord(detail);
   return (
     <div style={{ marginTop: 12 }}>
       <Alert
         type="info"
         showIcon
-        message="1 request will be imported into Network"
-        description="Review the request detail below, then confirm to import."
+        message={t("trafficDetail.filePreview.oneRequestWillImport")}
+        description={t("trafficDetail.filePreview.reviewThenConfirm")}
       />
       {warnings.map((warning) => (
         <Alert

@@ -55,6 +55,7 @@ import {
   updateDailyAgentConfig,
   updateDailyAgentInstructions,
 } from "../../../api/asr";
+import { useI18n } from "../../../i18n";
 
 const { Text } = Typography;
 const { TextArea } = Input;
@@ -87,6 +88,7 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
 }
 
 function TaskDailyAgentTab({ taskId }: DailyAgentTabProps) {
+  const { t } = useI18n();
   const [searchParams, setSearchParams] = useSearchParams();
   const routeDetailAgentId = searchParams.get("asrDailyAgentEdit");
   const [configData, setConfigData] =
@@ -156,12 +158,12 @@ function TaskDailyAgentTab({ taskId }: DailyAgentTabProps) {
       setImTargets(targets);
     } catch (error: unknown) {
       if (fetchId === latestFetchId.current) {
-        message.error(`Failed to load Daily Agent config: ${errorMessage(error)}`);
+        message.error(t("asrTasks.dailyAgent.loadConfigFailed", { error: errorMessage(error) }));
       }
     } finally {
       if (fetchId === latestFetchId.current) setLoading(false);
     }
-  }, [routeDetailAgentId, selectedAgentId, taskId]);
+  }, [routeDetailAgentId, selectedAgentId, t, taskId]);
 
   useEffect(() => {
     fetchAll();
@@ -184,11 +186,11 @@ function TaskDailyAgentTab({ taskId }: DailyAgentTabProps) {
     try {
       const result = await updateDailyAgentConfig(taskId, updates);
       if (result.ok) {
-        message.success("Configuration saved");
+        message.success(t("asrTasks.dailyAgent.configSaved"));
         fetchAll();
       }
     } catch (error: unknown) {
-      message.error(`Failed to save: ${errorMessage(error)}`);
+      message.error(t("asrTasks.dailyAgent.saveFailed", { error: errorMessage(error) }));
     } finally {
       setSaving(false);
     }
@@ -243,7 +245,7 @@ function TaskDailyAgentTab({ taskId }: DailyAgentTabProps) {
     try {
       await loadAgentInstructions(agentId);
     } catch (error: unknown) {
-      message.error(`Failed to load instructions: ${errorMessage(error)}`);
+      message.error(t("asrTasks.dailyAgent.loadInstructionsFailed", { error: errorMessage(error) }));
     }
   };
 
@@ -304,7 +306,7 @@ function TaskDailyAgentTab({ taskId }: DailyAgentTabProps) {
 
   const removeAgent = (agentId: string) => {
     if (agents.length <= 1) {
-      message.warning("At least one Daily Agent is required");
+      message.warning(t("asrTasks.dailyAgent.atLeastOneRequired"));
       return;
     }
     const nextAgents = agents.filter((agent) => agent.id !== agentId);
@@ -324,7 +326,9 @@ function TaskDailyAgentTab({ taskId }: DailyAgentTabProps) {
     const ownerOptions = imProviders
       .filter((provider) => provider.owner_open_id?.trim())
       .map((provider) => ({
-        label: `${provider.display_name || provider.id} / Owner`,
+        label: t("asrTasks.dailyAgent.ownerChannel", {
+          name: provider.display_name || provider.id,
+        }),
         value: `owner:${provider.id}`,
       }));
     const targetOptions = imTargets
@@ -339,16 +343,16 @@ function TaskDailyAgentTab({ taskId }: DailyAgentTabProps) {
         };
       });
     return [...ownerOptions, ...targetOptions];
-  }, [imProviders, imTargets]);
+  }, [imProviders, imTargets, t]);
 
   const handleSaveInstructions = async () => {
     setSaving(true);
     try {
       await updateDailyAgentInstructions(taskId, instructionsText, selectedAgent?.id);
-      message.success("Instructions saved");
+      message.success(t("asrTasks.dailyAgent.instructionsSaved"));
       setInstructionsDirty(false);
     } catch (error: unknown) {
-      message.error(`Failed to save instructions: ${errorMessage(error)}`);
+      message.error(t("asrTasks.dailyAgent.saveInstructionsFailed", { error: errorMessage(error) }));
     } finally {
       setSaving(false);
     }
@@ -360,8 +364,8 @@ function TaskDailyAgentTab({ taskId }: DailyAgentTabProps) {
       const result = await updateDailyAgentConfig(taskId, {
         report_sync_dir: reportSyncDir,
       });
-      if (!result.ok) throw new Error("Configuration was not saved");
-      message.success("Report sync directory saved");
+      if (!result.ok) throw new Error(t("asrTasks.dailyAgent.configNotSaved"));
+      message.success(t("asrTasks.dailyAgent.reportSyncDirSaved"));
       setReportSyncDirDraft((draft) =>
         draft.value === reportSyncDir
           ? { value: result.config.report_sync_dir || "", dirty: false }
@@ -369,7 +373,7 @@ function TaskDailyAgentTab({ taskId }: DailyAgentTabProps) {
       );
       fetchAll();
     } catch (error: unknown) {
-      message.error(`Failed to save sync directory: ${errorMessage(error)}`);
+      message.error(t("asrTasks.dailyAgent.saveSyncDirFailed", { error: errorMessage(error) }));
     } finally {
       setSaving(false);
     }
@@ -379,11 +383,11 @@ function TaskDailyAgentTab({ taskId }: DailyAgentTabProps) {
     setSaving(true);
     try {
       await updateDailyAgentConfig(taskId, { terminology });
-      message.success("Terminology saved");
+      message.success(t("asrTasks.dailyAgent.terminologySaved"));
       setTerminologyDirty(false);
       fetchAll();
     } catch (error: unknown) {
-      message.error(`Failed to save terminology: ${errorMessage(error)}`);
+      message.error(t("asrTasks.dailyAgent.saveTerminologyFailed", { error: errorMessage(error) }));
     } finally {
       setSaving(false);
     }
@@ -394,11 +398,14 @@ function TaskDailyAgentTab({ taskId }: DailyAgentTabProps) {
     try {
       const result = await syncDailyAgentReports(taskId);
       message.success(
-        `Synced ${result.sync.copied_files} copied, ${result.sync.skipped_files} skipped`
+        t("asrTasks.dailyAgent.syncedSummary", {
+          copied: result.sync.copied_files,
+          skipped: result.sync.skipped_files,
+        }),
       );
       fetchAll();
     } catch (error: unknown) {
-      message.error(`Sync failed: ${errorMessage(error)}`);
+      message.error(t("asrTasks.dailyAgent.syncFailed", { error: errorMessage(error) }));
       fetchAll();
     } finally {
       setSyncing(false);
@@ -409,7 +416,7 @@ function TaskDailyAgentTab({ taskId }: DailyAgentTabProps) {
     setRunningAgentId(agentId);
     try {
       const result = await triggerDailyAgentRun(taskId, { force, agentId });
-      message.success(result.message || "Run queued");
+      message.success(result.message || t("asrTasks.dailyAgent.runQueued"));
       // Poll status until no longer running
       const pollInterval = setInterval(async () => {
         try {
@@ -434,7 +441,7 @@ function TaskDailyAgentTab({ taskId }: DailyAgentTabProps) {
         fetchAll();
       }, safetyTimeoutMs);
     } catch (error: unknown) {
-      message.error(`Run failed: ${errorMessage(error)}`);
+      message.error(t("asrTasks.dailyAgent.runFailed", { error: errorMessage(error) }));
       setRunningAgentId(null);
     }
   };
@@ -443,10 +450,10 @@ function TaskDailyAgentTab({ taskId }: DailyAgentTabProps) {
     try {
       const result = await sendDailyAgentReport(taskId, selectedAgent?.id);
       if (result.ok) {
-        message.success(`Sent ${result.sent_reports.length} report(s)`);
+        message.success(t("asrTasks.dailyAgent.sentReports", { count: result.sent_reports.length }));
       }
     } catch (error: unknown) {
-      message.error(`Send failed: ${errorMessage(error)}`);
+      message.error(t("asrTasks.dailyAgent.sendFailed", { error: errorMessage(error) }));
     }
   };
 
@@ -455,12 +462,12 @@ function TaskDailyAgentTab({ taskId }: DailyAgentTabProps) {
   const activeAgentId = selectedAgent?.id || selectedAgentId;
   const reportSync = selectedAgent?.last_report_sync || config?.last_report_sync;
   const formatTimestamp = (value?: number) =>
-    value ? new Date(value).toLocaleString() : "Never";
+    value ? new Date(value).toLocaleString() : t("asrTasks.dailyAgent.never");
 
   if (loading && !configData) {
     return (
       <div style={{ padding: 24, textAlign: "center" }}>
-        <Text type="secondary">Loading Daily Agent...</Text>
+        <Text type="secondary">{t("asrTasks.dailyAgent.loading")}</Text>
       </div>
     );
   }
@@ -479,31 +486,31 @@ function TaskDailyAgentTab({ taskId }: DailyAgentTabProps) {
               icon={<ArrowLeftOutlined />}
               onClick={closeAgentDetail}
             >
-              Daily Agents
+              {t("asrTasks.dailyAgent.dailyAgents")}
             </Button>
             <Text strong>{selectedAgent.name}</Text>
             <Text code>{selectedAgent.id}</Text>
           </Space>
           <Button icon={<ReloadOutlined />} onClick={fetchAll} loading={loading}>
-            Refresh
+            {t("common.refresh")}
           </Button>
         </Space>
 
-        <Card size="small" title="Agent Configuration" loading={loading && !config}>
+        <Card size="small" title={t("asrTasks.dailyAgent.agentConfiguration")} loading={loading && !config}>
           <Descriptions column={2} size="small" bordered>
-            <Descriptions.Item label="Enabled">
+            <Descriptions.Item label={t("common.enabled")}>
               <Switch
                 checked={selectedAgent.enabled}
                 onChange={(enabled) => updateAgent(selectedAgent.id, { enabled })}
                 loading={saving}
               />
             </Descriptions.Item>
-            <Descriptions.Item label="Runner">
+            <Descriptions.Item label={t("asrTasks.field.runner")}>
               <Select
                 data-testid="asr-daily-agent-runner-select"
                 size="small"
                 value={selectedAgent.runner || undefined}
-                placeholder="Select runner..."
+                placeholder={t("asrTasks.dailyAgent.selectRunner")}
                 onChange={(runner) => updateAgent(selectedAgent.id, { runner })}
                 loading={loading}
                 disabled={saving}
@@ -511,7 +518,7 @@ function TaskDailyAgentTab({ taskId }: DailyAgentTabProps) {
                 options={runnerOptions}
               />
             </Descriptions.Item>
-            <Descriptions.Item label="Agent Name">
+            <Descriptions.Item label={t("asrTasks.dailyAgent.agentName")}>
               <Input
                 size="small"
                 value={selectedAgent.name}
@@ -527,7 +534,7 @@ function TaskDailyAgentTab({ taskId }: DailyAgentTabProps) {
                 }
               />
             </Descriptions.Item>
-            <Descriptions.Item label="Output Dir">
+            <Descriptions.Item label={t("asrTasks.field.outputDir")}>
               <Input
                 size="small"
                 value={selectedAgent.output_dir}
@@ -543,7 +550,7 @@ function TaskDailyAgentTab({ taskId }: DailyAgentTabProps) {
                 }
               />
             </Descriptions.Item>
-            <Descriptions.Item label="Trigger Policy">
+            <Descriptions.Item label={t("asrTasks.dailyAgent.triggerPolicy")}>
               <Select
                 size="small"
                 value={selectedAgent.trigger_policy}
@@ -552,17 +559,17 @@ function TaskDailyAgentTab({ taskId }: DailyAgentTabProps) {
                 }
                 style={{ width: 160 }}
                 options={[
-                  { label: "After ASR Run", value: "after_asr_run" },
-                  { label: "Manual Only", value: "manual_only" },
+                  { label: t("asrTasks.dailyAgent.trigger.afterAsrRun"), value: "after_asr_run" },
+                  { label: t("asrTasks.dailyAgent.trigger.manualOnly"), value: "manual_only" },
                 ]}
               />
             </Descriptions.Item>
-            <Descriptions.Item label="Timeout">
+            <Descriptions.Item label={t("asrTasks.dailyAgent.timeout")}>
               <InputNumber
                 size="small"
                 min={1}
                 step={5}
-                addonAfter="min"
+                addonAfter={t("asrTasks.dailyAgent.minutesUnit")}
                 value={Math.round(selectedAgent.timeout_ms / 60000)}
                 onChange={(minutes) =>
                   updateAgent(selectedAgent.id, {
@@ -572,11 +579,11 @@ function TaskDailyAgentTab({ taskId }: DailyAgentTabProps) {
                 style={{ width: 150 }}
               />
             </Descriptions.Item>
-            <Descriptions.Item label="Session Key">
+            <Descriptions.Item label={t("asrTasks.dailyAgent.sessionKey")}>
               <Input
                 size="small"
                 value={selectedAgent.session_key || ""}
-                placeholder="(auto)"
+                placeholder={t("asrTasks.dailyAgent.autoPlaceholder")}
                 onChange={(event) =>
                   updateAgent(selectedAgent.id, {
                     session_key: event.target.value.trim() || undefined,
@@ -584,7 +591,7 @@ function TaskDailyAgentTab({ taskId }: DailyAgentTabProps) {
                 }
               />
             </Descriptions.Item>
-            <Descriptions.Item label="Dependencies" span={2}>
+            <Descriptions.Item label={t("asrTasks.dailyAgent.dependencies")} span={2}>
               <Space direction="vertical" size={8} style={{ width: "100%" }}>
                 <Select
                   data-testid="asr-daily-agent-dependencies-select"
@@ -593,7 +600,7 @@ function TaskDailyAgentTab({ taskId }: DailyAgentTabProps) {
                   value={(selectedAgent.dependencies || []).map(
                     (dependency) => dependency.agent_id
                   )}
-                  placeholder="Select upstream agents..."
+                  placeholder={t("asrTasks.dailyAgent.selectUpstreamAgents")}
                   options={agents
                     .filter((agent) => agent.id !== selectedAgent.id)
                     .map((agent) => ({ label: agent.name, value: agent.id }))}
@@ -619,7 +626,7 @@ function TaskDailyAgentTab({ taskId }: DailyAgentTabProps) {
                 {(selectedAgent.dependencies || []).map((dependency) => (
                   <Space key={dependency.agent_id}>
                     <Text code>{dependency.agent_id}</Text>
-                    <Text type="secondary">Include output</Text>
+                    <Text type="secondary">{t("asrTasks.dailyAgent.includeOutput")}</Text>
                     <Switch
                       size="small"
                       checked={dependency.include_output !== false}
@@ -638,7 +645,7 @@ function TaskDailyAgentTab({ taskId }: DailyAgentTabProps) {
                 ))}
               </Space>
             </Descriptions.Item>
-            <Descriptions.Item label="Dependency Failure">
+            <Descriptions.Item label={t("asrTasks.dailyAgent.dependencyFailure")}>
               <Select
                 data-testid="asr-daily-agent-dependency-failure-policy"
                 size="small"
@@ -650,12 +657,12 @@ function TaskDailyAgentTab({ taskId }: DailyAgentTabProps) {
                 }
                 style={{ width: 180 }}
                 options={[
-                  { label: "Skip this agent", value: "skip" },
-                  { label: "Continue", value: "continue" },
+                  { label: t("asrTasks.dailyAgent.dependencyFailure.skip"), value: "skip" },
+                  { label: t("asrTasks.dailyAgent.dependencyFailure.continue"), value: "continue" },
                 ]}
               />
             </Descriptions.Item>
-            <Descriptions.Item label="Independent Research">
+            <Descriptions.Item label={t("asrTasks.dailyAgent.independentResearch")}>
               <Switch
                 data-testid="asr-daily-agent-research-fanout-switch"
                 checked={Boolean(selectedAgent.research_fanout)}
@@ -679,7 +686,7 @@ function TaskDailyAgentTab({ taskId }: DailyAgentTabProps) {
             </Descriptions.Item>
             {selectedAgent.research_fanout ? (
               <>
-                <Descriptions.Item label="Max Questions">
+                <Descriptions.Item label={t("asrTasks.dailyAgent.maxQuestions")}>
                   <InputNumber
                     data-testid="asr-daily-agent-research-max-questions"
                     size="small"
@@ -696,7 +703,7 @@ function TaskDailyAgentTab({ taskId }: DailyAgentTabProps) {
                     }
                   />
                 </Descriptions.Item>
-                <Descriptions.Item label="ChatGPT Project URL" span={2}>
+                <Descriptions.Item label={t("asrTasks.dailyAgent.chatgptProjectUrl")} span={2}>
                   <Input
                     key={`${selectedAgent.id}-project-url-${
                       selectedAgent.research_fanout.chatgpt_project_url || ""
@@ -727,7 +734,7 @@ function TaskDailyAgentTab({ taskId }: DailyAgentTabProps) {
                     onPressEnter={(event) => event.currentTarget.blur()}
                   />
                 </Descriptions.Item>
-                <Descriptions.Item label="Allowed Research Runners" span={2}>
+                <Descriptions.Item label={t("asrTasks.dailyAgent.allowedResearchRunners")} span={2}>
                   <Select
                     data-testid="asr-daily-agent-research-runners"
                     mode="multiple"
@@ -745,7 +752,7 @@ function TaskDailyAgentTab({ taskId }: DailyAgentTabProps) {
                     style={{ width: "100%" }}
                   />
                 </Descriptions.Item>
-                <Descriptions.Item label="Runtime Data Fallbacks" span={2}>
+                <Descriptions.Item label={t("asrTasks.dailyAgent.runtimeDataFallbacks")} span={2}>
                   <Space direction="vertical" size={8} style={{ width: "100%" }}>
                     {Object.entries(
                       selectedAgent.research_fanout.context_profiles || {},
@@ -753,10 +760,10 @@ function TaskDailyAgentTab({ taskId }: DailyAgentTabProps) {
                       <Space key={profileId} wrap style={{ width: "100%" }}>
                         <Text code>{profileId}</Text>
                         <Select
-                          aria-label={`${profileId} fallback runner`}
+                          aria-label={t("asrTasks.dailyAgent.fallbackRunnerAria", { profile: profileId })}
                           size="small"
                           value={profile.runner || undefined}
-                          placeholder="Runner"
+                          placeholder={t("asrTasks.field.runner")}
                           options={runnerOptions}
                           onChange={(runner) =>
                             updateAgent(selectedAgent.id, {
@@ -774,10 +781,10 @@ function TaskDailyAgentTab({ taskId }: DailyAgentTabProps) {
                         />
                         <Input
                           key={`${profileId}-work-dir-${profile.work_dir}`}
-                          aria-label={`${profileId} fallback working folder`}
+                          aria-label={t("asrTasks.dailyAgent.fallbackWorkDirAria", { profile: profileId })}
                           size="small"
                           defaultValue={profile.work_dir}
-                          placeholder="Local working folder"
+                          placeholder={t("asrTasks.dailyAgent.localWorkingFolder")}
                           onBlur={(event) => {
                             const workDir = event.target.value.trim();
                             if (workDir === profile.work_dir) {
@@ -804,10 +811,10 @@ function TaskDailyAgentTab({ taskId }: DailyAgentTabProps) {
                           key={`${profileId}-instructions-${
                             profile.instructions || ""
                           }`}
-                          aria-label={`${profileId} fallback instructions`}
+                          aria-label={t("asrTasks.dailyAgent.fallbackInstructionsAria", { profile: profileId })}
                           size="small"
                           defaultValue={profile.instructions || ""}
-                          placeholder="What facts should be collected?"
+                          placeholder={t("asrTasks.dailyAgent.factsPlaceholder")}
                           onBlur={(event) => {
                             const instructions = event.target.value.trim();
                             if (instructions === (profile.instructions || "")) {
@@ -848,17 +855,17 @@ function TaskDailyAgentTab({ taskId }: DailyAgentTabProps) {
                             });
                           }}
                         >
-                          Remove
+                          {t("common.remove")}
                         </Button>
                       </Space>
                     ))}
                     {contextProfileDraft ? (
                       <Space wrap style={{ width: "100%" }}>
                         <Input
-                          aria-label="New fallback name"
+                          aria-label={t("asrTasks.dailyAgent.newFallbackNameAria")}
                           size="small"
                           value={contextProfileDraft.id}
-                          placeholder="Fallback name"
+                          placeholder={t("asrTasks.dailyAgent.fallbackName")}
                           onChange={(event) =>
                             setContextProfileDraft({
                               ...contextProfileDraft,
@@ -868,10 +875,10 @@ function TaskDailyAgentTab({ taskId }: DailyAgentTabProps) {
                           style={{ width: 160 }}
                         />
                         <Select
-                          aria-label="New fallback runner"
+                          aria-label={t("asrTasks.dailyAgent.newFallbackRunnerAria")}
                           size="small"
                           value={contextProfileDraft.runner || undefined}
-                          placeholder="Runner"
+                          placeholder={t("asrTasks.field.runner")}
                           options={runnerOptions}
                           onChange={(runner) =>
                             setContextProfileDraft({
@@ -882,10 +889,10 @@ function TaskDailyAgentTab({ taskId }: DailyAgentTabProps) {
                           style={{ width: 180 }}
                         />
                         <Input
-                          aria-label="New fallback working folder"
+                          aria-label={t("asrTasks.dailyAgent.newFallbackWorkDirAria")}
                           size="small"
                           value={contextProfileDraft.work_dir}
-                          placeholder="Local working folder"
+                          placeholder={t("asrTasks.dailyAgent.localWorkingFolder")}
                           onChange={(event) =>
                             setContextProfileDraft({
                               ...contextProfileDraft,
@@ -895,10 +902,10 @@ function TaskDailyAgentTab({ taskId }: DailyAgentTabProps) {
                           style={{ width: 260 }}
                         />
                         <Input
-                          aria-label="New fallback instructions"
+                          aria-label={t("asrTasks.dailyAgent.newFallbackInstructionsAria")}
                           size="small"
                           value={contextProfileDraft.instructions}
-                          placeholder="What facts should be collected?"
+                          placeholder={t("asrTasks.dailyAgent.factsPlaceholder")}
                           onChange={(event) =>
                             setContextProfileDraft({
                               ...contextProfileDraft,
@@ -920,7 +927,7 @@ function TaskDailyAgentTab({ taskId }: DailyAgentTabProps) {
                               !workDir
                             ) {
                               message.warning(
-                                "Fallback name, runner, and local working folder are required",
+                                t("asrTasks.dailyAgent.fallbackRequired"),
                               );
                               return;
                             }
@@ -943,13 +950,13 @@ function TaskDailyAgentTab({ taskId }: DailyAgentTabProps) {
                             setContextProfileDraft(null);
                           }}
                         >
-                          Save fallback
+                          {t("asrTasks.dailyAgent.saveFallback")}
                         </Button>
                         <Button
                           size="small"
                           onClick={() => setContextProfileDraft(null)}
                         >
-                          Cancel
+                          {t("common.cancel")}
                         </Button>
                       </Space>
                     ) : null}
@@ -977,13 +984,13 @@ function TaskDailyAgentTab({ taskId }: DailyAgentTabProps) {
                       }}
                       disabled={Boolean(contextProfileDraft)}
                     >
-                      Add runtime fallback
+                      {t("asrTasks.dailyAgent.addRuntimeFallback")}
                     </Button>
                   </Space>
                 </Descriptions.Item>
               </>
             ) : null}
-            <Descriptions.Item label="Instructions Source">
+            <Descriptions.Item label={t("asrTasks.dailyAgent.instructionsSource")}>
               <Tag>{instructions?.source || selectedAgent.instructions_source}</Tag>
             </Descriptions.Item>
           </Descriptions>
@@ -992,15 +999,15 @@ function TaskDailyAgentTab({ taskId }: DailyAgentTabProps) {
               style={{ marginTop: 12 }}
               type="info"
               showIcon
-              message="Each research question runs in its own conversation"
-              description="The upstream dispatcher must output a research manifest. ChatGPT Web research runs are forced to Chat mode with the Pro model before a question is sent. When a Project URL is configured, every new research conversation is created inside that ChatGPT Project."
+              message={t("asrTasks.dailyAgent.researchAlertTitle")}
+              description={t("asrTasks.dailyAgent.researchAlertDescription")}
             />
           ) : null}
         </Card>
 
-        <Card size="small" title="IM Delivery" loading={loading && !config}>
+        <Card size="small" title={t("asrTasks.dailyAgent.imDelivery")} loading={loading && !config}>
           <Descriptions column={2} size="small" bordered>
-            <Descriptions.Item label="Enabled">
+            <Descriptions.Item label={t("common.enabled")}>
               <Switch
                 checked={selectedAgent.im_delivery.enabled}
                 onChange={(enabled) =>
@@ -1011,13 +1018,13 @@ function TaskDailyAgentTab({ taskId }: DailyAgentTabProps) {
                 loading={saving}
               />
             </Descriptions.Item>
-            <Descriptions.Item label="Channel">
+            <Descriptions.Item label={t("asrTasks.dailyAgent.channel")}>
               <Select
                 data-testid="asr-daily-agent-im-channel-select"
                 size="small"
                 allowClear
                 value={selectedAgent.im_delivery.channel || undefined}
-                placeholder="Select channel..."
+                placeholder={t("asrTasks.dailyAgent.selectChannel")}
                 onChange={(channel) =>
                   updateAgent(selectedAgent.id, {
                     im_delivery: {
@@ -1032,7 +1039,7 @@ function TaskDailyAgentTab({ taskId }: DailyAgentTabProps) {
                 options={imChannelOptions}
               />
             </Descriptions.Item>
-            <Descriptions.Item label="Mode">
+            <Descriptions.Item label={t("asrTasks.field.mode")}>
               <Select
                 size="small"
                 value={selectedAgent.im_delivery.mode}
@@ -1043,12 +1050,12 @@ function TaskDailyAgentTab({ taskId }: DailyAgentTabProps) {
                 }
                 style={{ width: 140 }}
                 options={[
-                  { label: "Full Report", value: "full_report" },
-                  { label: "Summary", value: "summary" },
+                  { label: t("asrTasks.dailyAgent.deliveryMode.fullReport"), value: "full_report" },
+                  { label: t("asrTasks.dailyAgent.deliveryMode.summary"), value: "summary" },
                 ]}
               />
             </Descriptions.Item>
-            <Descriptions.Item label="Send Policy">
+            <Descriptions.Item label={t("asrTasks.dailyAgent.sendPolicy")}>
               <Select
                 size="small"
                 value={selectedAgent.im_delivery.send_policy}
@@ -1063,16 +1070,16 @@ function TaskDailyAgentTab({ taskId }: DailyAgentTabProps) {
                 style={{ width: 220 }}
                 options={[
                   {
-                    label: "On success with report",
+                    label: t("asrTasks.dailyAgent.sendPolicy.onSuccessWithReport"),
                     value: "on_success_with_report",
                   },
-                  { label: "On success", value: "on_success" },
-                  { label: "Always", value: "always" },
+                  { label: t("asrTasks.dailyAgent.sendPolicy.onSuccess"), value: "on_success" },
+                  { label: t("asrTasks.dailyAgent.sendPolicy.always"), value: "always" },
                 ]}
               />
             </Descriptions.Item>
             {selectedAgent.im_delivery.last_send_error && (
-              <Descriptions.Item label="Last Send Error" span={2}>
+              <Descriptions.Item label={t("asrTasks.dailyAgent.lastSendError")} span={2}>
                 <Alert
                   type="error"
                   showIcon
@@ -1083,9 +1090,9 @@ function TaskDailyAgentTab({ taskId }: DailyAgentTabProps) {
           </Descriptions>
         </Card>
 
-        <Card size="small" title="Last Run Status">
+        <Card size="small" title={t("asrTasks.dailyAgent.lastRunStatus")}>
           <Descriptions column={3} size="small">
-            <Descriptions.Item label="Status">
+            <Descriptions.Item label={t("common.status")}>
               <Tag
                 color={
                   selectedAgent.last_status === "success"
@@ -1097,36 +1104,36 @@ function TaskDailyAgentTab({ taskId }: DailyAgentTabProps) {
                       : "default"
                 }
               >
-                {selectedAgent.last_status || "never"}
+                {selectedAgent.last_status || t("asrTasks.dailyAgent.statusNever")}
               </Tag>
             </Descriptions.Item>
-            <Descriptions.Item label="Run ID">
+            <Descriptions.Item label={t("asrTasks.dailyAgent.runId")}>
               <Text code style={{ fontSize: 11 }}>
                 {selectedAgent.last_run_id?.slice(0, 16) || "-"}
               </Text>
             </Descriptions.Item>
-            <Descriptions.Item label="Last Run">
+            <Descriptions.Item label={t("asrTasks.field.lastRun")}>
               <Text>{formatTimestamp(selectedAgent.last_run_at_ms)}</Text>
             </Descriptions.Item>
-            <Descriptions.Item label="Reports">
+            <Descriptions.Item label={t("asrTasks.dailyAgent.reports")}>
               {selectedWorkspaceAgent?.report_count ?? 0}
             </Descriptions.Item>
-            <Descriptions.Item label="Output Dir">
+            <Descriptions.Item label={t("asrTasks.field.outputDir")}>
               <Text code>{selectedWorkspaceAgent?.output_dir || selectedAgent.output_dir}</Text>
             </Descriptions.Item>
-            <Descriptions.Item label="Instructions File">
+            <Descriptions.Item label={t("asrTasks.dailyAgent.instructionsFile")}>
               <Tag
                 color={
                   selectedWorkspaceAgent?.instructions_exists ? "green" : "orange"
                 }
               >
                 {selectedWorkspaceAgent?.instructions_exists
-                  ? "Ready"
-                  : "Missing"}
+                  ? t("asrTasks.field.ready")
+                  : t("asrTasks.dailyAgent.missing")}
               </Tag>
             </Descriptions.Item>
             {selectedAgent.last_error && (
-              <Descriptions.Item label="Error" span={3}>
+              <Descriptions.Item label={t("common.error")} span={3}>
                 <Alert type="error" message={selectedAgent.last_error} showIcon />
               </Descriptions.Item>
             )}
@@ -1134,15 +1141,18 @@ function TaskDailyAgentTab({ taskId }: DailyAgentTabProps) {
           {reportSync && (
             <>
               <Descriptions column={3} size="small" style={{ marginTop: 8 }}>
-                <Descriptions.Item label="Report Sync">
+                <Descriptions.Item label={t("asrTasks.dailyAgent.reportSync")}>
                   <Tag color={reportSync.failed_files > 0 ? "red" : "green"}>
-                    {reportSync.copied_files} copied / {reportSync.total_files} total
+                    {t("asrTasks.dailyAgent.reportSyncCounts", {
+                      copied: reportSync.copied_files,
+                      total: reportSync.total_files,
+                    })}
                   </Tag>
                 </Descriptions.Item>
-                <Descriptions.Item label="Skipped">
+                <Descriptions.Item label={t("asrTasks.dailyAgent.skipped")}>
                   {reportSync.skipped_files}
                 </Descriptions.Item>
-                <Descriptions.Item label="Last Sync">
+                <Descriptions.Item label={t("asrTasks.dailyAgent.lastSync")}>
                   {formatTimestamp(reportSync.synced_at_ms)}
                 </Descriptions.Item>
               </Descriptions>
@@ -1151,7 +1161,7 @@ function TaskDailyAgentTab({ taskId }: DailyAgentTabProps) {
                   style={{ marginTop: 8 }}
                   type="error"
                   showIcon
-                  message={`Report sync failed for ${reportSync.failed_files} file(s)`}
+                  message={t("asrTasks.dailyAgent.reportSyncFailed", { count: reportSync.failed_files })}
                   description={(reportSync.errors || []).slice(0, 3).join("; ")}
                 />
               )}
@@ -1159,21 +1169,21 @@ function TaskDailyAgentTab({ taskId }: DailyAgentTabProps) {
           )}
           {reportIndex && (
             <Descriptions column={3} size="small" style={{ marginTop: 8 }}>
-              <Descriptions.Item label="Indexed Reports">
+              <Descriptions.Item label={t("asrTasks.dailyAgent.indexedReports")}>
                 <Tag
                   color={reportIndex.unindexed_reports > 0 ? "orange" : "green"}
                 >
                   {reportIndex.indexed_reports}/{reportIndex.report_files}
                 </Tag>
               </Descriptions.Item>
-              <Descriptions.Item label="Unindexed Reports">
+              <Descriptions.Item label={t("asrTasks.dailyAgent.unindexedReports")}>
                 <Tag
                   color={reportIndex.unindexed_reports > 0 ? "orange" : "green"}
                 >
                   {reportIndex.unindexed_reports}
                 </Tag>
               </Descriptions.Item>
-              <Descriptions.Item label="Missing Reports">
+              <Descriptions.Item label={t("asrTasks.dailyAgent.missingReports")}>
                 <Tag
                   color={
                     reportIndex.processed_missing_report > 0 ? "red" : "green"
@@ -1187,7 +1197,7 @@ function TaskDailyAgentTab({ taskId }: DailyAgentTabProps) {
         </Card>
 
         <Space>
-          <Tooltip title="Incremental run: only this agent's Daily Agent state changes are processed.">
+          <Tooltip title={t("asrTasks.dailyAgent.runNowTooltip")}>
             <Button
               type="primary"
               icon={<PlayCircleOutlined />}
@@ -1195,33 +1205,35 @@ function TaskDailyAgentTab({ taskId }: DailyAgentTabProps) {
               loading={runningAgentId === activeAgentId}
               disabled={!config?.enabled || !selectedAgent.enabled}
             >
-              Run Now
+              {t("asrTasks.dailyAgent.runNow")}
             </Button>
           </Tooltip>
-          <Tooltip title="Force run: rebuild all matching reports for this agent.">
+          <Tooltip title={t("asrTasks.dailyAgent.forceRunTooltip")}>
             <Button
               icon={<ThunderboltOutlined />}
               onClick={() => handleRun(true, activeAgentId)}
               loading={runningAgentId === activeAgentId}
               disabled={!config?.enabled || !selectedAgent.enabled}
             >
-              Force Run
+              {t("asrTasks.dailyAgent.forceRun")}
             </Button>
           </Tooltip>
-          <Tooltip title="Send this agent's latest report via IM">
+          <Tooltip title={t("asrTasks.dailyAgent.sendReportTooltip")}>
             <Button
               icon={<SendOutlined />}
               onClick={handleSend}
               disabled={!selectedAgent.im_delivery.enabled}
             >
-              Send Report
+              {t("asrTasks.dailyAgent.sendReport")}
             </Button>
           </Tooltip>
         </Space>
 
         <Card
           size="small"
-          title={`Agent Instructions (${selectedAgent.name || activeAgentId})`}
+          title={t("asrTasks.dailyAgent.agentInstructionsTitle", {
+            name: selectedAgent.name || activeAgentId,
+          })}
           extra={
             <Button
               type="primary"
@@ -1231,7 +1243,7 @@ function TaskDailyAgentTab({ taskId }: DailyAgentTabProps) {
               loading={saving}
               disabled={!instructionsDirty}
             >
-              Save
+              {t("common.save")}
             </Button>
           }
         >
@@ -1252,14 +1264,14 @@ function TaskDailyAgentTab({ taskId }: DailyAgentTabProps) {
                 fontSize: 12,
               },
             }}
-            placeholder="Agent instructions..."
+            placeholder={t("asrTasks.dailyAgent.instructionsPlaceholder")}
           />
           {instructions?.source && (
             <Text
               type="secondary"
               style={{ fontSize: 11, marginTop: 4, display: "block" }}
             >
-              Source: {instructions.source}
+              {t("asrTasks.dailyAgent.sourceLabel", { source: instructions.source })}
             </Text>
           )}
         </Card>
@@ -1269,7 +1281,7 @@ function TaskDailyAgentTab({ taskId }: DailyAgentTabProps) {
 
   return (
     <Space direction="vertical" size={16} style={{ width: "100%" }}>
-      <Card size="small" title="Daily Agents" loading={loading && !config}>
+      <Card size="small" title={t("asrTasks.dailyAgent.dailyAgents")} loading={loading && !config}>
         <Space direction="vertical" size={8} style={{ width: "100%", marginBottom: 12 }}>
           <Space
             style={{
@@ -1278,7 +1290,7 @@ function TaskDailyAgentTab({ taskId }: DailyAgentTabProps) {
             }}
           >
             <Space wrap>
-              <Text type="secondary">Task</Text>
+              <Text type="secondary">{t("asrTasks.field.task")}</Text>
               <Switch
                 checked={config?.enabled}
                 onChange={(enabled) => handleConfigUpdate({ enabled })}
@@ -1290,7 +1302,7 @@ function TaskDailyAgentTab({ taskId }: DailyAgentTabProps) {
                   data-testid="asr-daily-agent-report-sync-dir"
                   size="small"
                   value={reportSyncDir}
-                  placeholder="Optional report sync directory"
+                  placeholder={t("asrTasks.dailyAgent.reportSyncDirPlaceholder")}
                   onChange={(event) => {
                     setReportSyncDirDraft({
                       value: event.target.value,
@@ -1308,7 +1320,7 @@ function TaskDailyAgentTab({ taskId }: DailyAgentTabProps) {
                   disabled={!reportSyncDirDirty}
                   loading={saving}
                 >
-                  Save
+                  {t("common.save")}
                 </Button>
               </Space.Compact>
               <Button
@@ -1319,11 +1331,11 @@ function TaskDailyAgentTab({ taskId }: DailyAgentTabProps) {
                 loading={syncing}
                 disabled={!config?.report_sync_dir?.trim()}
               >
-                Sync Reports
+                {t("asrTasks.dailyAgent.syncReports")}
               </Button>
             </Space>
             <Button icon={<ReloadOutlined />} onClick={fetchAll} loading={loading}>
-              Refresh
+              {t("common.refresh")}
             </Button>
           </Space>
           <div
@@ -1336,12 +1348,12 @@ function TaskDailyAgentTab({ taskId }: DailyAgentTabProps) {
             }}
           >
             <Text type="secondary" style={{ width: 88, lineHeight: "24px" }}>
-              Terminology
+              {t("asrTasks.dailyAgent.terminology")}
             </Text>
             <TextArea
               data-testid="asr-daily-agent-terminology"
               value={terminology}
-              placeholder="Project names, people, abbreviations, fixed translations..."
+              placeholder={t("asrTasks.dailyAgent.terminologyPlaceholder")}
               autoSize={{ minRows: 2, maxRows: 5 }}
               onChange={(event) => {
                 setTerminology(event.target.value);
@@ -1357,7 +1369,7 @@ function TaskDailyAgentTab({ taskId }: DailyAgentTabProps) {
               disabled={!terminologyDirty}
               loading={saving}
             >
-              Save
+              {t("common.save")}
             </Button>
           </div>
         </Space>
@@ -1365,7 +1377,7 @@ function TaskDailyAgentTab({ taskId }: DailyAgentTabProps) {
           type="info"
           showIcon
           style={{ marginBottom: 12 }}
-          message="Enabled agents run in dependency order. Without dependencies, the configured list order is preserved."
+          message={t("asrTasks.dailyAgent.orderHint")}
         />
         <Table<AsrDailyAgentItem>
           data-testid="asr-daily-agents-table"
@@ -1376,7 +1388,7 @@ function TaskDailyAgentTab({ taskId }: DailyAgentTabProps) {
           scroll={{ x: 1370 }}
           columns={[
             {
-              title: <span style={{ whiteSpace: "nowrap" }}>Enabled</span>,
+              title: <span style={{ whiteSpace: "nowrap" }}>{t("common.enabled")}</span>,
               dataIndex: "enabled",
               width: 100,
               render: (enabled, record) => (
@@ -1387,7 +1399,7 @@ function TaskDailyAgentTab({ taskId }: DailyAgentTabProps) {
               ),
             },
             {
-              title: <span style={{ whiteSpace: "nowrap" }}>Agent</span>,
+              title: <span style={{ whiteSpace: "nowrap" }}>{t("asrTasks.field.agent")}</span>,
               dataIndex: "name",
               width: 230,
               render: (value, record) => (
@@ -1407,7 +1419,7 @@ function TaskDailyAgentTab({ taskId }: DailyAgentTabProps) {
               ),
             },
             {
-              title: <span style={{ whiteSpace: "nowrap" }}>Output Dir</span>,
+              title: <span style={{ whiteSpace: "nowrap" }}>{t("asrTasks.field.outputDir")}</span>,
               dataIndex: "output_dir",
               width: 140,
               render: (value) => (
@@ -1417,17 +1429,17 @@ function TaskDailyAgentTab({ taskId }: DailyAgentTabProps) {
               ),
             },
             {
-              title: <span style={{ whiteSpace: "nowrap" }}>Runner</span>,
+              title: <span style={{ whiteSpace: "nowrap" }}>{t("asrTasks.field.runner")}</span>,
               dataIndex: "runner",
               width: 140,
               render: (value) => (
                 <Tag style={{ whiteSpace: "nowrap" }}>
-                  {value || "Not configured"}
+                  {value || t("asrTasks.dailyAgent.notConfigured")}
                 </Tag>
               ),
             },
             {
-              title: <span style={{ whiteSpace: "nowrap" }}>Dependencies</span>,
+              title: <span style={{ whiteSpace: "nowrap" }}>{t("asrTasks.dailyAgent.dependencies")}</span>,
               dataIndex: "dependencies",
               width: 190,
               render: (_, record) =>
@@ -1436,22 +1448,24 @@ function TaskDailyAgentTab({ taskId }: DailyAgentTabProps) {
                     {record.dependencies.map((dependency) => (
                       <Tag key={dependency.agent_id}>
                         {dependency.agent_id}
-                        {dependency.include_output === false ? " / order" : ""}
+                        {dependency.include_output === false
+                          ? t("asrTasks.dailyAgent.dependencyOrderOnly")
+                          : ""}
                       </Tag>
                     ))}
                   </Space>
                 ) : (
-                  <Text type="secondary">None</Text>
+                  <Text type="secondary">{t("common.none")}</Text>
                 ),
             },
             {
-              title: <span style={{ whiteSpace: "nowrap" }}>IM Delivery</span>,
+              title: <span style={{ whiteSpace: "nowrap" }}>{t("asrTasks.dailyAgent.imDelivery")}</span>,
               dataIndex: ["im_delivery", "enabled"],
               width: 190,
               render: (_, record) => (
                 <Space size={6} style={{ whiteSpace: "nowrap" }}>
                   <Tag color={record.im_delivery.enabled ? "green" : "default"}>
-                    {record.im_delivery.enabled ? "Enabled" : "Off"}
+                    {record.im_delivery.enabled ? t("common.enabled") : t("common.off")}
                   </Tag>
                   {record.im_delivery.channel && (
                     <Text style={{ fontSize: 12 }}>
@@ -1462,7 +1476,7 @@ function TaskDailyAgentTab({ taskId }: DailyAgentTabProps) {
               ),
             },
             {
-              title: <span style={{ whiteSpace: "nowrap" }}>Last Run</span>,
+              title: <span style={{ whiteSpace: "nowrap" }}>{t("asrTasks.field.lastRun")}</span>,
               width: 220,
               render: (_, record) =>
                 record.last_status ? (
@@ -1485,11 +1499,11 @@ function TaskDailyAgentTab({ taskId }: DailyAgentTabProps) {
                     </Text>
                   </Space>
                 ) : (
-                  <Text type="secondary">Never</Text>
+                  <Text type="secondary">{t("asrTasks.dailyAgent.never")}</Text>
                 ),
             },
             {
-              title: <span style={{ whiteSpace: "nowrap" }}>Actions</span>,
+              title: <span style={{ whiteSpace: "nowrap" }}>{t("common.actions")}</span>,
               width: 210,
               render: (_, record) => (
                 <Space style={{ whiteSpace: "nowrap" }}>
@@ -1498,7 +1512,7 @@ function TaskDailyAgentTab({ taskId }: DailyAgentTabProps) {
                     icon={<EditOutlined />}
                     onClick={() => void openAgentDetail(record.id)}
                   >
-                    Edit
+                    {t("common.edit")}
                   </Button>
                   <Button
                     size="small"
@@ -1507,11 +1521,11 @@ function TaskDailyAgentTab({ taskId }: DailyAgentTabProps) {
                     loading={runningAgentId === record.id}
                     disabled={!config?.enabled || !record.enabled}
                   >
-                    Run
+                    {t("asrTasks.field.run")}
                   </Button>
                   <Popconfirm
-                    title="Delete Daily Agent?"
-                    okText="Delete"
+                    title={t("asrTasks.dailyAgent.deleteConfirm")}
+                    okText={t("common.delete")}
                     okButtonProps={{ danger: true }}
                     onConfirm={() => removeAgent(record.id)}
                   >
@@ -1523,7 +1537,7 @@ function TaskDailyAgentTab({ taskId }: DailyAgentTabProps) {
           ]}
         />
         <Button style={{ marginTop: 12 }} icon={<PlusOutlined />} onClick={addAgent}>
-          Add Agent
+          {t("asrTasks.dailyAgent.addAgent")}
         </Button>
       </Card>
     </Space>
@@ -1531,6 +1545,7 @@ function TaskDailyAgentTab({ taskId }: DailyAgentTabProps) {
 }
 
 export function DailyAgentRecordsTab({ taskId, onOpenReport }: DailyAgentTabProps) {
+  const { t } = useI18n();
   const [runsData, setRunsData] = useState<AsrDailyAgentRunsResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [agentFilter, setAgentFilter] = useState<string | undefined>();
@@ -1542,11 +1557,11 @@ export function DailyAgentRecordsTab({ taskId, onOpenReport }: DailyAgentTabProp
     try {
       setRunsData(await getDailyAgentRuns(taskId));
     } catch (error: unknown) {
-      message.error(`Failed to load Daily Agent records: ${errorMessage(error)}`);
+      message.error(t("asrTasks.records.loadFailed", { error: errorMessage(error) }));
     } finally {
       setLoading(false);
     }
-  }, [taskId]);
+  }, [t, taskId]);
 
   useEffect(() => {
     fetchRuns();
@@ -1624,12 +1639,12 @@ export function DailyAgentRecordsTab({ taskId, onOpenReport }: DailyAgentTabProp
   return (
     <Card
       size="small"
-      title="Run Results"
+      title={t("asrTasks.records.runResults")}
       style={{ width: "100%", minWidth: 0 }}
       loading={loading && !runsData}
       extra={
         <Button icon={<ReloadOutlined />} onClick={fetchRuns} loading={loading}>
-          Refresh
+          {t("common.refresh")}
         </Button>
       }
     >
@@ -1639,7 +1654,7 @@ export function DailyAgentRecordsTab({ taskId, onOpenReport }: DailyAgentTabProp
             <Select
               allowClear
               showSearch
-              placeholder="Agent"
+              placeholder={t("asrTasks.field.agent")}
               style={{ width: 220 }}
               value={agentFilter}
               options={filterOptions.agents}
@@ -1650,7 +1665,7 @@ export function DailyAgentRecordsTab({ taskId, onOpenReport }: DailyAgentTabProp
             <Select
               allowClear
               showSearch
-              placeholder="Date"
+              placeholder={t("asrTasks.field.date")}
               style={{ width: 160 }}
               value={dateFilter}
               options={filterOptions.dates}
@@ -1661,7 +1676,7 @@ export function DailyAgentRecordsTab({ taskId, onOpenReport }: DailyAgentTabProp
             <Select
               allowClear
               showSearch
-              placeholder="Runner"
+              placeholder={t("asrTasks.field.runner")}
               style={{ width: 160 }}
               value={runnerFilter}
               options={filterOptions.runners}
@@ -1688,21 +1703,21 @@ export function DailyAgentRecordsTab({ taskId, onOpenReport }: DailyAgentTabProp
               dataSource={filteredDocuments}
               pagination={{ pageSize: 10, hideOnSinglePage: true }}
               columns={[
-                { title: "Date", dataIndex: "date", width: 120 },
+                { title: t("asrTasks.field.date"), dataIndex: "date", width: 120 },
                 {
-                  title: "Agent",
+                  title: t("asrTasks.field.agent"),
                   dataIndex: "agent_name",
                   width: 140,
                   render: (v, record) => <Tag>{v || record.agent_id}</Tag>,
                 },
                 {
-                  title: "Output",
+                  title: t("asrTasks.records.output"),
                   dataIndex: "output_dir",
                   width: 120,
                   render: (v) => <Text code>{v || "report"}</Text>,
                 },
                 {
-                  title: "Processed At",
+                  title: t("asrTasks.field.processedAt"),
                   dataIndex: "processed_at_ms",
                   width: 180,
                   render: (v) => (v ? new Date(v).toLocaleString() : "-"),
@@ -1718,7 +1733,7 @@ export function DailyAgentRecordsTab({ taskId, onOpenReport }: DailyAgentTabProp
                   ),
                 },
                 {
-                  title: "Size",
+                  title: t("asrTasks.field.size"),
                   dataIndex: "source_len_bytes",
                   width: 80,
                   render: (v: number) =>
@@ -1729,13 +1744,13 @@ export function DailyAgentRecordsTab({ taskId, onOpenReport }: DailyAgentTabProp
                         : `${(v / 1024 / 1024).toFixed(1)} MB`,
                 },
                 {
-                  title: "Runner",
+                  title: t("asrTasks.field.runner"),
                   dataIndex: "runner",
                   width: 100,
                   render: (v) => <Tag>{v}</Tag>,
                 },
                 {
-                  title: "Report",
+                  title: t("asrTasks.records.report"),
                   dataIndex: "report_path",
                   width: 220,
                   ellipsis: true,
@@ -1755,12 +1770,12 @@ export function DailyAgentRecordsTab({ taskId, onOpenReport }: DailyAgentTabProp
                     ),
                 },
               ]}
-              locale={{ emptyText: "No matching Daily Agent records" }}
+              locale={{ emptyText: t("asrTasks.records.noMatching") }}
             />
           </div>
         </Space>
       ) : (
-        <Empty description="No Daily Agent records yet" />
+        <Empty description={t("asrTasks.records.empty")} />
       )}
     </Card>
   );

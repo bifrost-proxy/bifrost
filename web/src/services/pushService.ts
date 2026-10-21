@@ -25,6 +25,7 @@ import {
   isDesktopCoreTransitionActive,
   useDesktopCoreStore,
 } from '../stores/useDesktopCoreStore';
+import { t } from '../i18n';
 
 export interface TrafficUpdatesData {
   database_epoch?: string;
@@ -345,7 +346,7 @@ class PushService {
     this.createConnection();
   }
 
-  private handleConnectionIssue(detail = 'Bifrost core is starting. Reconnecting the interface...'): void {
+  private handleConnectionIssue(detail = t('shared.core.starting')): void {
     useDesktopCoreStore.getState().showBooting(detail);
   }
 

@@ -59,6 +59,7 @@ import {
   hasRunningDailyAgent,
   type WorkState,
 } from "./asrUtils";
+import { useI18n } from "../../i18n";
 import ASRHomeTabs from "./components/ASRHomeTabs";
 import { isAsrHomeTabKey, type AsrHomeTabKey } from "./components/asrHomeRoute";
 import DirectoryTaskDetailPage from "./components/DirectoryTaskDetailPage";
@@ -68,6 +69,7 @@ import {
 } from "./components/taskDetailRoute";
 export default function ASR() {
   const { token } = theme.useToken();
+  const { t } = useI18n();
   const [searchParams, setSearchParams] = useSearchParams();
   const [taskForm] = Form.useForm();
   const taskScheduleKind = Form.useWatch("schedule_kind", taskForm) ?? "daily";
@@ -580,7 +582,7 @@ export default function ASR() {
           return;
         }
         if (current.status !== "succeeded") {
-          throw new Error(current.error || "Offline subtitle job failed");
+          throw new Error(current.error || t("asr.page.offlineJobFailed"));
         }
         const [timeline, text, srt, vtt] = await Promise.all([
           getAsrOfflineJobArtifact(created.job_id, "timeline_json"),
@@ -606,7 +608,7 @@ export default function ASR() {
         appendEvent(`offline job error: ${text}`);
       }
     },
-    [appendEvent, getCurrentAsrParams, refreshStatus, resetTranscript],
+    [appendEvent, getCurrentAsrParams, refreshStatus, resetTranscript, t],
   );
 
   const handleFile = useCallback(
@@ -619,7 +621,7 @@ export default function ASR() {
   const startRecording = useCallback(async () => {
     if (!navigator.mediaDevices?.getUserMedia) {
       setWorkState("error");
-      setErrorText("This browser does not expose microphone recording APIs.");
+      setErrorText(t("asr.page.noMicApi"));
       return;
     }
 
@@ -655,7 +657,7 @@ export default function ASR() {
         stream.getTracks().forEach((track) => track.stop());
         streamRef.current = null;
         setWorkState("error");
-        setErrorText("Microphone WebSocket connection failed.");
+        setErrorText(t("asr.page.micWsFailed"));
         appendEvent("websocket error: microphone stream failed");
       };
       ws.onclose = () => {
@@ -677,7 +679,7 @@ export default function ASR() {
             (window as Window & { webkitAudioContext?: typeof AudioContext })
               .webkitAudioContext;
           if (!VoiceAudioContext) {
-            throw new Error("This browser does not expose WebAudio recording APIs.");
+            throw new Error(t("asr.page.noWebAudioApi"));
           }
           const voiceAudioContext = new VoiceAudioContext({
             sampleRate: VOICE_REALTIME_SAMPLE_RATE,
@@ -781,7 +783,7 @@ registerProcessor("bifrost-voice-pcm16", BifrostVoicePcm16Processor);
           stream.getTracks().forEach((track) => track.stop());
           streamRef.current = null;
           setWorkState("error");
-          setErrorText(`Microphone capture failed: ${text}`);
+          setErrorText(t("asr.page.micCaptureFailed", { error: text }));
           appendEvent(`microphone error: ${text}`);
           ws.close();
         }
@@ -796,7 +798,7 @@ registerProcessor("bifrost-voice-pcm16", BifrostVoicePcm16Processor);
       stopVoicePcmStreaming();
       stopMicMeter();
       setWorkState("error");
-      setErrorText(`Microphone capture failed: ${text}`);
+      setErrorText(t("asr.page.micCaptureFailed", { error: text }));
       appendEvent(`microphone error: ${text}`);
     }
   }, [
@@ -807,6 +809,7 @@ registerProcessor("bifrost-voice-pcm16", BifrostVoicePcm16Processor);
     startMicMeter,
     stopMicMeter,
     stopVoicePcmStreaming,
+    t,
   ]);
 
   const stopRecording = useCallback(() => {
@@ -879,16 +882,16 @@ registerProcessor("bifrost-voice-pcm16", BifrostVoicePcm16Processor);
       });
       taskForm.resetFields();
       await refreshTasks();
-      message.success("ASR directory task created");
+      message.success(t("asr.page.taskCreated"));
       return true;
     } catch (error) {
       if (error && typeof error === "object" && "errorFields" in error) {
         return false;
       }
-      message.error(error instanceof Error ? error.message : "Failed to create ASR task");
+      message.error(error instanceof Error ? error.message : t("asr.page.createTaskFailed"));
       return false;
     }
-  }, [refreshTasks, taskForm]);
+  }, [refreshTasks, taskForm, t]);
 
   const updateDirectoryTask = useCallback(
     async (id: string) => {
@@ -939,17 +942,17 @@ registerProcessor("bifrost-voice-pcm16", BifrostVoicePcm16Processor);
         });
         setTaskDetail((previous) => (previous?.id === id ? { ...previous, ...updated } : previous));
         await refreshTasks();
-        message.success("ASR directory task updated");
+        message.success(t("asr.page.taskUpdated"));
         return true;
       } catch (error) {
         if (error && typeof error === "object" && "errorFields" in error) {
           return false;
         }
-        message.error(error instanceof Error ? error.message : "Failed to update ASR task");
+        message.error(error instanceof Error ? error.message : t("asr.page.updateTaskFailed"));
         return false;
       }
     },
-    [refreshTasks, taskForm],
+    [refreshTasks, taskForm, t],
   );
 
   const loadTaskDetail = useCallback(async (id: string) => {
@@ -958,11 +961,11 @@ registerProcessor("bifrost-voice-pcm16", BifrostVoicePcm16Processor);
     try {
       setTaskDetail(await getAsrTask(id));
     } catch (error) {
-      message.error(error instanceof Error ? error.message : "Failed to load ASR task");
+      message.error(error instanceof Error ? error.message : t("asr.page.loadTaskFailed"));
     } finally {
       setTaskDetailLoading(false);
     }
-  }, []);
+  }, [t]);
 
   useEffect(() => {
     const taskIds = new Set(tasks.map((task) => task.id));
@@ -1050,11 +1053,11 @@ registerProcessor("bifrost-voice-pcm16", BifrostVoicePcm16Processor);
     try {
       setTaskTimeline(await getAsrTaskFileTimeline(taskId, fileKey));
     } catch (error) {
-      message.error(error instanceof Error ? error.message : "Failed to load ASR timeline");
+      message.error(error instanceof Error ? error.message : t("asr.page.loadTimelineFailed"));
     } finally {
       setTaskTimelineLoading(false);
     }
-  }, []);
+  }, [t]);
 
   const loadTaskDailyDocument = useCallback(async (taskId: string, date: string) => {
     setTaskDailyDocument(null);
@@ -1063,12 +1066,12 @@ registerProcessor("bifrost-voice-pcm16", BifrostVoicePcm16Processor);
       setTaskDailyDocument(await getAsrTaskDailyDocument(taskId, date));
     } catch (error) {
       message.error(
-        error instanceof Error ? error.message : "Failed to load ASR daily document",
+        error instanceof Error ? error.message : t("asr.page.loadDailyDocumentFailed"),
       );
     } finally {
       setTaskDailyDocumentLoading(false);
     }
-  }, []);
+  }, [t]);
 
   const loadDailyAgentReport = useCallback(async (taskId: string, date: string, agentId?: string | null) => {
     setTaskDailyAgentReport(null);
@@ -1077,12 +1080,12 @@ registerProcessor("bifrost-voice-pcm16", BifrostVoicePcm16Processor);
       setTaskDailyAgentReport(await getDailyAgentReport(taskId, date, agentId || undefined));
     } catch (error) {
       message.error(
-        error instanceof Error ? error.message : "Failed to load Daily Agent report",
+        error instanceof Error ? error.message : t("asr.page.loadDailyAgentReportFailed"),
       );
     } finally {
       setTaskDailyAgentReportLoading(false);
     }
-  }, []);
+  }, [t]);
 
   const openTaskDetail = useCallback(
     (id: string) => {
@@ -1357,13 +1360,13 @@ registerProcessor("bifrost-voice-pcm16", BifrostVoicePcm16Processor);
     async (id: string) => {
       try {
         const result = await runAsrTask(id);
-        message.info("ASR task started");
+        message.info(t("asr.page.taskStarted"));
         applyTaskControlUpdate(result.task);
       } catch (error) {
-        message.error(error instanceof Error ? error.message : "Failed to run ASR task");
+        message.error(error instanceof Error ? error.message : t("asr.page.runTaskFailed"));
       }
     },
-    [applyTaskControlUpdate],
+    [applyTaskControlUpdate, t],
   );
 
   const pauseDirectoryTask = useCallback(
@@ -1373,10 +1376,10 @@ registerProcessor("bifrost-voice-pcm16", BifrostVoicePcm16Processor);
         message.info(result.message);
         applyTaskControlUpdate(result.task);
       } catch (error) {
-        message.error(error instanceof Error ? error.message : "Failed to pause ASR task");
+        message.error(error instanceof Error ? error.message : t("asr.page.pauseTaskFailed"));
       }
     },
-    [applyTaskControlUpdate],
+    [applyTaskControlUpdate, t],
   );
 
   const resumeDirectoryTask = useCallback(
@@ -1386,10 +1389,10 @@ registerProcessor("bifrost-voice-pcm16", BifrostVoicePcm16Processor);
         message.success(result.message);
         applyTaskControlUpdate(result.task);
       } catch (error) {
-        message.error(error instanceof Error ? error.message : "Failed to resume ASR task");
+        message.error(error instanceof Error ? error.message : t("asr.page.resumeTaskFailed"));
       }
     },
-    [applyTaskControlUpdate],
+    [applyTaskControlUpdate, t],
   );
 
   const runExternalImport = useCallback(
@@ -1410,11 +1413,11 @@ registerProcessor("bifrost-voice-pcm16", BifrostVoicePcm16Processor);
         void refreshExternalImportStatus(id);
       } catch (error) {
         message.error(
-          error instanceof Error ? error.message : "Failed to import external device data",
+          error instanceof Error ? error.message : t("asr.page.importExternalFailed"),
         );
       }
     },
-    [loadTaskDetail, refreshExternalImportStatus, refreshTasks, taskDetail?.id],
+    [loadTaskDetail, refreshExternalImportStatus, refreshTasks, taskDetail?.id, t],
   );
 
   const removeDirectoryTask = useCallback(
@@ -1425,12 +1428,12 @@ registerProcessor("bifrost-voice-pcm16", BifrostVoicePcm16Processor);
           closeTaskDetail();
         }
         await refreshTasks();
-        message.success("ASR directory task deleted");
+        message.success(t("asr.page.taskDeleted"));
       } catch (error) {
-        message.error(error instanceof Error ? error.message : "Failed to delete ASR task");
+        message.error(error instanceof Error ? error.message : t("asr.page.deleteTaskFailed"));
       }
     },
-    [closeTaskDetail, refreshTasks, taskDetail?.id],
+    [closeTaskDetail, refreshTasks, taskDetail?.id, t],
   );
 
   const ready = status?.ready;

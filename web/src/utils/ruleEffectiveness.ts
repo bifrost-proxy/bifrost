@@ -1,3 +1,5 @@
+import { t } from "../i18n";
+
 export type RuleEffectStatus = "active" | "partial" | "shadowed" | "neutral";
 
 export interface RuleLineEffect {
@@ -245,7 +247,7 @@ const LAST_VALUE_MULTI_PROTOCOLS = new Set([
 const PROTOCOL_TOKEN_RE = /^([A-Za-z][A-Za-z0-9-]*):\/\/(.*)$/s;
 
 export function analyzeRuleEffectiveness(content: string): RuleLineEffect[] {
-  const sourceLines = (content.trim() ? content : "# No active rules").split(/\r?\n/);
+  const sourceLines = (content.trim() ? content : t("shared.ruleEffect.noActiveRules")).split(/\r?\n/);
   const operations: ParsedOperation[] = [];
   const lineOperationIds = new Map<number, number[]>();
   let inFence = false;
@@ -257,22 +259,22 @@ export function analyzeRuleEffectiveness(content: string): RuleLineEffect[] {
 
     if (trimmed.startsWith("```")) {
       inFence = !inFence;
-      return neutralLine(lineNumber, line, "Value block delimiter");
+      return neutralLine(lineNumber, line, t("shared.ruleEffect.valueBlockDelimiter"));
     }
     if (inFence) {
-      return neutralLine(lineNumber, line, "Value block content");
+      return neutralLine(lineNumber, line, t("shared.ruleEffect.valueBlockContent"));
     }
     if (!trimmed) {
-      return neutralLine(lineNumber, line, "Blank line");
+      return neutralLine(lineNumber, line, t("shared.ruleEffect.blankLine"));
     }
     if (trimmed.startsWith("#")) {
-      return neutralLine(lineNumber, line, "Comment line");
+      return neutralLine(lineNumber, line, t("shared.ruleEffect.commentLine"));
     }
 
     const body = stripInlineComment(line);
     const parts = splitRuleParts(body);
     if (parts.length < 2) {
-      return neutralLine(lineNumber, line, "No rule operation detected");
+      return neutralLine(lineNumber, line, t("shared.ruleEffect.noOperation"));
     }
 
     const pattern = parts[0];
@@ -301,11 +303,11 @@ export function analyzeRuleEffectiveness(content: string): RuleLineEffect[] {
     });
 
     if (ids.length === 0) {
-      return neutralLine(lineNumber, line, "No supported rule protocol detected");
+      return neutralLine(lineNumber, line, t("shared.ruleEffect.noProtocol"));
     }
 
     lineOperationIds.set(index, ids);
-    return neutralLine(lineNumber, line, "Pending analysis");
+    return neutralLine(lineNumber, line, t("shared.ruleEffect.pendingAnalysis"));
   });
 
   const operationEffects = buildOperationEffects(operations);
@@ -343,7 +345,7 @@ function buildOperationEffects(operations: ParsedOperation[]): Map<number, Opera
     const sorted = sortByResolverOrder(sameProtocolOps);
     if (MULTI_MATCH_PROTOCOLS.has(sorted[0]?.protocol ?? "")) {
       for (const op of sorted) {
-        effects.set(op.id, activeEffect(op, "Resolver selects this multi-match protocol."));
+        effects.set(op.id, activeEffect(op, t("shared.ruleEffect.multiMatchSelected")));
       }
       continue;
     }
@@ -353,15 +355,18 @@ function buildOperationEffects(operations: ParsedOperation[]): Map<number, Opera
       if (op.id === winner.id) {
         effects.set(
           op.id,
-          activeEffect(op, "Resolver selects the first same matcher/protocol rule."),
+          activeEffect(op, t("shared.ruleEffect.firstSelected")),
         );
       } else {
         effects.set(op.id, {
           status: "shadowed",
-          reason: `Covered by line ${winner.lineNumber}`,
+          reason: t("shared.ruleEffect.coveredByLine", { line: winner.lineNumber }),
           coveredByLine: winner.lineNumber,
           details: [
-            `${op.protocol} is single-match, so the resolver keeps line ${winner.lineNumber} for the same matcher.`,
+            t("shared.ruleEffect.singleMatchKeeps", {
+              protocol: op.protocol,
+              line: winner.lineNumber,
+            }),
             matcherDetail(op),
           ],
         });
@@ -395,11 +400,17 @@ function applyForwardingDecisionEffects(
       if (!current) continue;
       effects.set(op.id, {
         status: "shadowed",
-        reason: `Forwarding decision is already taken by line ${winner.lineNumber}`,
+        reason: t("shared.ruleEffect.forwardingTaken", { line: winner.lineNumber }),
         coveredByLine: winner.lineNumber,
         details: [
-          `${winner.protocol} on line ${winner.lineNumber} wins the forwarding decision for this matcher.`,
-          `${op.protocol} on line ${op.lineNumber} is still parsed, but it cannot change forwarding after that.`,
+          t("shared.ruleEffect.forwardingWinner", {
+            protocol: winner.protocol,
+            line: winner.lineNumber,
+          }),
+          t("shared.ruleEffect.forwardingIgnored", {
+            protocol: op.protocol,
+            line: op.lineNumber,
+          }),
           matcherDetail(op),
         ],
       });
@@ -474,8 +485,11 @@ function applyKeyedOverrideEffects(
     effects.set(op.id, {
       status: allFieldsFullyCovered ? "shadowed" : "partial",
       reason: allFieldsFullyCovered
-        ? `${op.protocol} fields are replaced by line ${coveredByLine}`
-        : `${op.protocol} fields are partially covered by line ${coveredByLine}`,
+        ? t("shared.ruleEffect.fieldsReplaced", { protocol: op.protocol, line: coveredByLine })
+        : t("shared.ruleEffect.fieldsPartiallyCovered", {
+            protocol: op.protocol,
+            line: coveredByLine,
+          }),
       coveredByLine,
       details: keyedCoverageDetails(op, full, partial, fullyCoveredFields, partiallyCoveredFields),
     });
@@ -506,11 +520,14 @@ function applyLastValueMultiMatchEffects(
     effects.set(op.id, {
       status: fullyCovered ? "shadowed" : "partial",
       reason: fullyCovered
-        ? `${op.protocol} value is replaced by line ${winner.lineNumber}`
-        : `${op.protocol} value is partially covered by line ${winner.lineNumber}`,
+        ? t("shared.ruleEffect.valueReplaced", { protocol: op.protocol, line: winner.lineNumber })
+        : t("shared.ruleEffect.valuePartiallyCovered", {
+            protocol: op.protocol,
+            line: winner.lineNumber,
+          }),
       coveredByLine: winner.lineNumber,
       details: [
-        `${op.protocol} keeps the highest-priority selected value; equal-priority duplicate values are resolved by later merged rule order.`,
+        t("shared.ruleEffect.valuePriority", { protocol: op.protocol }),
         describeValueCoverage(winner, relation),
         matcherDetail(op),
       ],
@@ -523,7 +540,9 @@ function activeEffect(op: ParsedOperation, reason: string): OperationEffect {
     status: "active",
     reason,
     details: [
-      `${op.protocol} is ${MULTI_MATCH_PROTOCOLS.has(op.protocol) ? "multi-match" : "single-match"}.`,
+      MULTI_MATCH_PROTOCOLS.has(op.protocol)
+        ? t("shared.ruleEffect.isMultiMatch", { protocol: op.protocol })
+        : t("shared.ruleEffect.isSingleMatch", { protocol: op.protocol }),
       matcherDetail(op),
     ],
   };
@@ -541,12 +560,20 @@ function summarizeLineReason(
   coveredByLine?: number,
 ): string {
   if (status === "active") {
-    return "Effective: selected by the resolver and not covered by a later field-level operation.";
+    return t("shared.ruleEffect.summaryActive");
   }
   if (status === "partial") {
-    return `Partially effective: ${opEffects.find((effect) => effect.status !== "active")?.reason ?? "some operations are covered"}.`;
+    return t("shared.ruleEffect.summaryPartial", {
+      reason:
+        opEffects.find((effect) => effect.status !== "active")?.reason ??
+        t("shared.ruleEffect.summaryPartialFallback"),
+    });
   }
-  return `Not effective: ${opEffects[0]?.reason ?? `covered by line ${coveredByLine}`}.`;
+  return t("shared.ruleEffect.summaryShadowed", {
+    reason:
+      opEffects[0]?.reason ??
+      t("shared.ruleEffect.summaryShadowedFallback", { line: coveredByLine }),
+  });
 }
 
 function nearestCoveringLine(opEffects: OperationEffect[]): number | undefined {
@@ -959,12 +986,18 @@ function keyedCoverageDetails(
   const details: string[] = [];
   if (fullyCoveredFields.size > 0) {
     details.push(
-      `${op.protocol} field ${Array.from(fullyCoveredFields).join(", ")} is written by a higher-priority or later selected rule.`,
+      t("shared.ruleEffect.fieldWritten", {
+        protocol: op.protocol,
+        fields: Array.from(fullyCoveredFields).join(", "),
+      }),
     );
   }
   if (partiallyCoveredFields.size > 0) {
     details.push(
-      `${op.protocol} field ${Array.from(partiallyCoveredFields).join(", ")} is overridden only for overlapping matcher traffic.`,
+      t("shared.ruleEffect.fieldOverlapOnly", {
+        protocol: op.protocol,
+        fields: Array.from(partiallyCoveredFields).join(", "),
+      }),
     );
   }
 
@@ -973,7 +1006,7 @@ function keyedCoverageDetails(
   }
 
   details.push(
-    `${op.protocol} uses resolver priority first; when the same field is selected more than once, the later rule in the merged list wins for equal-priority matchers.`,
+    t("shared.ruleEffect.fieldPriority", { protocol: op.protocol }),
     matcherDetail(op),
   );
   return Array.from(new Set(details));
@@ -981,28 +1014,41 @@ function keyedCoverageDetails(
 
 function describeFieldCoverage(coverage: FieldCoverage): string {
   if (coverage.relation === "same") {
-    return `Line ${coverage.lineNumber} has the same matcher and wins ${coverage.fieldName}.`;
+    return t("shared.ruleEffect.fieldSame", {
+      line: coverage.lineNumber,
+      field: coverage.fieldName,
+    });
   }
   if (coverage.relation === "superset") {
-    return `Line ${coverage.lineNumber} matcher "${coverage.pattern}" covers all traffic for this matcher and writes ${coverage.fieldName}.`;
+    return t("shared.ruleEffect.fieldSuperset", {
+      line: coverage.lineNumber,
+      pattern: coverage.pattern,
+      field: coverage.fieldName,
+    });
   }
   if (coverage.relation === "subset") {
-    return `Line ${coverage.lineNumber} matcher "${coverage.pattern}" covers a narrower part of this matcher, so this rule still applies outside that narrower scope.`;
+    return t("shared.ruleEffect.subset", {
+      line: coverage.lineNumber,
+      pattern: coverage.pattern,
+    });
   }
-  return `Line ${coverage.lineNumber} matcher "${coverage.pattern}" overlaps this matcher, so this rule remains effective outside the overlap.`;
+  return t("shared.ruleEffect.overlap", {
+    line: coverage.lineNumber,
+    pattern: coverage.pattern,
+  });
 }
 
 function describeValueCoverage(op: ParsedOperation, relation: MatcherRelation): string {
   if (relation === "same") {
-    return `Line ${op.lineNumber} has the same matcher and wins this ${op.protocol} value.`;
+    return t("shared.ruleEffect.valueSame", { line: op.lineNumber, protocol: op.protocol });
   }
   if (relation === "superset") {
-    return `Line ${op.lineNumber} matcher "${op.pattern}" covers all traffic for this matcher.`;
+    return t("shared.ruleEffect.valueSuperset", { line: op.lineNumber, pattern: op.pattern });
   }
   if (relation === "subset") {
-    return `Line ${op.lineNumber} matcher "${op.pattern}" covers a narrower part of this matcher, so this rule still applies outside that narrower scope.`;
+    return t("shared.ruleEffect.subset", { line: op.lineNumber, pattern: op.pattern });
   }
-  return `Line ${op.lineNumber} matcher "${op.pattern}" overlaps this matcher, so this rule remains effective outside the overlap.`;
+  return t("shared.ruleEffect.overlap", { line: op.lineNumber, pattern: op.pattern });
 }
 
 function parseOperationFields(protocol: string, value: string): FieldEntry[] {
@@ -1115,5 +1161,8 @@ function splitInlineEntries(value: string): string[] {
 }
 
 function matcherDetail(op: ParsedOperation): string {
-  return `Matcher "${op.pattern}" has estimated priority ${op.priority}.`;
+  return t("shared.ruleEffect.matcherPriority", {
+    pattern: op.pattern,
+    priority: op.priority,
+  });
 }

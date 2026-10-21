@@ -16,6 +16,7 @@ import { useScriptsStore } from "../../stores/useScriptsStore";
 import { useReplayStore } from "../../stores/useReplayStore";
 import { useRulesStore } from "../../stores/useRulesStore";
 import { useTrafficStore } from "../../stores/useTrafficStore";
+import { t as translate, useI18n } from "../../i18n";
 import "./style.css";
 
 interface DropZoneProps {
@@ -85,7 +86,10 @@ export const importBifrostFileContent = async (
 
     if (result.warnings && result.warnings.length > 0) {
       message.warning(
-        `Imported ${filename} with ${result.warnings.length} warning(s)`,
+        translate("app.import.importedWithWarnings", {
+          filename,
+          count: result.warnings.length,
+        }),
       );
     } else {
       message.success(formatImportSuccessMessage(result, filename));
@@ -110,6 +114,7 @@ export const BifrostFileDropZone: React.FC<DropZoneProps> = ({
   const [isDragging, setIsDragging] = useState(false);
   const [isImporting, setIsImporting] = useState(false);
   const navigate = useNavigate();
+  const { t } = useI18n();
 
   const handleDragOver = useCallback((e: DragEvent) => {
     if (!e.dataTransfer?.types.includes("Files")) return;
@@ -146,7 +151,7 @@ export const BifrostFileDropZone: React.FC<DropZoneProps> = ({
       const bifrostFiles = files.filter((f) => f.name.endsWith(".bifrost"));
 
       if (bifrostFiles.length === 0) {
-        message.warning("Please drop a .bifrost file");
+        message.warning(t("app.import.dropBifrostFile"));
         return;
       }
 
@@ -162,10 +167,12 @@ export const BifrostFileDropZone: React.FC<DropZoneProps> = ({
           );
         }
       } catch (error) {
-        message.error(`Import failed: ${formatBifrostFileError(error)}`);
+        message.error(
+          t("app.import.failed", { error: formatBifrostFileError(error) }),
+        );
       }
     },
-    [navigate, onImportSuccess],
+    [navigate, onImportSuccess, t],
   );
 
   useEffect(() => {
@@ -188,7 +195,7 @@ export const BifrostFileDropZone: React.FC<DropZoneProps> = ({
         <div className="bifrost-drop-overlay">
           <div className="bifrost-drop-content">
             <UploadOutlined style={{ fontSize: 48 }} />
-            <span>Drop to import .bifrost file</span>
+            <span>{t("app.import.dropToImport")}</span>
           </div>
         </div>
       )}
@@ -202,7 +209,9 @@ export const BifrostFileDropZone: React.FC<DropZoneProps> = ({
       >
         <div style={{ textAlign: "center", padding: 20 }}>
           <Spin size="large" />
-          <p style={{ marginTop: 16, marginBottom: 0 }}>Importing...</p>
+          <p style={{ marginTop: 16, marginBottom: 0 }}>
+            {t("app.import.importing")}
+          </p>
         </div>
       </Modal>
     </>

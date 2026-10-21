@@ -10,6 +10,7 @@ import { HighLightBody } from './HighLightBody';
 import { HexView } from './HexView';
 import { TreeView } from './TreeView';
 import { shouldDisableJsonStructuredView } from '../../helper/contentType';
+import { useI18n } from '../../../../i18n';
 
 const { Text } = Typography;
 
@@ -61,6 +62,7 @@ export const Body = ({
   editable = false,
   onBodyChange,
 }: BodyProps) => {
+  const { t } = useI18n();
   const { token } = theme.useToken();
   const normalizedRawContentType = rawContentType?.toLowerCase() ?? '';
   const isImageMedia = contentType === 'Media' && normalizedRawContentType.includes('image/');
@@ -75,8 +77,8 @@ export const Body = ({
         value={source}
         onChange={(value) => onSourceChange(value as 'decoded' | 'raw')}
         options={[
-          { label: 'Decoded', value: 'decoded' },
-          { label: 'Raw', value: 'raw' },
+          { label: t('trafficDetail.body.decoded'), value: 'decoded' },
+          { label: t('trafficDetail.body.raw'), value: 'raw' },
         ]}
       />
     </div>
@@ -94,7 +96,7 @@ export const Body = ({
           >
             <img
               src={mediaSrc}
-              alt={rawContentType || 'Response preview'}
+              alt={rawContentType || t('trafficDetail.body.responsePreview')}
               style={styles.mediaImage}
             />
           </div>
@@ -107,13 +109,13 @@ export const Body = ({
             backgroundColor: token.colorBgLayout,
           }}
         >
-          <Text type="secondary">Media preview not supported</Text>
+          <Text type="secondary">{t('trafficDetail.body.mediaNotSupported')}</Text>
         </div>
       );
     }
     return (
       <Text type="secondary" style={{ padding: 12, display: 'block' }}>
-        Not a media type
+        {t('trafficDetail.body.notMedia')}
       </Text>
     );
   }
@@ -123,7 +125,7 @@ export const Body = ({
       <>
         {sourceSwitch}
         <Text type="secondary" style={{ padding: 8, display: 'block' }}>
-          No body content
+          {t('trafficDetail.body.noContent')}
         </Text>
       </>
     );

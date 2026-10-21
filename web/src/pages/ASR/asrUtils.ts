@@ -5,6 +5,7 @@ import type {
   VoiceRealtimeEvent,
   VoiceRealtimeTranscriptSegment,
 } from "../../api/asr";
+import { t, type TranslationKey } from "../../i18n";
 
 export type WorkState = "idle" | "recording" | "transcribing" | "error";
 
@@ -107,17 +108,25 @@ export function buildTaskSchedule(values: Record<string, unknown>): AsrTaskSched
 
 export function formatSchedule(schedule?: AsrTaskSchedule): string {
   if (!schedule) {
-    return "Daily at 02:00";
+    return t("asr.schedule.daily", { time: "02:00" });
   }
   switch (schedule.kind) {
     case "hourly":
-      return `Hourly at minute ${padTime(schedule.minute)}`;
+      return t("asr.schedule.hourly", { minute: padTime(schedule.minute) });
     case "daily":
-      return `Daily at ${padTime(schedule.hour)}:${padTime(schedule.minute)}`;
+      return t("asr.schedule.daily", {
+        time: `${padTime(schedule.hour)}:${padTime(schedule.minute)}`,
+      });
     case "weekly":
-      return `Weekly ${weekdayLabel(schedule.weekday)} ${padTime(schedule.hour)}:${padTime(schedule.minute)}`;
+      return t("asr.schedule.weekly", {
+        weekday: weekdayLabel(schedule.weekday),
+        time: `${padTime(schedule.hour)}:${padTime(schedule.minute)}`,
+      });
     case "monthly":
-      return `Monthly day ${schedule.day} ${padTime(schedule.hour)}:${padTime(schedule.minute)}`;
+      return t("asr.schedule.monthly", {
+        day: schedule.day,
+        time: `${padTime(schedule.hour)}:${padTime(schedule.minute)}`,
+      });
   }
 }
 
@@ -138,10 +147,15 @@ export function fileStatusColor(status: AsrTaskFileRecord["status"]): string {
 }
 
 export function fileStatusLabel(status: AsrTaskFileRecord["status"]): string {
-  if (status === "partial_success") {
-    return "partial success";
-  }
-  return status;
+  const labels: Record<AsrTaskFileRecord["status"], TranslationKey> = {
+    pending: "asr.fileStatus.pending",
+    processing: "asr.fileStatus.processing",
+    success: "asr.fileStatus.success",
+    partial_success: "asr.fileStatus.partialSuccess",
+    failed: "asr.fileStatus.failed",
+  };
+  const key = labels[status];
+  return key ? t(key) : status;
 }
 
 export function formatTime(value?: number): string {
@@ -250,5 +264,14 @@ function padTime(value: number): string {
 }
 
 function weekdayLabel(value: number): string {
-  return ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"][value - 1] ?? "Mon";
+  const keys: TranslationKey[] = [
+    "asr.weekday.mon",
+    "asr.weekday.tue",
+    "asr.weekday.wed",
+    "asr.weekday.thu",
+    "asr.weekday.fri",
+    "asr.weekday.sat",
+    "asr.weekday.sun",
+  ];
+  return t(keys[value - 1] ?? keys[0]);
 }

@@ -21,6 +21,7 @@ import {
 import MessagesPanel from "./MessagesPanel";
 import { getResponseBodyContentUrl } from "../../../api/traffic";
 import { formatDurationDetailed } from "../../../utils/duration";
+import { useI18n } from "../../../i18n";
 
 const { Text } = Typography;
 
@@ -112,10 +113,11 @@ interface RuleCardProps {
 }
 
 function RuleCard({ rule, index }: RuleCardProps) {
+  const { t } = useI18n();
   const { token } = theme.useToken();
   const source = rule.rule_name
     ? `${rule.rule_name}${rule.line ? `:${rule.line}` : ""}`
-    : "Unknown";
+    : t("common.unknown");
 
   return (
     <div
@@ -138,7 +140,7 @@ function RuleCard({ rule, index }: RuleCardProps) {
       </div>
       <div style={{ marginBottom: 1 }}>
         <Text type="secondary" style={{ fontSize: 12 }}>
-          Protocol:{" "}
+          {t("replay.response.rule.protocol")}{" "}
         </Text>
         <Tag color="green" style={{ fontSize: 11 }}>
           {rule.protocol}
@@ -146,7 +148,7 @@ function RuleCard({ rule, index }: RuleCardProps) {
       </div>
       <div style={{ marginBottom: 1 }}>
         <Text type="secondary" style={{ fontSize: 12 }}>
-          Pattern:{" "}
+          {t("replay.response.rule.pattern")}{" "}
         </Text>
         <Text code style={{ fontSize: 11 }}>
           {rule.pattern}
@@ -154,16 +156,16 @@ function RuleCard({ rule, index }: RuleCardProps) {
       </div>
       <div style={{ marginBottom: 1 }}>
         <Text type="secondary" style={{ fontSize: 12 }}>
-          Value:{" "}
+          {t("replay.response.rule.value")}{" "}
         </Text>
         <Text code style={{ fontSize: 11 }}>
-          {rule.value || "(empty)"}
+          {rule.value || t("replay.response.rule.empty")}
         </Text>
       </div>
       {rule.raw && (
         <div>
           <Text type="secondary" style={{ fontSize: 12 }}>
-            Raw Rule:
+            {t("replay.response.rule.raw")}
           </Text>
           <pre
             style={{
@@ -190,6 +192,7 @@ interface MatchedRulesPaneProps {
 }
 
 function MatchedRulesPane({ rules }: MatchedRulesPaneProps) {
+  const { t } = useI18n();
   if (rules.length === 0) {
     return (
       <div
@@ -202,7 +205,7 @@ function MatchedRulesPane({ rules }: MatchedRulesPaneProps) {
         }}
       >
         <Text type="secondary" style={{ fontSize: 12 }}>
-          No rules applied
+          {t("replay.response.noRulesApplied")}
         </Text>
       </div>
     );
@@ -218,6 +221,7 @@ function MatchedRulesPane({ rules }: MatchedRulesPaneProps) {
 }
 
 export default function ResponsePanel() {
+  const { t } = useI18n();
   const { token } = theme.useToken();
   const {
     currentResponse,
@@ -348,10 +352,10 @@ export default function ResponsePanel() {
       return [
         {
           key: "Body",
-          label: "Body",
+          label: t("replay.response.tab.body"),
           children: (
             <div style={staticStyles.emptyState} data-testid="replay-response-executing">
-              <Spin tip="Executing request..." />
+              <Spin tip={t("replay.response.executing")} />
             </div>
           ),
         },
@@ -362,12 +366,12 @@ export default function ResponsePanel() {
       return [
         {
           key: "Body",
-          label: "Body",
+          label: t("replay.response.tab.body"),
           children: (
             <div style={staticStyles.emptyState}>
               <Empty
                 image={Empty.PRESENTED_IMAGE_SIMPLE}
-                description="Send a request to see the response"
+                description={t("replay.response.empty")}
               />
             </div>
           ),
@@ -379,7 +383,7 @@ export default function ResponsePanel() {
       return [
         {
           key: "Body",
-          label: "Body",
+          label: t("replay.response.tab.body"),
           children: (
             <div style={staticStyles.errorState}>
               <CloseCircleOutlined
@@ -400,7 +404,7 @@ export default function ResponsePanel() {
     return [
       {
         key: "Body",
-        label: "Body",
+        label: t("replay.response.tab.body"),
         enable: !!responseBody || canPreviewImage,
         children: responseBody || canPreviewImage ? (
           <Body
@@ -415,14 +419,14 @@ export default function ResponsePanel() {
         ) : (
           <div style={staticStyles.emptyBody}>
             <Text type="secondary" style={{ fontSize: 12 }}>
-              No response body
+              {t("replay.response.noBody")}
             </Text>
           </div>
         ),
       },
       {
         key: "Header",
-        label: `Header`,
+        label: t("replay.response.tab.header"),
         children: (
           <HeaderView
             headers={responseHeaders}
@@ -446,7 +450,7 @@ export default function ResponsePanel() {
       },
       {
         key: "Matched Rules",
-        label: `Matched Rules (${appliedRules.length})`,
+        label: t("replay.response.tab.matchedRules", { count: appliedRules.length }),
         enable: appliedRules.length > 0,
         children: <MatchedRulesPane rules={appliedRules} />,
       },
@@ -454,7 +458,9 @@ export default function ResponsePanel() {
         ? [
             {
               key: "Messages",
-              label: `Messages (${sseEvents.length + wsMessages.length})`,
+              label: t("replay.response.tab.messages", {
+                count: sseEvents.length + wsMessages.length,
+              }),
               children: <MessagesPanel />,
             },
           ]
@@ -478,6 +484,7 @@ export default function ResponsePanel() {
     hasStreamingContent,
     sseEvents.length,
     wsMessages.length,
+    t,
   ]);
 
   useEffect(() => {
@@ -536,18 +543,18 @@ export default function ResponsePanel() {
     !isEmpty && !error && status > 0 ? (
       <div style={styles.statusBar}>
         <div style={styles.statusItem}>
-          <span style={styles.statusLabel}>Status:</span>
+          <span style={styles.statusLabel}>{t("replay.response.status")}</span>
           <Tag color={statusColor} style={{ margin: 0, fontSize: 12 }}>
             {status} {getStatusText(status)}
           </Tag>
         </div>
         <div style={styles.statusItem}>
-          <span style={styles.statusLabel}>Time:</span>
+          <span style={styles.statusLabel}>{t("replay.response.time")}</span>
           <span style={styles.statusValue}>{formatDurationDetailed(duration)}</span>
         </div>
         {responseBody && (
           <div style={styles.statusItem}>
-            <span style={styles.statusLabel}>Size:</span>
+            <span style={styles.statusLabel}>{t("replay.response.size")}</span>
             <span style={styles.statusValue}>{formatSize(responseBody.length)}</span>
           </div>
         )}

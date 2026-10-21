@@ -2,6 +2,7 @@ import { Card, Col, Row, Space, Switch, Tooltip, Typography } from "antd";
 import { AppstoreOutlined, DashboardOutlined } from "@ant-design/icons";
 import type { CSSProperties } from "react";
 import type { TrayConfig } from "../../../api/config";
+import { useI18n } from "../../../i18n";
 
 const { Text } = Typography;
 
@@ -39,6 +40,7 @@ export default function TrayTab({
   onToggleSystemStats,
   onToggleSystemStatsItem,
 }: TrayTabProps) {
+  const { t } = useI18n();
   const systemStatsDisabled =
     !trayConfig ||
     !trayConfig.supported ||
@@ -52,27 +54,27 @@ export default function TrayTab({
     {
       key: "cpu",
       label: "CPU",
-      description: "Processor utilization",
+      description: t("settings.tray.cpuDescription"),
     },
     {
       key: "memory",
-      label: "Memory",
-      description: "RAM usage percentage",
+      label: t("settings.tray.memory"),
+      description: t("settings.tray.memoryDescription"),
     },
     {
       key: "disk",
-      label: "Disk",
-      description: "Current data disk usage",
+      label: t("settings.tray.disk"),
+      description: t("settings.tray.diskDescription"),
     },
     {
       key: "upload",
-      label: "Upload",
-      description: "Default-route outbound throughput",
+      label: t("settings.tray.upload"),
+      description: t("settings.tray.uploadDescription"),
     },
     {
       key: "download",
-      label: "Download",
-      description: "Default-route inbound throughput",
+      label: t("settings.tray.download"),
+      description: t("settings.tray.downloadDescription"),
     },
   ];
 
@@ -83,7 +85,7 @@ export default function TrayTab({
           title={
             <Space>
               <AppstoreOutlined />
-              <span>Tray</span>
+              <span>{t("settings.tabTray")}</span>
             </Space>
           }
           size="small"
@@ -91,10 +93,10 @@ export default function TrayTab({
           <Space direction="vertical" style={{ width: "100%" }} size="middle">
             <div style={settingRowStyle}>
               <div style={settingTextStyle}>
-                <Text>Tray Icon</Text>
+                <Text>{t("settings.tray.icon")}</Text>
                 <br />
                 <Text type="secondary" style={{ fontSize: 12 }}>
-                  Native quick controller
+                  {t("settings.tray.iconDescription")}
                 </Text>
               </div>
               <div style={settingControlStyle}>
@@ -107,12 +109,14 @@ export default function TrayTab({
                       data-testid="settings-tray-switch"
                     />
                   ) : (
-                    <Tooltip title="Tray icon is not supported on this platform">
-                      <Text type="secondary">Not Supported</Text>
+                    <Tooltip title={t("settings.tray.notSupportedTooltip")}>
+                      <Text type="secondary">
+                        {t("settings.systemProxy.notSupported")}
+                      </Text>
                     </Tooltip>
                   )
                 ) : (
-                  <Text type="secondary">Loading...</Text>
+                  <Text type="secondary">{t("common.loading")}</Text>
                 )}
               </div>
             </div>
@@ -126,7 +130,7 @@ export default function TrayTab({
             title={
               <Space>
                 <DashboardOutlined />
-                <span>System Status</span>
+                <span>{t("settings.tray.systemStatus")}</span>
               </Space>
             }
             size="small"
@@ -134,10 +138,10 @@ export default function TrayTab({
             <Space direction="vertical" style={{ width: "100%" }} size="middle">
               <div style={settingRowStyle}>
                 <div style={settingTextStyle}>
-                  <Text>Show System Stats</Text>
+                  <Text>{t("settings.tray.showSystemStats")}</Text>
                   <br />
                   <Text type="secondary" style={{ fontSize: 12 }}>
-                    CPU, memory, disk, upload, and download speed
+                    {t("settings.tray.showSystemStatsDescription")}
                   </Text>
                 </div>
                 <div style={settingControlStyle}>
@@ -150,10 +154,12 @@ export default function TrayTab({
                         data-testid="settings-tray-system-stats-switch"
                       />
                     ) : (
-                      <Text type="secondary">Not Supported</Text>
+                      <Text type="secondary">
+                        {t("settings.systemProxy.notSupported")}
+                      </Text>
                     )
                   ) : (
-                    <Text type="secondary">Loading...</Text>
+                    <Text type="secondary">{t("common.loading")}</Text>
                   )}
                 </div>
               </div>
@@ -179,7 +185,7 @@ export default function TrayTab({
                         data-testid={`settings-tray-system-stats-${item.key}-switch`}
                       />
                     ) : (
-                      <Text type="secondary">Loading...</Text>
+                      <Text type="secondary">{t("common.loading")}</Text>
                     )}
                   </div>
                 </div>

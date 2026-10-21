@@ -11,6 +11,7 @@ import json from 'highlight.js/lib/languages/json';
 import '../../../../styles/hljs-github-theme.css';
 import type { SSEEvent } from '../../../../types';
 import { copyToClipboard } from '../../../../utils/clipboard';
+import { useI18n } from '../../../../i18n';
 
 hljs.registerLanguage('json', json);
 
@@ -82,6 +83,7 @@ export const SseEventCard = ({
   searchValue,
   onOpenDetail,
 }: SseEventCardProps) => {
+  const { t } = useI18n();
   const { token } = theme.useToken();
   const [copied, setCopied] = useState(false);
 
@@ -199,7 +201,7 @@ export const SseEventCard = ({
           )}
         </Space>
         <Space size={4}>
-          <Tooltip title={copied ? 'Copied!' : 'Copy'}>
+          <Tooltip title={copied ? t('trafficDetail.messages.copiedBang') : t('common.copy')}>
             <Button
               type="text"
               size="small"
@@ -283,7 +285,7 @@ export const SseEventCard = ({
           </div>
         ) : (
           <Text type="secondary" style={{ fontSize: 12, fontStyle: 'italic' }}>
-            (empty data)
+            {t('trafficDetail.messages.emptyData')}
           </Text>
         )}
       </div>

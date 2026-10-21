@@ -16,6 +16,7 @@ import {
   type FilterType,
 } from "../../stores/useFilterPanelStore";
 import { useTlsConfigStore } from "../../stores/useTlsConfigStore";
+import { useI18n } from "../../i18n";
 
 interface FilterItemProps {
   label: string;
@@ -76,6 +77,7 @@ export default function FilterItem({
   count,
   searchKeyword,
 }: FilterItemProps) {
+  const { t } = useI18n();
   const { token } = theme.useToken();
   const [isHovering, setIsHovering] = useState(false);
   const filterPanelState = useFilterPanelStore();
@@ -128,27 +130,23 @@ export default function FilterItem({
     if (isAppType) {
       success = await addAppToIntercept(value);
       if (success) {
-        message.success(
-          `Enabled TLS interception for "${value}" and disconnected active connections`
-        );
+        message.success(t("traffic.filterItem.interceptEnabledDisconnected", { value }));
       }
     } else if (isDomainType) {
       success = await addDomainToIntercept(value);
       if (success) {
-        message.success(
-          `Enabled TLS interception for "${value}" and disconnected active connections`
-        );
+        message.success(t("traffic.filterItem.interceptEnabledDisconnected", { value }));
       }
     } else if (isIpType) {
       success = await addIpToIntercept(value);
       if (success) {
-        message.success(`Enabled TLS interception for IP "${value}"`);
+        message.success(t("traffic.filterItem.interceptEnabledIp", { value }));
       }
     }
     if (!success) {
-      message.error("Failed to enable TLS interception");
+      message.error(t("traffic.filterItem.interceptEnableFailed"));
     }
-  }, [isAppType, isDomainType, isIpType, value, addAppToIntercept, addDomainToIntercept, addIpToIntercept]);
+  }, [isAppType, isDomainType, isIpType, value, addAppToIntercept, addDomainToIntercept, addIpToIntercept, t]);
 
   const handleDisableTlsIntercept = useCallback(async () => {
     let success = false;
@@ -160,11 +158,12 @@ export default function FilterItem({
       success = await removeIpFromIntercept(value);
     }
     if (success) {
-      message.success(`Removed "${value}" from TLS interception list`);
+      message.success(t("traffic.filterItem.interceptRemoved", { value }));
     } else {
-      message.error("Failed to disable TLS interception");
+      message.error(t("traffic.filterItem.interceptDisableFailed"));
     }
   }, [
+    t,
     isAppType,
     isDomainType,
     isIpType,
@@ -184,11 +183,11 @@ export default function FilterItem({
       success = await addIpToPassthrough(value);
     }
     if (success) {
-      message.success(`Added "${value}" to TLS passthrough list`);
+      message.success(t("traffic.filterItem.passthroughAdded", { value }));
     } else {
-      message.error("Failed to enable TLS passthrough");
+      message.error(t("traffic.filterItem.passthroughEnableFailed"));
     }
-  }, [isAppType, isDomainType, isIpType, value, addAppToPassthrough, addDomainToPassthrough, addIpToPassthrough]);
+  }, [isAppType, isDomainType, isIpType, value, addAppToPassthrough, addDomainToPassthrough, addIpToPassthrough, t]);
 
   const handleDisablePassthrough = useCallback(async () => {
     let success = false;
@@ -200,11 +199,12 @@ export default function FilterItem({
       success = await removeIpFromPassthrough(value);
     }
     if (success) {
-      message.success(`Removed "${value}" from TLS passthrough list`);
+      message.success(t("traffic.filterItem.passthroughRemoved", { value }));
     } else {
-      message.error("Failed to disable TLS passthrough");
+      message.error(t("traffic.filterItem.passthroughDisableFailed"));
     }
   }, [
+    t,
     isAppType,
     isDomainType,
     isIpType,
@@ -283,7 +283,7 @@ export default function FilterItem({
     const items: ItemType[] = [
       {
         key: "pin",
-        label: alreadyPinned ? "Already pinned" : "Pin this filter",
+        label: alreadyPinned ? t("traffic.filterItem.alreadyPinned") : t("traffic.filterItem.pinThisFilter"),
         icon: <PushpinOutlined />,
         disabled: alreadyPinned,
       },
@@ -295,13 +295,13 @@ export default function FilterItem({
       if (inIntercept) {
         items.push({
           key: "disable-intercept",
-          label: "Remove from TLS Intercept",
+          label: t("traffic.filterItem.removeFromIntercept"),
           icon: <LockOutlined style={{ color: token.colorWarning }} />,
         });
       } else {
         items.push({
           key: "enable-intercept",
-          label: "Enable TLS Intercept",
+          label: t("traffic.filterItem.enableIntercept"),
           icon: <UnlockOutlined style={{ color: token.colorSuccess }} />,
         });
       }
@@ -309,13 +309,13 @@ export default function FilterItem({
       if (inPassthrough) {
         items.push({
           key: "disable-passthrough",
-          label: "Remove from Passthrough",
+          label: t("traffic.filterItem.removeFromPassthrough"),
           icon: <UnlockOutlined style={{ color: token.colorSuccess }} />,
         });
       } else {
         items.push({
           key: "enable-passthrough",
-          label: "Add to Passthrough (No Intercept)",
+          label: t("traffic.filterItem.addToPassthrough"),
           icon: <LockOutlined style={{ color: token.colorWarning }} />,
         });
       }
@@ -323,6 +323,7 @@ export default function FilterItem({
 
     return items;
   }, [
+    t,
     alreadyPinned,
     isAppType,
     isDomainType,
@@ -368,7 +369,7 @@ export default function FilterItem({
   const tlsIndicator = useMemo(() => {
     if (inIntercept) {
       return (
-        <Tooltip title="TLS Interception Enabled (Decrypted)">
+        <Tooltip title={t("traffic.filterItem.interceptIndicator")}>
           <UnlockOutlined
             style={{ ...styles.tlsIcon, color: token.colorSuccess }}
           />
@@ -377,7 +378,7 @@ export default function FilterItem({
     }
     if (inPassthrough) {
       return (
-        <Tooltip title="TLS Passthrough (Encrypted)">
+        <Tooltip title={t("traffic.filterItem.passthroughIndicator")}>
           <LockOutlined
             style={{ ...styles.tlsIcon, color: token.colorWarning }}
           />
@@ -385,7 +386,7 @@ export default function FilterItem({
       );
     }
     return null;
-  }, [inIntercept, inPassthrough, styles.tlsIcon, token]);
+  }, [inIntercept, inPassthrough, styles.tlsIcon, token, t]);
 
   return (
     <div
@@ -414,7 +415,7 @@ export default function FilterItem({
         <span
           style={styles.count}
           data-testid={`filter-item-count-${type}`}
-          aria-label={`${label} count`}
+          aria-label={t("traffic.filterPanel.countAria", { label })}
         >
           {count.toLocaleString()}
         </span>

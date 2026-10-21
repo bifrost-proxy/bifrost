@@ -14,6 +14,7 @@ import type {
 } from "../services/pushService";
 import { useFilterPanelStore } from "./useFilterPanelStore";
 import { useTrafficStore } from "./useTrafficStore";
+import { t } from "../i18n";
 
 export interface PausedBreakpoint {
   requestId: string;
@@ -394,7 +395,7 @@ export const useBreakpointStore = create<BreakpointState>((set, get) => ({
         resumeError:
           failure.response?.data?.error ??
           failure.message ??
-          "Unable to resume breakpoint",
+          t("shared.breakpoint.resumeFailed"),
       });
       await get().fetchPending();
       return false;

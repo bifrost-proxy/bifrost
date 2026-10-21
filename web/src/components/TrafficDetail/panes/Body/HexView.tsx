@@ -5,6 +5,7 @@ import { useTextSelection } from '../../hooks/useTextSelection';
 import { useMarkSearch } from '../../hooks/useMarkSearch';
 import { DEFAULT_SHOW_MAX_SIZE } from '../../helper/contentType';
 import { bytesFromBase64, toHexView, toHexViewFromBytes } from './hex';
+import { useI18n } from '../../../../i18n';
 
 interface HexViewProps {
   data?: string | null;
@@ -14,6 +15,7 @@ interface HexViewProps {
 }
 
 export const HexView = ({ data, dataBase64, searchValue, onSearch }: HexViewProps) => {
+  const { t } = useI18n();
   const { token } = theme.useToken();
   const [showAll, setShowAll] = useState(false);
   const wrapperRef = useTextSelection(!!data);
@@ -101,7 +103,9 @@ export const HexView = ({ data, dataBase64, searchValue, onSearch }: HexViewProp
             background: token.colorBgContainer,
           }}
         >
-          Show All ({Math.round((totalSize - DEFAULT_SHOW_MAX_SIZE) / 1024)}KB more)
+          {t('trafficDetail.body.showAll', {
+            size: Math.round((totalSize - DEFAULT_SHOW_MAX_SIZE) / 1024),
+          })}
         </Button>
       )}
     </div>

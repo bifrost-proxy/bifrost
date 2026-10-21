@@ -27,6 +27,7 @@ import { formatTimestamp } from "../../utils/datetime";
 import { useLiveNow } from "../../hooks/useLiveNow";
 import AppIcon from "../AppIcon";
 import TrafficContextMenu from "./TrafficContextMenu";
+import { useI18n, type TFunction, type TranslationKey } from "../../i18n";
 
 const ellipsisStyle: CSSProperties = {
   overflow: "hidden",
@@ -74,7 +75,10 @@ const formatSequence = (seq: number): string => {
 
 interface ColumnDef {
   key: string;
-  title: string;
+  /** Literal header text (not translated), e.g. "#". */
+  title?: string;
+  /** Translated header text; resolved at render time. */
+  titleKey?: TranslationKey;
   width: number | string;
   minWidth?: number;
   align?: "left" | "center" | "right";
@@ -82,7 +86,8 @@ interface ColumnDef {
     record: TrafficSummary,
     textSecondary: string,
     rowIndex: number,
-    breakpointPhase?: "request" | "response",
+    breakpointPhase: "request" | "response" | undefined,
+    t: TFunction,
   ) => React.ReactNode;
 }
 
@@ -127,14 +132,16 @@ const columns: ColumnDef[] = [
     title: "",
     width: 24,
     align: "center",
-    render: (record, _textSecondary, _rowIndex, breakpointPhase) => (
+    render: (record, _textSecondary, _rowIndex, breakpointPhase, t) => (
       <Tooltip
         title={
-          breakpointPhase
-            ? `Breakpoint paused at ${breakpointPhase} phase`
-            : record.status === 0
-              ? "Pending"
-              : `Status: ${record.status}`
+          breakpointPhase === "request"
+            ? t("traffic.table.breakpointPausedRequest")
+            : breakpointPhase === "response"
+              ? t("traffic.table.breakpointPausedResponse")
+              : record.status === 0
+                ? t("traffic.table.pending")
+                : t("traffic.table.statusTooltip", { status: record.status })
         }
       >
         <div
@@ -161,9 +168,9 @@ const columns: ColumnDef[] = [
           }}
         >
           {breakpointPhase === "request"
-            ? "Req"
+            ? t("traffic.table.reqShort")
             : breakpointPhase === "response"
-              ? "Res"
+              ? t("traffic.table.resShort")
               : null}
         </div>
       </Tooltip>
@@ -171,7 +178,7 @@ const columns: ColumnDef[] = [
   },
   {
     key: "protocol",
-    title: "Protocol",
+    titleKey: "traffic.column.protocol",
     width: 70,
     render: (record) => (
       <Tag
@@ -184,7 +191,7 @@ const columns: ColumnDef[] = [
   },
   {
     key: "method",
-    title: "Method",
+    titleKey: "traffic.column.method",
     width: 70,
     render: (record) => (
       <Tag
@@ -197,7 +204,7 @@ const columns: ColumnDef[] = [
   },
   {
     key: "status",
-    title: "Status",
+    titleKey: "traffic.column.status",
     width: 55,
     align: "center",
     render: (record, textSecondary) =>
@@ -214,7 +221,7 @@ const columns: ColumnDef[] = [
   },
   {
     key: "client",
-    title: "Client",
+    titleKey: "traffic.column.client",
     width: 140,
     render: (record, textSecondary) => (
       <div
@@ -251,7 +258,7 @@ const columns: ColumnDef[] = [
   },
   {
     key: "account_name",
-    title: "Account",
+    titleKey: "traffic.column.account",
     width: 100,
     render: (record, textSecondary) =>
       record.account_name ? (
@@ -268,7 +275,7 @@ const columns: ColumnDef[] = [
   },
   {
     key: "listener_port",
-    title: "Port",
+    titleKey: "traffic.column.port",
     width: 70,
     align: "center",
     render: (record, textSecondary) =>
@@ -280,15 +287,15 @@ const columns: ColumnDef[] = [
   },
   {
     key: "rules",
-    title: "Rules",
+    titleKey: "traffic.column.rules",
     width: 60,
     align: "center",
-    render: (record, textSecondary) =>
+    render: (record, textSecondary, _rowIndex, _breakpointPhase, t) =>
       record.has_rule_hit ? (
         <Tooltip
           title={
             <div>
-              <div>{record.matched_rule_count} rule(s) matched</div>
+              <div>{t("traffic.table.rulesMatched", { count: record.matched_rule_count })}</div>
               {record.matched_protocols.length > 0 && (
                 <div style={{ marginTop: 4 }}>
                   {record.matched_protocols.join(", ")}
@@ -307,7 +314,7 @@ const columns: ColumnDef[] = [
   },
   {
     key: "host",
-    title: "Host",
+    titleKey: "traffic.column.host",
     width: 160,
     render: (record, textSecondary) => (
       <span
@@ -320,7 +327,7 @@ const columns: ColumnDef[] = [
   },
   {
     key: "path",
-    title: "Path",
+    titleKey: "traffic.column.path",
     width: "auto",
     minWidth: 250,
     render: (record, textSecondary) => (
@@ -334,7 +341,7 @@ const columns: ColumnDef[] = [
   },
   {
     key: "content_type",
-    title: "Type",
+    titleKey: "traffic.column.type",
     width: 80,
     render: (record, textSecondary) => (
       <span style={{ fontSize: 11, color: textSecondary }}>
@@ -344,7 +351,7 @@ const columns: ColumnDef[] = [
   },
   {
     key: "response_size",
-    title: "Size",
+    titleKey: "traffic.column.size",
     width: 65,
     align: "right",
     render: (record, textSecondary) => (
@@ -355,7 +362,7 @@ const columns: ColumnDef[] = [
   },
   {
     key: "duration_ms",
-    title: "Time",
+    titleKey: "traffic.column.time",
     width: 55,
     align: "right",
     render: (record, textSecondary) => (
@@ -373,7 +380,7 @@ const columns: ColumnDef[] = [
   },
   {
     key: "start_time",
-    title: "Start Time",
+    titleKey: "traffic.column.startTime",
     width: 160,
     render: (record, textSecondary) => {
       const time = formatTimestamp(record.timestamp);
@@ -389,7 +396,7 @@ const columns: ColumnDef[] = [
   },
   {
     key: "end_time",
-    title: "End Time",
+    titleKey: "traffic.column.endTime",
     width: 160,
     render: (record, textSecondary) => {
       const time =
@@ -544,6 +551,8 @@ const TableRow = memo(function TableRow({
   onRowDoubleClick,
   onRowContextMenu,
 }: TableRowProps) {
+  // Subscribes to the locale store, so memoized rows still re-render on language switch.
+  const { t } = useI18n();
   const durationMs = getEffectiveDurationMs(record, liveNow);
   const rowStyle: CSSProperties = {
     ...baseRowStyle,
@@ -598,7 +607,7 @@ const TableRow = memo(function TableRow({
               </span>
             </Tooltip>
           ) : (
-            col.render(record, textSecondary, rowIndex, breakpointPhase)
+            col.render(record, textSecondary, rowIndex, breakpointPhase, t)
           )}
         </div>
       ))}
@@ -678,6 +687,7 @@ export default function VirtualTrafficTable({
   initialScrollTop = 0,
   onScrollTopChange,
 }: VirtualTrafficTableProps) {
+  const { t } = useI18n();
   const { token } = theme.useToken();
   const hasLiveDuration = useMemo(
     () => data.some((record) => isLiveStreamingTraffic(record)),
@@ -1195,17 +1205,20 @@ export default function VirtualTrafficTable({
         >
           {col.key === "sequence" ? (
             <div style={styles.sequenceHeader}>
-              <span>{col.title}</span>
+              <span>{col.titleKey ? t(col.titleKey) : col.title}</span>
               <span style={styles.sequenceHeaderCount}>
                 {data.length.toLocaleString()}
               </span>
             </div>
+          ) : col.titleKey ? (
+            t(col.titleKey)
           ) : (
             col.title
           )}
         </div>
       )),
     [
+      t,
       data.length,
       styles.headerCell,
       styles.sequenceHeader,
@@ -1236,7 +1249,7 @@ export default function VirtualTrafficTable({
 
           {data.length === 0 ? (
             <div style={styles.emptyState} data-testid="traffic-empty">
-              No traffic data
+              {t("traffic.table.noTrafficData")}
             </div>
           ) : (
             <div
@@ -1307,7 +1320,7 @@ export default function VirtualTrafficTable({
             size="small"
             style={{ backgroundColor: "#fff", color: token.colorPrimary }}
           >
-            <span style={{ color: "#fff", fontSize: 13 }}>New Traffic</span>
+            <span style={{ color: "#fff", fontSize: 13 }}>{t("traffic.table.newTraffic")}</span>
           </Badge>
           <ArrowDownOutlined style={{ fontSize: 14 }} />
         </div>

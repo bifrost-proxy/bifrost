@@ -10,6 +10,7 @@ import ResponsePanel from "./components/ResponsePanel";
 import HistoryView from "./components/HistoryView";
 import pushService from "../../services/pushService";
 import { isMacDesktopShell } from "../../runtime";
+import { useI18n } from "../../i18n";
 
 interface ModeButtonProps {
   mode: ReplayMode;
@@ -57,6 +58,7 @@ const ModeButton = ({ mode, icon, label, isActive, onClick }: ModeButtonProps) =
 };
 
 export default function Replay() {
+  const { t } = useI18n();
   const { token } = theme.useToken();
   const {
     currentRequest,
@@ -223,14 +225,14 @@ export default function Replay() {
         <ModeButton
           mode="composer"
           icon={<EditOutlined style={{ fontSize: 16 }} />}
-          label="Composer"
+          label={t("replay.mode.composer")}
           isActive={currentMode === "composer"}
           onClick={() => handleModeChange("composer")}
         />
         <ModeButton
           mode="history"
           icon={<HistoryOutlined style={{ fontSize: 16 }} />}
-          label="History"
+          label={t("replay.mode.history")}
           isActive={currentMode === "history"}
           onClick={() => handleModeChange("history")}
         />

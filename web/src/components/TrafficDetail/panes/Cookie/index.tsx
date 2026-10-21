@@ -3,6 +3,7 @@ import { Table, Typography, theme, ConfigProvider } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import type { SessionTargetSearchState } from '../../../../types';
 import { useMarkSearch } from '../../hooks/useMarkSearch';
+import { useI18n } from '../../../../i18n';
 
 const { Text } = Typography;
 
@@ -80,6 +81,7 @@ export const CookieView = ({
   searchValue,
   onSearch,
 }: CookieViewProps) => {
+  const { t } = useI18n();
   const { token } = theme.useToken();
   const tableRef = useRef<HTMLDivElement>(null);
 
@@ -99,7 +101,7 @@ export const CookieView = ({
 
   const columns: ColumnsType<CookieItem> = [
     {
-      title: 'Name',
+      title: t('common.name'),
       dataIndex: 'name',
       key: 'name',
       width: 180,
@@ -111,7 +113,7 @@ export const CookieView = ({
         ),
     },
     {
-      title: 'Value',
+      title: t('common.value'),
       dataIndex: 'value',
       key: 'value',
       render: (text: string) =>
@@ -126,7 +128,9 @@ export const CookieView = ({
   if (dataSource.length === 0) {
     return (
       <Text type="secondary" style={{ padding: 8, display: 'block' }}>
-        No {type === 'request' ? 'cookies' : 'set-cookies'}
+        {type === 'request'
+          ? t('trafficDetail.cookie.noCookies')
+          : t('trafficDetail.cookie.noSetCookies')}
       </Text>
     );
   }

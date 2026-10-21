@@ -23,6 +23,12 @@ import {
   type SyncProviderStatus,
   type SyncStatus,
 } from "../../../api/sync";
+import {
+  t as translateGlobal,
+  useI18n,
+  type TFunction,
+  type TranslationKey,
+} from "../../../i18n";
 
 const { Text } = Typography;
 const GITHUB_GIST_TOKEN_URL =
@@ -45,39 +51,42 @@ interface SyncTabProps {
   onSignOut?: () => void;
 }
 
-function capabilityTags(provider: SyncProviderStatus) {
+function capabilityTags(provider: SyncProviderStatus, t: TFunction) {
   return (
     <Space size={[4, 4]} wrap>
       <Tag color={provider.capabilities.remote_invoke ? "blue" : "default"}>
-        Remote Invoke
+        {t("settings.tabRemoteInvoke")}
       </Tag>
       <Tag color={provider.capabilities.rules_sync ? "green" : "default"}>
-        Rules Sync
+        {t("settings.sync.rulesSync")}
       </Tag>
       <Tag color={provider.capabilities.config_sync ? "cyan" : "default"}>
-        Config Sync
+        {t("settings.sync.configSync")}
       </Tag>
     </Space>
   );
 }
 
-export function syncProviderStatusBadge(provider: SyncProviderStatus) {
+export function syncProviderStatusBadge(
+  provider: SyncProviderStatus,
+  t: TFunction = translateGlobal,
+) {
   if (provider.connected && !provider.authorized) {
-    return { color: "red", label: "Reconnect required" };
+    return { color: "red", label: t("settings.sync.badgeReconnect") };
   }
   if (provider.last_error && provider.reason === "error") {
-    return { color: "red", label: "Sync error" };
+    return { color: "red", label: t("settings.sync.badgeError") };
   }
   if (provider.connected) {
-    return { color: "green", label: "Connected" };
+    return { color: "green", label: t("settings.sync.badgeConnected") };
   }
   if (provider.enabled && provider.reachable) {
-    return { color: "gold", label: "Sign in required" };
+    return { color: "gold", label: t("settings.sync.badgeSignIn") };
   }
   if (provider.enabled && !provider.reachable) {
-    return { color: "orange", label: "Offline" };
+    return { color: "orange", label: t("settings.sync.badgeOffline") };
   }
-  return { color: undefined, label: "Not connected" };
+  return { color: undefined, label: t("settings.sync.badgeNotConnected") };
 }
 
 export function syncProviderActionableError(provider: SyncProviderStatus) {
@@ -93,54 +102,63 @@ export function shouldShowSyncProviderOverviewAlert(
 }
 
 function formatSyncMoment(
+  t: TFunction,
   syncAt?: string | null,
   syncAction?: SyncProviderStatus["last_sync_action"],
 ) {
   if (!syncAt) {
-    return "Never";
+    return t("settings.sync.never");
   }
   const date = new Date(syncAt);
-  const action = syncAction ? syncAction.replace(/_/g, " ") : "completed";
+  const action = syncAction
+    ? syncAction.replace(/_/g, " ")
+    : t("settings.sync.completed");
   return `${date.toLocaleString()} (${action})`;
 }
 
-function formatProviderLastChange(provider: SyncProviderStatus) {
+function formatProviderLastChange(provider: SyncProviderStatus, t: TFunction) {
   return formatSyncMoment(
+    t,
     provider.last_changed_sync_at,
     provider.last_changed_sync_action,
   );
 }
 
-function formatProviderLastCheck(provider: SyncProviderStatus) {
-  return formatSyncMoment(provider.last_sync_at, provider.last_sync_action);
+function formatProviderLastCheck(provider: SyncProviderStatus, t: TFunction) {
+  return formatSyncMoment(t, provider.last_sync_at, provider.last_sync_action);
 }
 
-function formatProviderCheckInterval(provider: SyncProviderStatus) {
+function formatProviderCheckInterval(
+  provider: SyncProviderStatus,
+  t: TFunction,
+) {
   const seconds = provider.check_interval_secs;
   if (!seconds || seconds <= 0) {
-    return "Manual";
+    return t("settings.sync.manual");
   }
   if (seconds % 3600 === 0) {
     const hours = seconds / 3600;
-    return `Every ${hours} ${hours === 1 ? "hour" : "hours"}`;
+    return hours === 1
+      ? t("settings.sync.everyHourOne", { count: hours })
+      : t("settings.sync.everyHourOther", { count: hours });
   }
   if (seconds % 60 === 0) {
     const minutes = seconds / 60;
-    return `Every ${minutes} min`;
+    return t("settings.sync.everyMinutes", { count: minutes });
   }
-  return `Every ${seconds} sec`;
+  return t("settings.sync.everySeconds", { count: seconds });
 }
 
-function providerStatusTag(provider: SyncProviderStatus) {
-  const badge = syncProviderStatusBadge(provider);
+function providerStatusTag(provider: SyncProviderStatus, t: TFunction) {
+  const badge = syncProviderStatusBadge(provider, t);
   return <Tag color={badge.color}>{badge.label}</Tag>;
 }
 
-const fallbackProviders: SyncProviderStatus[] = [
+const getFallbackProviders = (t: TFunction): SyncProviderStatus[] => [
   {
     id: "bytedance_internal",
     name: "ByteDance Internal",
-    description: "Internal trusted sync and Remote Invoke provider.",
+    description: t("settings.sync.fallbackBytedance"),
     remote_base_url: getDefaultRemoteBaseUrl(),
     connected: false,
     enabled: false,
@@ -160,7 +178,7 @@ const fallbackProviders: SyncProviderStatus[] = [
   {
     id: "bifrost_cloud",
     name: "Bifrost Cloud",
-    description: "Custom Bifrost sync service for teams and self-hosting.",
+    description: t("settings.sync.fallbackBifrostCloud"),
     remote_base_url: null,
     connected: false,
     enabled: false,
@@ -180,7 +198,7 @@ const fallbackProviders: SyncProviderStatus[] = [
   {
     id: "github_gist",
     name: "GitHub Gist",
-    description: "Public GitHub Gist-backed portable sync provider.",
+    description: t("settings.sync.fallbackGithubGist"),
     remote_base_url: null,
     connected: false,
     enabled: false,
@@ -199,6 +217,25 @@ const fallbackProviders: SyncProviderStatus[] = [
   },
 ];
 
+// Provider descriptions come from the backend in English; show the
+// translated copy for the known built-in providers.
+const PROVIDER_DESCRIPTION_KEYS: Record<string, TranslationKey> = {
+  "Internal trusted sync and Remote Invoke provider.":
+    "settings.sync.fallbackBytedance",
+  "Custom Bifrost sync service for teams and self-hosting.":
+    "settings.sync.fallbackBifrostCloud",
+  "Public GitHub Gist-backed portable sync provider.":
+    "settings.sync.fallbackGithubGist",
+};
+
+function localizeProviderDescription(
+  description: string,
+  t: TFunction,
+): string {
+  const key = PROVIDER_DESCRIPTION_KEYS[description];
+  return key ? t(key) : description;
+}
+
 export default function SyncTab({
   syncStatus,
   syncLoading,
@@ -208,6 +245,8 @@ export default function SyncTab({
   onProviderSignOut,
   onSignOut,
 }: SyncTabProps) {
+  const { t } = useI18n();
+  const fallbackProviders = useMemo(() => getFallbackProviders(t), [t]);
   const providers = syncStatus?.providers?.length
     ? syncStatus.providers
     : fallbackProviders;
@@ -304,8 +343,8 @@ export default function SyncTab({
         <Alert
           showIcon
           type={syncStatus?.reachable ? "info" : "warning"}
-          message="Remote sync is a pluggable capability"
-          description="Rules continue to work locally at all times. Sync only activates when the configured Bifrost service is reachable and a valid login session exists."
+          message={t("settings.sync.overviewTitle")}
+          description={t("settings.sync.overviewDescription")}
           data-testid="settings-sync-provider-overview-alert"
         />
       ) : null}
@@ -334,22 +373,23 @@ export default function SyncTab({
                   <span>{provider.name}</span>
                 </Space>
               }
-              extra={providerStatusTag(provider)}
+              extra={providerStatusTag(provider, t)}
             >
               <Space direction="vertical" size={12} style={{ width: "100%" }}>
-                <Text type="secondary">{provider.description}</Text>
+                <Text type="secondary">
+                  {localizeProviderDescription(provider.description, t)}
+                </Text>
                 {provider.id === "github_gist" ? (
                   <Alert
                     type={actionableError ? "error" : "info"}
                     showIcon
                     message={
                       actionableError
-                        ? "GitHub Gist token needs attention"
-                        : "Generate a GitHub token with the gist scope, then paste it into Bifrost."
+                        ? t("settings.sync.gistTokenAttention")
+                        : t("settings.sync.gistTokenHint")
                     }
                     description={
-                      actionableError ||
-                      "Rules and basic settings are stored in a private Gist snapshot. Do not sync secrets here."
+                      actionableError || t("settings.sync.gistSnapshotHint")
                     }
                     action={
                       <Button
@@ -360,7 +400,9 @@ export default function SyncTab({
                         icon={<GithubOutlined />}
                         data-testid="settings-sync-provider-github-gist-token-link"
                       >
-                        {actionableError ? "New Token" : "Generate Token"}
+                        {actionableError
+                          ? t("settings.sync.newToken")
+                          : t("settings.sync.generateToken")}
                       </Button>
                     }
                     data-testid={
@@ -374,26 +416,30 @@ export default function SyncTab({
                   <Alert
                     type="error"
                     showIcon
-                    message={`${provider.name} needs attention`}
+                    message={t("settings.sync.providerAttention", {
+                      name: provider.name,
+                    })}
                     description={actionableError}
                     data-testid={`settings-sync-provider-error-${provider.id}`}
                   />
                 ) : null}
-                {capabilityTags(provider)}
+                {capabilityTags(provider, t)}
                 <Descriptions
                   size="small"
                   column={1}
                   items={[
                     {
                       key: "account",
-                      label: "Account",
+                      label: t("settings.sync.account"),
                       children:
                         provider.user?.user_id ||
-                        (provider.connected ? "Signed in" : "Not signed in"),
+                        (provider.connected
+                          ? t("settings.sync.signedIn")
+                          : t("settings.sync.notSignedIn")),
                     },
                     {
                       key: "remote",
-                      label: "Remote",
+                      label: t("settings.sync.remote"),
                       children:
                         provider.id === "bifrost_cloud" ? (
                           <Space.Compact style={{ width: "100%" }}>
@@ -415,7 +461,7 @@ export default function SyncTab({
                               loading={syncLoading}
                               data-testid="settings-sync-provider-bifrost-cloud-url-save"
                             >
-                              Save
+                              {t("common.save")}
                             </Button>
                           </Space.Compact>
                         ) : (
@@ -424,27 +470,27 @@ export default function SyncTab({
                     },
                     {
                       key: "invoke",
-                      label: "Remote Invoke",
+                      label: t("settings.tabRemoteInvoke"),
                       children: provider.capabilities.remote_invoke
                         ? provider.remote_invoke_registered
-                          ? "Registered"
-                          : "Supported"
-                        : "Not supported",
+                          ? t("settings.sync.registered")
+                          : t("settings.sync.supported")
+                        : t("settings.sync.notSupported"),
                     },
                     {
                       key: "lastChange",
-                      label: "Last change",
-                      children: formatProviderLastChange(provider),
+                      label: t("settings.sync.lastChange"),
+                      children: formatProviderLastChange(provider, t),
                     },
                     {
                       key: "lastCheck",
-                      label: "Last check",
-                      children: formatProviderLastCheck(provider),
+                      label: t("settings.sync.lastCheck"),
+                      children: formatProviderLastCheck(provider, t),
                     },
                     {
                       key: "checkInterval",
-                      label: "Check interval",
-                      children: formatProviderCheckInterval(provider),
+                      label: t("settings.sync.checkInterval"),
+                      children: formatProviderCheckInterval(provider, t),
                     },
                   ]}
                 />
@@ -463,7 +509,9 @@ export default function SyncTab({
                     loading={syncLoading}
                     data-testid={`settings-sync-provider-login-${provider.id}`}
                   >
-                    {provider.connected ? "Reconnect" : "Sign In"}
+                    {provider.connected
+                      ? t("settings.sync.reconnect")
+                      : t("settings.sync.signIn")}
                   </Button>
                   {provider.connected ? (
                     <Button
@@ -472,7 +520,7 @@ export default function SyncTab({
                       loading={syncLoading}
                       data-testid={`settings-sync-provider-logout-${provider.id}`}
                     >
-                      Sign Out
+                      {t("settings.sync.signOut")}
                     </Button>
                   ) : null}
                 </Space>
@@ -483,11 +531,11 @@ export default function SyncTab({
       </div>
 
       <Modal
-        title="Sign in to GitHub Gist"
+        title={t("settings.sync.gistModalTitle")}
         open={githubTokenModalOpen}
         onCancel={() => setGithubTokenModalOpen(false)}
         onOk={handleGithubGistSignIn}
-        okText="Sign In"
+        okText={t("settings.sync.signIn")}
         okButtonProps={{
           disabled: !githubTokenDraft.trim(),
           loading: syncLoading,
@@ -497,7 +545,7 @@ export default function SyncTab({
           <Alert
             type="info"
             showIcon
-            message="Create a GitHub token with only the gist scope selected."
+            message={t("settings.sync.gistModalAlert")}
             action={
               <Button
                 size="small"
@@ -507,16 +555,11 @@ export default function SyncTab({
                 icon={<GithubOutlined />}
                 data-testid="settings-sync-provider-github-gist-modal-token-link"
               >
-                Generate Token
+                {t("settings.sync.generateToken")}
               </Button>
             }
           />
-          <Text type="secondary">
-            Enter a GitHub token with the gist scope. The token is stored
-            locally and used only for your Gist-backed sync provider. Bifrost
-            stores rules and basic settings in a private Gist snapshot, so avoid
-            syncing secrets.
-          </Text>
+          <Text type="secondary">{t("settings.sync.gistModalHint")}</Text>
           <Input.Password
             value={githubTokenDraft}
             onChange={(event) => setGithubTokenDraft(event.target.value)}
@@ -529,12 +572,12 @@ export default function SyncTab({
       </Modal>
 
       <Modal
-        title="Choose a sync service"
+        title={t("settings.sync.firstRunTitle")}
         open={firstRunOpen}
         onCancel={() => setFirstRunOpen(false)}
         footer={[
           <Button key="cancel" onClick={() => setFirstRunOpen(false)}>
-            Not now
+            {t("settings.sync.notNow")}
           </Button>,
           <Button
             key="start"
@@ -550,7 +593,7 @@ export default function SyncTab({
             }}
             data-testid="settings-sync-first-run-start"
           >
-            Start
+            {t("common.start")}
           </Button>,
         ]}
         data-testid="settings-sync-first-run-modal"
@@ -565,7 +608,7 @@ export default function SyncTab({
               <Radio key={provider.id} value={provider.id}>
                 <Space direction="vertical" size={2}>
                   <Text strong>{provider.name}</Text>
-                  {capabilityTags(provider)}
+                  {capabilityTags(provider, t)}
                 </Space>
               </Radio>
             ))}

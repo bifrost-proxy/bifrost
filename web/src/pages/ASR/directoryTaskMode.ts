@@ -1,7 +1,16 @@
 import type { AsrTranscriptionMode } from "../../api/asr";
+import { t } from "../../i18n";
 
+/**
+ * English copy of the history note. Prefer `directoryTaskModeHistoryNote()`,
+ * which follows the current UI language.
+ */
 export const DIRECTORY_TASK_MODE_HISTORY_NOTE =
   "Changing this setting applies to untranscribed and new files; existing transcript files are preserved.";
+
+export function directoryTaskModeHistoryNote(): string {
+  return t("asr.directoryMode.historyNote");
+}
 
 export interface DirectoryTaskModeFields {
   showMossPrompt: boolean;
@@ -19,18 +28,18 @@ export function directoryTaskModeOptions(
 ): DirectoryTaskModeOption[] {
   const unavailableLabel =
     mossPlatformSupported === null
-      ? "MOSS joint transcription (checking platform support)"
-      : "MOSS joint transcription (requires Apple Silicon macOS)";
+      ? t("asr.directoryMode.mossChecking")
+      : t("asr.directoryMode.mossUnsupported");
   return [
     {
       value: "standard",
-      label: "Standard ASR + speaker diarization",
+      label: t("asr.directoryMode.standard"),
     },
     {
       value: "moss_joint",
       label:
         mossPlatformSupported === true
-          ? "MOSS joint transcription (speaker-aware)"
+          ? t("asr.directoryMode.mossSupported")
           : unavailableLabel,
       disabled: mossPlatformSupported !== true,
     },

@@ -36,6 +36,7 @@ import {
   normalizeRuleEditorContent,
   shouldReplaceRuleEditorModel,
 } from "./modelSync";
+import { t as tNow, useI18n, type TFunction } from "../../../i18n";
 import styles from "./index.module.css";
 
 function formatRuleTime(value?: string | null): string {
@@ -44,14 +45,14 @@ function formatRuleTime(value?: string | null): string {
   return date.isValid() ? date.format("YYYY-MM-DD HH:mm:ss") : value;
 }
 
-function formatSyncStatus(sync?: RuleSyncInfo | null): string {
+function formatSyncStatus(t: TFunction, sync?: RuleSyncInfo | null): string {
   switch (sync?.status) {
     case "synced":
-      return "Synced";
+      return t("rules.editor.syncSynced");
     case "modified":
-      return "Modified";
+      return t("rules.editor.syncModified");
     default:
-      return "Local only";
+      return t("rules.editor.syncLocalOnly");
   }
 }
 
@@ -114,6 +115,7 @@ function findRuleReferences(model: MonacoEditor.ITextModel): RuleReferenceMatch[
 
 export default function RuleEditor() {
   const navigate = useNavigate();
+  const { t } = useI18n();
   const {
     currentRule,
     selectedRuleName,
@@ -304,8 +306,8 @@ export default function RuleEditor() {
       const close = document.createElement("button");
       close.type = "button";
       close.className = styles.ruleReferenceZoneClose;
-      close.title = "Close";
-      close.setAttribute("aria-label", `Close @${name} details`);
+      close.title = tNow("common.close");
+      close.setAttribute("aria-label", tNow("rules.editor.referenceCloseDetails", { name }));
       close.textContent = "x";
       close.addEventListener("click", collapseRuleReference);
       header.appendChild(close);
@@ -314,9 +316,9 @@ export default function RuleEditor() {
       body.className = styles.ruleReferenceZoneBody;
       body.textContent =
         state === "loading"
-          ? "Loading..."
+          ? tNow("common.loading")
           : state === "error"
-            ? content || "Rule not found"
+            ? content || tNow("rules.editor.referenceRuleNotFound")
             : content || "";
 
       node.appendChild(header);
@@ -336,7 +338,7 @@ export default function RuleEditor() {
       ) ?? (
         ruleReferenceCandidatesRef.current.has(reference.name)
           ? null
-          : `Rule reference '@${reference.name}' was not found.`
+          : tNow("rules.editor.referenceNotFound", { name: reference.name })
       );
 
       return {
@@ -347,8 +349,11 @@ export default function RuleEditor() {
             : styles.ruleReferenceDecoration,
           hoverMessage: {
             value: errorMessage
-              ? `Rule reference error: \`@${reference.name}\`\n\n${errorMessage}`
-              : `Rule reference \`@${reference.name}\`. Click to expand inline.`,
+              ? tNow("rules.editor.referenceErrorHover", {
+                  name: reference.name,
+                  message: errorMessage,
+                })
+              : tNow("rules.editor.referenceHover", { name: reference.name }),
           },
         },
       };
@@ -442,7 +447,7 @@ export default function RuleEditor() {
           domNode,
           reference.name,
           "error",
-          error instanceof Error ? error.message : "Rule not found",
+          error instanceof Error ? error.message : tNow("rules.editor.referenceRuleNotFound"),
         );
       }
     },
@@ -488,7 +493,7 @@ export default function RuleEditor() {
     if (!saveRef.current) return;
     const success = await saveRef.current();
     if (success) {
-      message.success("Saved");
+      message.success(tNow("common.saved"));
     }
   }, []);
 
@@ -497,32 +502,32 @@ export default function RuleEditor() {
     const content = modelRef.current.getValue();
     try {
       await copyToClipboard(content);
-      message.success("Copied");
+      message.success(tNow("common.copied"));
     } catch {
-      message.error("Failed to copy");
+      message.error(tNow("rules.editor.copyFailed"));
     }
   }, []);
 
   const handleDelete = useCallback(() => {
     if (!currentRule?.name) return;
     if (!canDeleteCurrentRule) {
-      message.warning("Default rule cannot be deleted");
+      message.warning(t("rules.list.defaultCannotDelete"));
       return;
     }
     Modal.confirm({
-      title: "Delete Rule",
-      content: `Are you sure to delete "${currentRule.name}"?`,
-      okText: "Delete",
+      title: t("rules.deleteTitle"),
+      content: t("rules.deleteContent", { name: currentRule.name }),
+      okText: t("common.delete"),
       okType: "danger",
-      cancelText: "Cancel",
+      cancelText: t("common.cancel"),
       onOk: async () => {
         const success = await deleteRule(currentRule.name);
         if (success) {
-          message.success("Rule deleted");
+          message.success(tNow("rules.deleted"));
         }
       },
     });
-  }, [canDeleteCurrentRule, currentRule, deleteRule]);
+  }, [canDeleteCurrentRule, currentRule, deleteRule, t]);
 
   const handleNavigate = useCallback(
     (location: ReferenceLocation) => {
@@ -710,7 +715,7 @@ export default function RuleEditor() {
   if (!selectedRuleName) {
     return (
       <div className={styles.empty}>
-        <Empty description="Select a rule to edit" />
+        <Empty description={t("rules.editor.selectToEdit")} />
       </div>
     );
   }
@@ -731,15 +736,19 @@ export default function RuleEditor() {
   const metaItems = currentRule
     ? isGroupMode
       ? [
-          `Created ${formatRuleTime(currentRule.created_at)}`,
-          `Updated ${formatRuleTime(currentRule.updated_at)}`,
+          t("rules.editor.metaCreated", { time: formatRuleTime(currentRule.created_at) }),
+          t("rules.editor.metaUpdated", { time: formatRuleTime(currentRule.updated_at) }),
         ]
       : [
-          ...(isGlobalDefaultRule ? ["Global default", "Always enabled"] : []),
-          `Sync ${formatSyncStatus(currentRule.sync)}`,
-          `Created ${formatRuleTime(currentRule.created_at)}`,
-          `Updated ${formatRuleTime(currentRule.updated_at)}`,
-          `Last sync ${formatRuleTime(currentRule.sync?.last_synced_at)}`,
+          ...(isGlobalDefaultRule
+            ? [t("rules.editor.metaGlobalDefault"), t("rules.editor.metaAlwaysEnabled")]
+            : []),
+          t("rules.editor.metaSync", { status: formatSyncStatus(t, currentRule.sync) }),
+          t("rules.editor.metaCreated", { time: formatRuleTime(currentRule.created_at) }),
+          t("rules.editor.metaUpdated", { time: formatRuleTime(currentRule.updated_at) }),
+          t("rules.editor.metaLastSync", {
+            time: formatRuleTime(currentRule.sync?.last_synced_at),
+          }),
         ]
     : [];
 
@@ -768,7 +777,7 @@ export default function RuleEditor() {
             onClick={handleCopy}
             data-testid="rule-copy-button"
           >
-            Copy
+            {t("common.copy")}
           </Button>
           {canEdit && (
             <Button
@@ -780,7 +789,7 @@ export default function RuleEditor() {
               loading={saving}
               data-testid="rule-save-button"
             >
-              Save
+              {t("common.save")}
             </Button>
           )}
           {canDeleteCurrentRule && (
@@ -791,7 +800,7 @@ export default function RuleEditor() {
               onClick={handleDelete}
               data-testid="rule-delete-button"
             >
-              Delete
+              {t("common.delete")}
             </Button>
           )}
         </Space>

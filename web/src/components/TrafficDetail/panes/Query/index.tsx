@@ -4,6 +4,7 @@ import { DeleteOutlined, PlusOutlined } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import type { SessionTargetSearchState } from '../../../../types';
 import { useMarkSearch } from '../../hooks/useMarkSearch';
+import { useI18n } from '../../../../i18n';
 
 const { Text } = Typography;
 
@@ -28,6 +29,7 @@ export const QueryView = ({
   editable = false,
   onUrlChange,
 }: QueryViewProps) => {
+  const { t } = useI18n();
   const { token } = theme.useToken();
   const tableRef = useRef<HTMLDivElement>(null);
 
@@ -80,7 +82,7 @@ export const QueryView = ({
             <Space.Compact key={item.key} style={{ width: '100%' }}>
               <Input
                 value={item.name}
-                aria-label={`Query ${index + 1} name`}
+                aria-label={t('trafficDetail.query.ariaName', { index: index + 1 })}
                 data-testid={`breakpoint-query-name-${index}`}
                 onChange={(event) => {
                   const next = dataSource.map((entry) => ({ ...entry }));
@@ -91,7 +93,7 @@ export const QueryView = ({
               />
               <Input
                 value={item.value}
-                aria-label={`Query ${index + 1} value`}
+                aria-label={t('trafficDetail.query.ariaValue', { index: index + 1 })}
                 data-testid={`breakpoint-query-value-${index}`}
                 onChange={(event) => {
                   const next = dataSource.map((entry) => ({ ...entry }));
@@ -102,7 +104,7 @@ export const QueryView = ({
               />
               <Button
                 icon={<DeleteOutlined />}
-                aria-label={`Delete query ${index + 1}`}
+                aria-label={t('trafficDetail.query.ariaDelete', { index: index + 1 })}
                 data-testid={`breakpoint-query-delete-${index}`}
                 onClick={() => updateUrl(dataSource.filter((_, itemIndex) => itemIndex !== index))}
               />
@@ -116,7 +118,7 @@ export const QueryView = ({
               updateUrl([...dataSource, { key: String(dataSource.length), name: '', value: '' }])
             }
           >
-            Add query parameter
+            {t('trafficDetail.query.addParam')}
           </Button>
         </Space>
       </div>
@@ -125,7 +127,7 @@ export const QueryView = ({
 
   const columns: ColumnsType<QueryItem> = [
     {
-      title: 'Name',
+      title: t('common.name'),
       dataIndex: 'name',
       key: 'name',
       width: 180,
@@ -136,7 +138,7 @@ export const QueryView = ({
       ),
     },
     {
-      title: 'Value',
+      title: t('common.value'),
       dataIndex: 'value',
       key: 'value',
       render: (text: string) => (
@@ -150,7 +152,7 @@ export const QueryView = ({
   if (dataSource.length === 0) {
     return (
       <Text type="secondary" style={{ padding: 8, display: 'block' }}>
-        No query parameters
+        {t('trafficDetail.query.empty')}
       </Text>
     );
   }

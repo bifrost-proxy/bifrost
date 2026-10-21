@@ -7,6 +7,7 @@ import type { DebugConsoleValue, DevtoolsSnapshot } from "../../../api/devtools"
 import { useThemeStore } from "../../../stores/useThemeStore";
 import { HighlightedText } from "./shared";
 import { filterBySearch } from "./sharedUtils";
+import { t as translate, useI18n } from "../../../i18n";
 
 const { TextArea } = Input;
 
@@ -27,6 +28,7 @@ export function ConsoleView({
   onExpressionChange: (value: string) => void;
   onRun: () => void;
 }) {
+  const { t } = useI18n();
   const [editorOpen, setEditorOpen] = useState(false);
   const resolvedTheme = useThemeStore((state) => state.resolvedTheme);
   const rows = filterBySearch([
@@ -42,7 +44,7 @@ export function ConsoleView({
             <ConsoleRow key={`${entry.kind}-${entry.at_ms}-${index}`} entry={entry} searchQuery={searchQuery} />
           ))
         ) : (
-          <Empty description="No console messages yet" />
+          <Empty description={t("devtools.console.noMessages")} />
         )}
       </div>
       <div style={consoleInputBarStyle}>
@@ -58,12 +60,12 @@ export function ConsoleView({
                 onRun();
               }
             }}
-            placeholder="Run JavaScript in the remote page"
+            placeholder={t("devtools.console.placeholder")}
             style={consoleInputStyle}
           />
           <Button
             data-testid="devtools-console-expand-editor"
-            aria-label="Open fullscreen JavaScript editor"
+            aria-label={t("devtools.console.openEditorAria")}
             icon={<ArrowsAltOutlined />}
             onClick={() => setEditorOpen(true)}
           />
@@ -75,18 +77,18 @@ export function ConsoleView({
           loading={running}
           onClick={onRun}
         >
-          Run
+          {t("devtools.console.run")}
         </Button>
       </div>
       <Modal
-        title="JavaScript Console"
+        title={t("devtools.console.editorTitle")}
         open={editorOpen}
         width="min(1040px, 94vw)"
         styles={{ body: fullEditorBodyStyle }}
         onCancel={() => setEditorOpen(false)}
         footer={(
           <Space>
-            <Button onClick={() => setEditorOpen(false)}>Close</Button>
+            <Button onClick={() => setEditorOpen(false)}>{t("common.close")}</Button>
             <Button
               data-testid="devtools-console-fullscreen-run"
               type="primary"
@@ -97,7 +99,7 @@ export function ConsoleView({
                 setEditorOpen(false);
               }}
             >
-              Run
+              {t("devtools.console.run")}
             </Button>
           </Space>
         )}
@@ -138,6 +140,7 @@ export type ConsoleUiEntry = {
 type ConsoleDisplayEntry = ConsoleUiEntry | (DevtoolsSnapshot["console"][number] & { kind: "page" });
 
 function ConsoleRow({ entry, searchQuery }: { entry: ConsoleDisplayEntry; searchQuery: string }) {
+  const { t } = useI18n();
   const level = entry.kind === "input" ? "input" : entry.level || "log";
   const style = consoleRowStyleForLevel(level, entry.kind);
   const args = entry.args?.length ? entry.args : null;
@@ -167,10 +170,10 @@ function ConsoleRow({ entry, searchQuery }: { entry: ConsoleDisplayEntry; search
             <HighlightedText text={entry.text} query={searchQuery} />
           )}
         </div>
-        <Tooltip title="Copy raw console content">
+        <Tooltip title={t("devtools.console.copyRaw")}>
           <Button
             data-testid="devtools-console-copy-raw"
-            aria-label="Copy raw console content"
+            aria-label={t("devtools.console.copyRaw")}
             size="small"
             type="text"
             icon={<CopyOutlined />}
@@ -308,6 +311,7 @@ function ConsoleValueView({
   topLevel?: boolean;
   level?: string;
 }) {
+  const { t } = useI18n();
   const [expanded, setExpanded] = useState(false);
   const children = value.properties ?? [];
   const expandable = children.length > 0;
@@ -321,7 +325,7 @@ function ConsoleValueView({
           <button
             type="button"
             data-testid="devtools-console-expand-value"
-            aria-label={expanded ? "Collapse console value" : "Expand console value"}
+            aria-label={expanded ? t("devtools.console.collapseValue") : t("devtools.console.expandValue")}
             style={valueToggleStyle}
             onClick={() => setExpanded((next) => !next)}
           >
@@ -350,7 +354,7 @@ function ConsoleValueView({
               level={level}
             />
           ))}
-          {value.overflow ? <span style={overflowStyle}>... {value.overflow} more</span> : null}
+          {value.overflow ? <span style={overflowStyle}>{t("devtools.console.overflowMore", { count: value.overflow })}</span> : null}
         </span>
       ) : null}
     </span>
@@ -418,9 +422,9 @@ function unquotePreviewString(value: string): string {
 async function copyConsoleRaw(raw: string) {
   try {
     await navigator.clipboard.writeText(raw);
-    message.success("Copied");
+    message.success(translate("common.copied"));
   } catch {
-    message.error("Copy failed");
+    message.error(translate("common.copyFailed"));
   }
 }
 

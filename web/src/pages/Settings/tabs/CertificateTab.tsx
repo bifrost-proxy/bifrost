@@ -1,4 +1,10 @@
-import { useCallback, useEffect, useRef, useState, type MouseEvent } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type MouseEvent,
+} from "react";
 import { useSearchParams } from "react-router-dom";
 import {
   Alert,
@@ -56,12 +62,23 @@ import iosStep6Image from "../../../assets/ios/ios_6.png";
 import iosStep7Image from "../../../assets/ios/ios_7.png";
 import iosQrStep1Image from "../../../assets/ios/ios_qr_1.jpeg";
 import iosQrStep2Image from "../../../assets/ios/ios_qr_2.jpeg";
+import {
+  getLocale,
+  useI18n,
+  type TFunction,
+  type TranslationKey,
+} from "../../../i18n";
+import {
+  localizeBackendMessage,
+  useBackendMessage,
+} from "../../../i18n/backendMessages";
 
 const { Text, Paragraph } = Typography;
 
 const LOCAL_CA_TRUST_POLL_ATTEMPTS = 20;
 const LOCAL_CA_TRUST_POLL_INTERVAL_MS = 1000;
-const APPLE_CONFIGURATOR_APP_STORE_URL = "macappstore://itunes.apple.com/app/id1037126344";
+const APPLE_CONFIGURATOR_APP_STORE_URL =
+  "macappstore://itunes.apple.com/app/id1037126344";
 const APPLE_CONFIGURATOR_WEB_URL =
   "https://apps.apple.com/us/app/apple-configurator/id1037126344";
 const CERTIFICATE_SECTION_IDS = [
@@ -73,55 +90,53 @@ const CERTIFICATE_SECTION_IDS = [
 ] as const;
 type CertificateSectionId = (typeof CERTIFICATE_SECTION_IDS)[number];
 
-const IOS_INSTALL_STEPS = [
+const IOS_INSTALL_STEPS: {
+  key: string;
+  image: string;
+  titleKey: TranslationKey;
+  descriptionKey: TranslationKey;
+}[] = [
   {
     key: "ios_1",
     image: iosStep1Image,
-    title: "Choose iPhone for the profile",
-    description:
-      "When iOS asks which device should receive the profile, choose iPhone. Configurator targets the selected USB device for you.",
+    titleKey: "settings.cert.iosStep1Title",
+    descriptionKey: "settings.cert.iosStep1Description",
   },
   {
     key: "ios_2",
     image: iosStep2Image,
-    title: "Open Settings after the profile is ready",
-    description:
-      "If iOS says the profile was downloaded, tap Close and open Settings. If Configurator opens the install screen directly, continue there.",
+    titleKey: "settings.cert.iosStep2Title",
+    descriptionKey: "settings.cert.iosStep2Description",
   },
   {
     key: "ios_3",
     image: iosStep3Image,
-    title: "Open the downloaded profile in Settings",
-    description:
-      "Open Settings and tap Downloaded Profile. This starts the actual Bifrost CA profile installation.",
+    titleKey: "settings.cert.iosStep3Title",
+    descriptionKey: "settings.cert.iosStep3Description",
   },
   {
     key: "ios_4",
     image: iosStep4Image,
-    title: "Install the Bifrost CA profile",
-    description:
-      "On the Bifrost CA profile screen, tap Install in the top-right corner.",
+    titleKey: "settings.cert.iosStep4Title",
+    descriptionKey: "settings.cert.iosStep4Description",
   },
   {
     key: "ios_5",
     image: iosStep5Image,
-    title: "Accept the unsigned profile warning",
-    description:
-      "iOS warns that the profile is unsigned because Bifrost creates a local CA. Tap Install again if you trust this Bifrost instance.",
+    titleKey: "settings.cert.iosStep5Title",
+    descriptionKey: "settings.cert.iosStep5Description",
   },
   {
     key: "ios_6",
     image: iosStep6Image,
-    title: "Go to About after profile installation",
-    description:
-      "After the profile is installed, return to Settings > General and open About. Installation alone does not enable HTTPS trust.",
+    titleKey: "settings.cert.iosStep6Title",
+    descriptionKey: "settings.cert.iosStep6Description",
   },
   {
     key: "ios_7",
     image: iosStep7Image,
-    title: "Enable full trust for Bifrost CA",
-    description:
-      "Open Certificate Trust Settings and turn on full trust for Bifrost CA. HTTPS inspection works only after this step.",
+    titleKey: "settings.cert.iosStep7Title",
+    descriptionKey: "settings.cert.iosStep7Description",
   },
 ];
 
@@ -129,20 +144,23 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
-const IOS_QR_DELIVERY_STEPS = [
+const IOS_QR_DELIVERY_STEPS: {
+  key: string;
+  image: string;
+  titleKey: TranslationKey;
+  descriptionKey: TranslationKey;
+}[] = [
   {
     key: "ios_qr_1",
     image: iosQrStep1Image,
-    title: "Scan the LAN profile QR code",
-    description:
-      "Open Camera on the iPhone, point it at Bifrost's LAN QR code, then tap the yellow link for the LAN address.",
+    titleKey: "settings.cert.iosQrStep1Title",
+    descriptionKey: "settings.cert.iosQrStep1Description",
   },
   {
     key: "ios_qr_2",
     image: iosQrStep2Image,
-    title: "Allow the configuration profile download",
-    description:
-      "When iOS asks whether this website may download a configuration profile, tap Allow, then continue with the shared steps below.",
+    titleKey: "settings.cert.iosQrStep2Title",
+    descriptionKey: "settings.cert.iosQrStep2Description",
   },
 ];
 
@@ -208,7 +226,10 @@ function scrollCertificateSectionIntoView(target: HTMLElement) {
 
   const parentRect = scrollParent.getBoundingClientRect();
   const targetRect = target.getBoundingClientRect();
-  const nextTop = Math.max(0, scrollParent.scrollTop + targetRect.top - parentRect.top - 8);
+  const nextTop = Math.max(
+    0,
+    scrollParent.scrollTop + targetRect.top - parentRect.top - 8,
+  );
   scrollParent.scrollTop = nextTop;
   scrollParent.scrollTo({
     top: nextTop,
@@ -220,17 +241,17 @@ function mobileDeviceTitle(device: { id: string; name?: string | null }) {
   return device.name?.trim() || device.id;
 }
 
-function certificateStateLabel(state: DeviceCertificateState) {
+function certificateStateLabel(state: DeviceCertificateState, t: TFunction) {
   switch (state) {
     case "installed":
-      return "CA installed";
+      return t("settings.cert.caInstalled");
     case "pushed_to_device":
-      return "CA pushed";
+      return t("settings.cert.caPushed");
     case "not_installed":
-      return "CA not installed";
+      return t("settings.cert.caNotInstalled");
     case "unknown":
     default:
-      return "CA unknown";
+      return t("settings.cert.caUnknown");
   }
 }
 
@@ -261,11 +282,16 @@ function mobileDeviceDescription(device: MobileDevice, extra?: string) {
         ) : null}
       </Text>
       <Text type="secondary" style={{ fontSize: 12 }}>
-        {extra ? `${device.status_message} ${extra}` : device.status_message}
+        {extra
+          ? `${localizeBackendMessage(getLocale(), device.status_message)} ${extra}`
+          : localizeBackendMessage(getLocale(), device.status_message)}
       </Text>
       {device.certificate_status ? (
         <Text type="secondary" style={{ fontSize: 12 }}>
-          {device.certificate_status.message}
+          {localizeBackendMessage(
+            getLocale(),
+            device.certificate_status.message,
+          )}
         </Text>
       ) : null}
     </Space>
@@ -278,7 +304,9 @@ function withSettingsScope(scope: SettingsScope): SettingsScope[] {
   );
 }
 
-function mobileDevicesFromPushData(data: unknown): MobileDevicesResponse | null {
+function mobileDevicesFromPushData(
+  data: unknown,
+): MobileDevicesResponse | null {
   if (!data || typeof data !== "object") {
     return null;
   }
@@ -291,30 +319,42 @@ export default function CertificateTab({
   getCertQRCodeUrl,
   onCertInfoChange,
 }: CertificateTabProps) {
+  const { t } = useI18n();
+  const bm = useBackendMessage();
   const { token } = theme.useToken();
   const [searchParams] = useSearchParams();
   const highlightedDeviceId = searchParams.get("mobile_device");
   const highlightedPlatform = searchParams.get("mobile_platform");
   const autoScrolledTargetRef = useRef<string | null>(null);
-  const [mobileInfo, setMobileInfo] = useState<MobileDevicesResponse | null>(null);
+  const [mobileInfo, setMobileInfo] = useState<MobileDevicesResponse | null>(
+    null,
+  );
   const [loadingDevices, setLoadingDevices] = useState(false);
-  const [installingDeviceId, setInstallingDeviceId] = useState<string | null>(null);
-  const [installingIosConfiguratorDeviceId, setInstallingIosConfiguratorDeviceId] = useState<
-    string | null
-  >(null);
-  const [installSession, setInstallSession] = useState<InstallSession | null>(null);
+  const [installingDeviceId, setInstallingDeviceId] = useState<string | null>(
+    null,
+  );
+  const [
+    installingIosConfiguratorDeviceId,
+    setInstallingIosConfiguratorDeviceId,
+  ] = useState<string | null>(null);
+  const [installSession, setInstallSession] = useState<InstallSession | null>(
+    null,
+  );
   const [installingLocalCa, setInstallingLocalCa] = useState(false);
   const [activeSectionId, setActiveSectionId] = useState<string>(() => {
     if (typeof window === "undefined") {
       return CERTIFICATE_SECTION_IDS[0];
     }
     const hashSectionId = window.location.hash.replace(/^#/, "");
-    return CERTIFICATE_SECTION_IDS.includes(hashSectionId as CertificateSectionId)
+    return CERTIFICATE_SECTION_IDS.includes(
+      hashSectionId as CertificateSectionId,
+    )
       ? hashSectionId
       : CERTIFICATE_SECTION_IDS[0];
   });
   const certStatus = certInfo?.status ?? "unknown";
-  const certStatusLabel = certInfo?.status_label ?? "Check failed";
+  const certStatusLabel =
+    bm(certInfo?.status_label) ?? t("settings.cert.checkFailed");
   const certStatusColor =
     certStatus === "installed_and_trusted"
       ? "green"
@@ -324,25 +364,39 @@ export default function CertificateTab({
           ? "red"
           : "default";
   const certStatusIcon =
-    certStatus === "installed_and_trusted" ? <CheckOutlined /> : <CloseOutlined />;
+    certStatus === "installed_and_trusted" ? (
+      <CheckOutlined />
+    ) : (
+      <CloseOutlined />
+    );
 
-  const loadMobileDevices = useCallback(async (refresh = false, silent = false) => {
-    if (!silent) {
-      setLoadingDevices(true);
-    }
-    try {
-      const info = refresh ? await refreshMobileDevices() : await getMobileDevices();
-      setMobileInfo(info);
-    } catch (error) {
+  const loadMobileDevices = useCallback(
+    async (refresh = false, silent = false) => {
       if (!silent) {
-        message.error(normalizeApiErrorMessage(error, "Failed to detect mobile devices"));
+        setLoadingDevices(true);
       }
-    } finally {
-      if (!silent) {
-        setLoadingDevices(false);
+      try {
+        const info = refresh
+          ? await refreshMobileDevices()
+          : await getMobileDevices();
+        setMobileInfo(info);
+      } catch (error) {
+        if (!silent) {
+          message.error(
+            normalizeApiErrorMessage(
+              error,
+              t("settings.cert.detectDevicesFailed"),
+            ),
+          );
+        }
+      } finally {
+        if (!silent) {
+          setLoadingDevices(false);
+        }
       }
-    }
-  }, []);
+    },
+    [t],
+  );
 
   useEffect(() => {
     void loadMobileDevices(false);
@@ -386,15 +440,24 @@ export default function CertificateTab({
 
     const updateActiveSection = () => {
       const firstSection = document.getElementById(CERTIFICATE_SECTION_IDS[0]);
-      const scrollParent = firstSection ? findScrollableParent(firstSection) : null;
+      const scrollParent = firstSection
+        ? findScrollableParent(firstSection)
+        : null;
       const parentTop = scrollParent?.getBoundingClientRect().top ?? 0;
       const hashSectionId = window.location.hash.replace(/^#/, "");
-      if (CERTIFICATE_SECTION_IDS.includes(hashSectionId as CertificateSectionId)) {
+      if (
+        CERTIFICATE_SECTION_IDS.includes(hashSectionId as CertificateSectionId)
+      ) {
         const hashSection = document.getElementById(hashSectionId);
         if (hashSection) {
-          const hashSectionTop = hashSection.getBoundingClientRect().top - parentTop;
-          const containerHeight = scrollParent?.clientHeight ?? window.innerHeight;
-          if (hashSectionTop >= -24 && hashSectionTop <= containerHeight - 120) {
+          const hashSectionTop =
+            hashSection.getBoundingClientRect().top - parentTop;
+          const containerHeight =
+            scrollParent?.clientHeight ?? window.innerHeight;
+          if (
+            hashSectionTop >= -24 &&
+            hashSectionTop <= containerHeight - 120
+          ) {
             setActiveSectionId(hashSectionId);
             return;
           }
@@ -428,7 +491,9 @@ export default function CertificateTab({
     };
 
     const firstSection = document.getElementById(CERTIFICATE_SECTION_IDS[0]);
-    const scrollParent = firstSection ? findScrollableParent(firstSection) : null;
+    const scrollParent = firstSection
+      ? findScrollableParent(firstSection)
+      : null;
     readHashSection();
     scheduleUpdate();
     scrollParent?.addEventListener("scroll", scheduleUpdate, { passive: true });
@@ -517,19 +582,21 @@ export default function CertificateTab({
       }
 
       if (nextInfo.trusted) {
-        message.success("Bifrost CA is installed and trusted on this computer.");
+        message.success(t("settings.cert.localTrusted"));
         return;
       }
 
       message.warning(
-        `${nextInfo.status_message} If you just completed macOS authorization, Bifrost will refresh again when you reopen this page.`,
+        `${bm(nextInfo.status_message)} ${t("settings.cert.localTrustPending")}`,
       );
     } catch (error) {
-      message.error(normalizeApiErrorMessage(error, "Failed to install local CA certificate"));
+      message.error(
+        normalizeApiErrorMessage(error, t("settings.cert.localInstallFailed")),
+      );
     } finally {
       setInstallingLocalCa(false);
     }
-  }, [onCertInfoChange]);
+  }, [bm, onCertInfoChange, t]);
 
   const handleInstallAndroid = useCallback(
     async (deviceId: string) => {
@@ -539,51 +606,60 @@ export default function CertificateTab({
         const session = await installMobileCa(deviceId);
         setInstallSession(session);
         await loadMobileDevices(true, true);
-        message.success("CA pushed to Android. Finish the confirmation on the phone.");
+        message.success(t("settings.cert.androidPushed"));
       } catch (error) {
-        message.error(normalizeApiErrorMessage(error, "Failed to start Android install flow"));
+        message.error(
+          normalizeApiErrorMessage(
+            error,
+            t("settings.cert.androidInstallFailed"),
+          ),
+        );
       } finally {
         setInstallingDeviceId(null);
       }
     },
-    [loadMobileDevices],
+    [loadMobileDevices, t],
   );
 
-  const handleInstallIosConfigurator = useCallback(async (deviceId: string) => {
-    setInstallingIosConfiguratorDeviceId(deviceId);
-    setInstallSession(null);
-    try {
-      const session = await installMobileCa(deviceId, "managed_auto_trust");
-      setInstallSession(session);
-      if (session.completed && !session.requires_user_confirmation) {
-        message.success("Apple Configurator installed the iOS profile.");
-      } else if (session.requires_user_confirmation) {
-        message.warning("Apple Configurator opened the install flow. Confirm it on the iPhone.");
-      } else {
-        message.warning("Apple Configurator could not complete the install flow.");
-      }
-    } catch (error) {
-      message.error(
-        normalizeApiErrorMessage(error, "Failed to install iOS profile with Apple Configurator"),
-      );
-    } finally {
-      setInstallingIosConfiguratorDeviceId(null);
-    }
-  }, []);
-
-  const navigateToCertificateSection = useCallback((sectionId: string) => {
-      const target = document.getElementById(sectionId);
-      if (!target) {
-        return;
-      }
-      setActiveSectionId(sectionId);
-      scrollCertificateSectionIntoView(target);
-      if (window.location.hash !== `#${sectionId}`) {
-        window.history.pushState(null, "", `#${sectionId}`);
+  const handleInstallIosConfigurator = useCallback(
+    async (deviceId: string) => {
+      setInstallingIosConfiguratorDeviceId(deviceId);
+      setInstallSession(null);
+      try {
+        const session = await installMobileCa(deviceId, "managed_auto_trust");
+        setInstallSession(session);
+        if (session.completed && !session.requires_user_confirmation) {
+          message.success(t("settings.cert.configuratorInstalled"));
+        } else if (session.requires_user_confirmation) {
+          message.warning(t("settings.cert.configuratorConfirm"));
+        } else {
+          message.warning(t("settings.cert.configuratorIncomplete"));
+        }
+      } catch (error) {
+        message.error(
+          normalizeApiErrorMessage(
+            error,
+            t("settings.cert.configuratorFailed"),
+          ),
+        );
+      } finally {
+        setInstallingIosConfiguratorDeviceId(null);
       }
     },
-    [],
+    [t],
   );
+
+  const navigateToCertificateSection = useCallback((sectionId: string) => {
+    const target = document.getElementById(sectionId);
+    if (!target) {
+      return;
+    }
+    setActiveSectionId(sectionId);
+    scrollCertificateSectionIntoView(target);
+    if (window.location.hash !== `#${sectionId}`) {
+      window.history.pushState(null, "", `#${sectionId}`);
+    }
+  }, []);
 
   const handleSectionNavClick = useCallback(
     (event: MouseEvent<HTMLAnchorElement>, sectionId: string) => {
@@ -596,7 +672,9 @@ export default function CertificateTab({
   useEffect(() => {
     const handleCapturedSectionClick = (event: globalThis.MouseEvent) => {
       const target = event.target instanceof Element ? event.target : null;
-      const link = target?.closest<HTMLAnchorElement>("[data-certificate-section-link='true']");
+      const link = target?.closest<HTMLAnchorElement>(
+        "[data-certificate-section-link='true']",
+      );
       const sectionId = link?.dataset.certificateSectionId;
       if (!sectionId) {
         return;
@@ -606,34 +684,35 @@ export default function CertificateTab({
     };
 
     document.addEventListener("click", handleCapturedSectionClick, true);
-    return () => document.removeEventListener("click", handleCapturedSectionClick, true);
+    return () =>
+      document.removeEventListener("click", handleCapturedSectionClick, true);
   }, [navigateToCertificateSection]);
 
   const navItems = [
     {
       href: "certificate-trust-probe",
       icon: <MobileOutlined />,
-      label: "Availability check",
+      label: t("settings.cert.navAvailability"),
     },
     {
       href: "certificate-local-install",
       icon: <SafetyCertificateOutlined />,
-      label: "Local install",
+      label: t("settings.cert.navLocalInstall"),
     },
     {
       href: "certificate-mobile-ios",
       icon: <AppleOutlined />,
-      label: "iOS devices",
+      label: t("settings.cert.navIos"),
     },
     {
       href: "certificate-mobile-android",
       icon: <AndroidOutlined />,
-      label: "Android devices",
+      label: t("settings.cert.navAndroid"),
     },
     {
       href: "certificate-downloads",
       icon: <QrcodeOutlined />,
-      label: "Certificate downloads",
+      label: t("settings.cert.navDownloads"),
     },
   ];
 
@@ -641,16 +720,18 @@ export default function CertificateTab({
     <Row gutter={[16, 16]} data-testid="settings-certificate-tab">
       <Col xs={24} md={6} lg={5} xl={4}>
         <div style={{ position: "sticky", top: 8 }}>
-          <Card title="Certificate Setup" size="small">
+          <Card title={t("settings.cert.setupTitle")} size="small">
             <Space direction="vertical" style={{ width: "100%" }} size={4}>
-              {navItems.map((item) => (
+              {navItems.map((item) =>
                 (() => {
                   const active = activeSectionId === item.href;
                   return (
                     <a
                       key={item.href}
                       href={`#${item.href}`}
-                      onClick={(event) => handleSectionNavClick(event, item.href)}
+                      onClick={(event) =>
+                        handleSectionNavClick(event, item.href)
+                      }
                       data-certificate-section-link="true"
                       data-certificate-section-id={item.href}
                       aria-current={active ? "location" : undefined}
@@ -664,10 +745,14 @@ export default function CertificateTab({
                         border: `1px solid ${
                           active ? token.colorPrimaryBorder : "transparent"
                         }`,
-                        background: active ? token.colorPrimaryBg : "transparent",
+                        background: active
+                          ? token.colorPrimaryBg
+                          : "transparent",
                         color: active ? token.colorPrimary : token.colorText,
                         fontWeight: active ? 600 : 400,
-                        boxShadow: active ? `inset 3px 0 0 ${token.colorPrimary}` : "none",
+                        boxShadow: active
+                          ? `inset 3px 0 0 ${token.colorPrimary}`
+                          : "none",
                         transition:
                           "background-color 120ms ease, border-color 120ms ease, color 120ms ease, box-shadow 120ms ease",
                       }}
@@ -676,8 +761,8 @@ export default function CertificateTab({
                       <span>{item.label}</span>
                     </a>
                   );
-                })()
-              ))}
+                })(),
+              )}
             </Space>
           </Card>
         </div>
@@ -690,7 +775,7 @@ export default function CertificateTab({
             title={
               <Space>
                 <MobileOutlined />
-                <span>Availability Check</span>
+                <span>{t("settings.cert.availabilityTitle")}</span>
               </Space>
             }
             size="small"
@@ -703,620 +788,699 @@ export default function CertificateTab({
             />
           </Card>
 
-        <Card
-          id="certificate-local-install"
-          title={
-            <Space>
-              <SafetyCertificateOutlined />
-              <span>Local Certificate Install</span>
-            </Space>
-          }
-          size="small"
-        >
-          <Space direction="vertical" style={{ width: "100%" }} size="middle">
-            <Row justify="space-between" align="middle">
-              <Col>
-                <Text>Certificate Status</Text>
-              </Col>
-              <Col>
-                <Tag color={certStatusColor} icon={certStatusIcon}>
-                  {certStatusLabel}
-                </Tag>
-              </Col>
-            </Row>
+          <Card
+            id="certificate-local-install"
+            title={
+              <Space>
+                <SafetyCertificateOutlined />
+                <span>{t("settings.cert.localTitle")}</span>
+              </Space>
+            }
+            size="small"
+          >
+            <Space direction="vertical" style={{ width: "100%" }} size="middle">
+              <Row justify="space-between" align="middle">
+                <Col>
+                  <Text>{t("settings.cert.status")}</Text>
+                </Col>
+                <Col>
+                  <Tag color={certStatusColor} icon={certStatusIcon}>
+                    {certStatusLabel}
+                  </Tag>
+                </Col>
+              </Row>
 
-            <Divider style={{ margin: "8px 0" }} />
+              <Divider style={{ margin: "8px 0" }} />
 
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              {certInfo?.status_message ??
-                "Unable to verify whether the CA certificate is installed and trusted."}
-            </Text>
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                {bm(certInfo?.status_message) ??
+                  t("settings.cert.statusUnknown")}
+              </Text>
 
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              Install and trust the Bifrost CA on this computer when you want desktop apps and
-              browsers on this machine to trust certificates generated by Bifrost.
-            </Text>
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                {t("settings.cert.localHint")}
+              </Text>
 
-            {certStatus !== "installed_and_trusted" ? (
-              <Tooltip
-                title={
-                  certInfo?.available
-                    ? "Run the same local system trust install flow as `bifrost ca install`."
-                    : "The CA certificate file is not available yet."
-                }
-              >
-                <Button
-                  type="primary"
-                  icon={<SafetyCertificateOutlined />}
-                  loading={installingLocalCa}
-                  disabled={!certInfo?.available}
-                  onClick={() => void handleInstallLocalCa()}
-                  data-testid="settings-certificate-local-install"
+              {certStatus !== "installed_and_trusted" ? (
+                <Tooltip
+                  title={
+                    certInfo?.available
+                      ? t("settings.cert.localInstallTooltip")
+                      : t("settings.cert.caFileUnavailable")
+                  }
                 >
-                  {certStatus === "installed_not_trusted" ? "Trust CA" : "Install and Trust CA"}
-                </Button>
-              </Tooltip>
-            ) : null}
-
-            {certInfo?.sha256_fingerprint ? (
-              <Paragraph type="secondary" style={{ fontSize: 12, marginBottom: 0 }}>
-                SHA-256 fingerprint: <Text code>{certInfo.sha256_fingerprint}</Text>
-              </Paragraph>
-            ) : null}
-          </Space>
-        </Card>
-
-        <Card
-          id="certificate-mobile-ios"
-          title={
-            <Space>
-              <AppleOutlined />
-              <span>iOS Mobile Installation</span>
-            </Space>
-          }
-          size="small"
-        >
-          <Space direction="vertical" style={{ width: "100%" }} size="middle">
-            <Alert
-              type="info"
-              showIcon
-              icon={<MobileOutlined />}
-              message="iOS uses one shared install and trust flow"
-              description="First send the Bifrost CA profile to the iPhone, then complete the iOS Settings steps on the phone. Apple Configurator and QR/manual delivery only change how the profile reaches the phone."
-            />
-
-            <Steps
-              size="small"
-              direction="vertical"
-              current={-1}
-              items={[
-                {
-                  title: "Send the profile",
-                  description:
-                    "Use Configurator Install for a connected USB device, or scan the QR code / download the profile on the iPhone.",
-                },
-                {
-                  title: "Install the profile in Settings",
-                  description:
-                    "Open Settings > Downloaded Profile, then install the Bifrost CA profile.",
-                },
-                {
-                  title: "Open certificate trust settings",
-                  description: "Go to Settings > General > About > Certificate Trust Settings.",
-                },
-                {
-                  title: "Enable full trust",
-                  description:
-                    "Turn on full trust for Bifrost CA. This is the final step that enables SSL/TLS trust.",
-                },
-              ]}
-            />
-
-            <Text strong>1. Choose how to send the CA profile</Text>
-            <Alert
-              type={mobileInfo?.ios.configurator.cfgutil_available ? "success" : "info"}
-              showIcon
-              message="Send profile with Apple Configurator"
-              description={
-                <Space direction="vertical" size={4}>
-                  <Text type="secondary" style={{ fontSize: 12 }}>
-                    {mobileInfo?.ios.configurator.message ??
-                      "Install Apple Configurator on macOS to enable computer-side profile installation."}
-                  </Text>
-                  <Text type="secondary" style={{ fontSize: 12 }}>
-                    Connect the iPhone over USB, unlock it, tap Trust for this Mac if prompted,
-                    then choose the device below. If the iPhone asks for confirmation, continue with
-                    the same Settings steps below.
-                  </Text>
-                  {!mobileInfo?.ios.configurator.cfgutil_available ? (
-                    <Space wrap size={8} data-testid="settings-mobile-ios-configurator-missing">
-                      <Text type="secondary" style={{ fontSize: 12 }}>
-                        The Configurator button stays disabled until Apple Configurator and its
-                        cfgutil automation tool are installed.
-                      </Text>
-                      <Button
-                        size="small"
-                        href={APPLE_CONFIGURATOR_APP_STORE_URL}
-                        target="_blank"
-                        rel="noreferrer"
-                        data-testid="settings-mobile-ios-configurator-app-store"
-                      >
-                        Open Apple Configurator in the Mac App Store
-                      </Button>
-                      <a
-                        href={APPLE_CONFIGURATOR_WEB_URL}
-                        target="_blank"
-                        rel="noreferrer"
-                        data-testid="settings-mobile-ios-configurator-web-store"
-                      >
-                        Web fallback
-                      </a>
-                    </Space>
-                  ) : null}
-                </Space>
-              }
-            />
-            <Button
-              icon={<ReloadOutlined />}
-              onClick={() => void loadMobileDevices(true)}
-              loading={loadingDevices}
-              data-testid="settings-mobile-detect-ios"
-            >
-              Refresh Devices
-            </Button>
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              {mobileInfo?.ios.message ?? "Connect an iPhone or iPad over USB to show it here."}
-            </Text>
-            <List
-              size="small"
-              locale={{
-                emptyText: "No iPhone or iPad USB devices detected",
-              }}
-              dataSource={mobileInfo?.ios.devices ?? []}
-              renderItem={(device) => {
-                const highlighted = isHighlightedDevice(device.id, "ios");
-                return (
-                  <List.Item
-                    className={highlighted ? "mobile-device-target-card" : undefined}
-                    data-mobile-device-id={device.id}
-                    data-mobile-device-platform="ios"
-                    style={highlighted ? highlightedDeviceStyle : undefined}
+                  <Button
+                    type="primary"
+                    icon={<SafetyCertificateOutlined />}
+                    loading={installingLocalCa}
+                    disabled={!certInfo?.available}
+                    onClick={() => void handleInstallLocalCa()}
+                    data-testid="settings-certificate-local-install"
                   >
-                    <Space direction="vertical" size="small" style={{ width: "100%" }}>
-                      <List.Item.Meta
-                        title={
-                          <Space wrap>
-                            <Text>{mobileDeviceTitle(device)}</Text>
-                            <Tag color="blue">{device.status}</Tag>
-                            <Tag color="purple">advanced</Tag>
-                          </Space>
-                        }
-                        description={mobileDeviceDescription(
-                          device,
-                          "For Configurator install, unlock the iPhone and trust this Mac first.",
-                        )}
-                      />
-                      <Space
-                        direction="vertical"
-                        size={6}
-                        style={{ width: "100%", maxWidth: 260 }}
-                      >
-                        <Tooltip
-                          title={
-                            mobileInfo?.ios.configurator.cfgutil_available
-                              ? "Install profile through Apple Configurator"
-                              : "Install Apple Configurator on this Mac first"
-                          }
-                        >
-                          <Button
-                            icon={<SendOutlined />}
-                            size="small"
-                            className={highlighted ? "mobile-device-install-cta-pulse" : undefined}
-                            disabled={
-                              !certInfo?.available ||
-                              !mobileInfo?.ios.configurator.cfgutil_available ||
-                              device.status !== "connected"
-                            }
-                            loading={installingIosConfiguratorDeviceId === device.id}
-                            onClick={() => void handleInstallIosConfigurator(device.id)}
-                            data-mobile-install-cta="true"
-                            data-testid="settings-mobile-install-ios-configurator"
-                            style={{ width: "100%" }}
-                          >
-                            Configurator Install
-                          </Button>
-                        </Tooltip>
-                        {!mobileInfo?.ios.configurator.cfgutil_available ? (
-                          <Text
-                            type="secondary"
-                            style={{ fontSize: 12 }}
-                            data-testid="settings-mobile-ios-configurator-disabled-reason"
-                          >
-                            Configurator install is disabled because cfgutil is not installed. Open
-                            Apple Configurator from the Mac App Store, then choose Install
-                            Automation Tools if cfgutil is still missing.
-                          </Text>
-                        ) : null}
-                      </Space>
-                    </Space>
-                  </List.Item>
-                );
-              }}
-            />
-            {installSession?.platform === "ios" ? (
+                    {certStatus === "installed_not_trusted"
+                      ? t("settings.cert.trustCa")
+                      : t("settings.cert.installAndTrustCa")}
+                  </Button>
+                </Tooltip>
+              ) : null}
+
+              {certInfo?.sha256_fingerprint ? (
+                <Paragraph
+                  type="secondary"
+                  style={{ fontSize: 12, marginBottom: 0 }}
+                >
+                  {t("settings.cert.fingerprint")}{" "}
+                  <Text code>{certInfo.sha256_fingerprint}</Text>
+                </Paragraph>
+              ) : null}
+            </Space>
+          </Card>
+
+          <Card
+            id="certificate-mobile-ios"
+            title={
+              <Space>
+                <AppleOutlined />
+                <span>{t("settings.cert.iosTitle")}</span>
+              </Space>
+            }
+            size="small"
+          >
+            <Space direction="vertical" style={{ width: "100%" }} size="middle">
+              <Alert
+                type="info"
+                showIcon
+                icon={<MobileOutlined />}
+                message={t("settings.cert.iosFlowTitle")}
+                description={t("settings.cert.iosFlowDescription")}
+              />
+
+              <Steps
+                size="small"
+                direction="vertical"
+                current={-1}
+                items={[
+                  {
+                    title: t("settings.cert.iosOverviewSendTitle"),
+                    description: t("settings.cert.iosOverviewSendDescription"),
+                  },
+                  {
+                    title: t("settings.cert.iosOverviewInstallTitle"),
+                    description: t(
+                      "settings.cert.iosOverviewInstallDescription",
+                    ),
+                  },
+                  {
+                    title: t("settings.cert.iosOverviewTrustSettingsTitle"),
+                    description: t(
+                      "settings.cert.iosOverviewTrustSettingsDescription",
+                    ),
+                  },
+                  {
+                    title: t("settings.cert.iosOverviewFullTrustTitle"),
+                    description: t(
+                      "settings.cert.iosOverviewFullTrustDescription",
+                    ),
+                  },
+                ]}
+              />
+
+              <Text strong>{t("settings.cert.iosStepChoose")}</Text>
               <Alert
                 type={
-                  installSession.completed && !installSession.requires_user_confirmation
+                  mobileInfo?.ios.configurator.cfgutil_available
                     ? "success"
-                    : "warning"
+                    : "info"
                 }
                 showIcon
-                message={installSession.summary}
+                message={t("settings.cert.configuratorTitle")}
                 description={
-                  <List
-                    size="small"
-                    dataSource={installSession.steps}
-                    renderItem={(step) => (
-                      <List.Item>
-                        <Space>
-                          {step.success ? <CheckOutlined /> : <ExclamationCircleOutlined />}
-                          <Text>{step.name}</Text>
-                          <Text type="secondary">{step.message}</Text>
-                        </Space>
-                      </List.Item>
-                    )}
-                  />
+                  <Space direction="vertical" size={4}>
+                    <Text type="secondary" style={{ fontSize: 12 }}>
+                      {bm(mobileInfo?.ios.configurator.message) ??
+                        t("settings.cert.configuratorDefaultMessage")}
+                    </Text>
+                    <Text type="secondary" style={{ fontSize: 12 }}>
+                      {t("settings.cert.configuratorUsbHint")}
+                    </Text>
+                    {!mobileInfo?.ios.configurator.cfgutil_available ? (
+                      <Space
+                        wrap
+                        size={8}
+                        data-testid="settings-mobile-ios-configurator-missing"
+                      >
+                        <Text type="secondary" style={{ fontSize: 12 }}>
+                          {t("settings.cert.configuratorMissing")}
+                        </Text>
+                        <Button
+                          size="small"
+                          href={APPLE_CONFIGURATOR_APP_STORE_URL}
+                          target="_blank"
+                          rel="noreferrer"
+                          data-testid="settings-mobile-ios-configurator-app-store"
+                        >
+                          {t("settings.cert.openAppStore")}
+                        </Button>
+                        <a
+                          href={APPLE_CONFIGURATOR_WEB_URL}
+                          target="_blank"
+                          rel="noreferrer"
+                          data-testid="settings-mobile-ios-configurator-web-store"
+                        >
+                          {t("settings.cert.webFallback")}
+                        </a>
+                      </Space>
+                    ) : null}
+                  </Space>
                 }
-                data-testid="settings-mobile-ios-install-session"
               />
-            ) : null}
-            <Divider style={{ margin: "4px 0" }} />
-            <Alert
-              type="warning"
-              showIcon
-              message="Or send profile manually with QR or file"
-              description="Scan the QR code with the iPhone Camera app, open the profile in Safari, AirDrop the file, or download it directly on the phone. After the profile reaches the iPhone, continue with the same Settings and trust steps below."
-            />
-            <Row gutter={[12, 12]} data-testid="settings-mobile-ios-qr-delivery-guide">
-              {IOS_QR_DELIVERY_STEPS.map((step) => (
-                <Col xs={24} sm={12} key={step.key}>
-                  <figure
-                    style={{
-                      margin: 0,
-                      border: `1px solid ${token.colorBorderSecondary}`,
-                      borderRadius: token.borderRadius,
-                      padding: 8,
-                      background: token.colorBgContainer,
-                      height: "100%",
-                    }}
-                    data-testid={`settings-mobile-ios-step-${step.key}`}
-                  >
-                    <Image
-                      src={step.image}
-                      alt={`${step.key}: ${step.title}`}
-                      width="100%"
-                      height={260}
-                      style={{
-                        objectFit: "contain",
-                        background: token.colorFillAlter,
-                        borderRadius: token.borderRadiusSM,
-                      }}
-                      preview={{
-                        mask: <QrcodeOutlined style={{ fontSize: 20 }} />,
-                      }}
+              <Button
+                icon={<ReloadOutlined />}
+                onClick={() => void loadMobileDevices(true)}
+                loading={loadingDevices}
+                data-testid="settings-mobile-detect-ios"
+              >
+                {t("settings.cert.refreshDevices")}
+              </Button>
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                {bm(mobileInfo?.ios.message) ??
+                  t("settings.cert.iosDevicesHint")}
+              </Text>
+              <List
+                size="small"
+                locale={{
+                  emptyText: t("settings.cert.iosNoDevices"),
+                }}
+                dataSource={mobileInfo?.ios.devices ?? []}
+                renderItem={(device) => {
+                  const highlighted = isHighlightedDevice(device.id, "ios");
+                  return (
+                    <List.Item
+                      className={
+                        highlighted ? "mobile-device-target-card" : undefined
+                      }
+                      data-mobile-device-id={device.id}
+                      data-mobile-device-platform="ios"
+                      style={highlighted ? highlightedDeviceStyle : undefined}
+                    >
+                      <Space
+                        direction="vertical"
+                        size="small"
+                        style={{ width: "100%" }}
+                      >
+                        <List.Item.Meta
+                          title={
+                            <Space wrap>
+                              <Text>{mobileDeviceTitle(device)}</Text>
+                              <Tag color="blue">{device.status}</Tag>
+                              <Tag color="purple">
+                                {t("settings.cert.advanced")}
+                              </Tag>
+                            </Space>
+                          }
+                          description={mobileDeviceDescription(
+                            device,
+                            t("settings.cert.iosDeviceExtra"),
+                          )}
+                        />
+                        <Space
+                          direction="vertical"
+                          size={6}
+                          style={{ width: "100%", maxWidth: 260 }}
+                        >
+                          <Tooltip
+                            title={
+                              mobileInfo?.ios.configurator.cfgutil_available
+                                ? t("settings.cert.configuratorInstallTooltip")
+                                : t("settings.cert.configuratorInstallFirst")
+                            }
+                          >
+                            <Button
+                              icon={<SendOutlined />}
+                              size="small"
+                              className={
+                                highlighted
+                                  ? "mobile-device-install-cta-pulse"
+                                  : undefined
+                              }
+                              disabled={
+                                !certInfo?.available ||
+                                !mobileInfo?.ios.configurator
+                                  .cfgutil_available ||
+                                device.status !== "connected"
+                              }
+                              loading={
+                                installingIosConfiguratorDeviceId === device.id
+                              }
+                              onClick={() =>
+                                void handleInstallIosConfigurator(device.id)
+                              }
+                              data-mobile-install-cta="true"
+                              data-testid="settings-mobile-install-ios-configurator"
+                              style={{ width: "100%" }}
+                            >
+                              {t("settings.cert.configuratorInstall")}
+                            </Button>
+                          </Tooltip>
+                          {!mobileInfo?.ios.configurator.cfgutil_available ? (
+                            <Text
+                              type="secondary"
+                              style={{ fontSize: 12 }}
+                              data-testid="settings-mobile-ios-configurator-disabled-reason"
+                            >
+                              {t("settings.cert.configuratorDisabledReason")}
+                            </Text>
+                          ) : null}
+                        </Space>
+                      </Space>
+                    </List.Item>
+                  );
+                }}
+              />
+              {installSession?.platform === "ios" ? (
+                <Alert
+                  type={
+                    installSession.completed &&
+                    !installSession.requires_user_confirmation
+                      ? "success"
+                      : "warning"
+                  }
+                  showIcon
+                  message={bm(installSession.summary)}
+                  description={
+                    <List
+                      size="small"
+                      dataSource={installSession.steps}
+                      renderItem={(step) => (
+                        <List.Item>
+                          <Space>
+                            {step.success ? (
+                              <CheckOutlined />
+                            ) : (
+                              <ExclamationCircleOutlined />
+                            )}
+                            <Text>{step.name}</Text>
+                            <Text type="secondary">{bm(step.message)}</Text>
+                          </Space>
+                        </List.Item>
+                      )}
                     />
-                    <figcaption style={{ marginTop: 8 }}>
-                      <Space direction="vertical" size={2}>
-                        <Text strong style={{ fontSize: 12 }}>
-                          {step.key}: {step.title}
-                        </Text>
-                        <Text type="secondary" style={{ fontSize: 12 }}>
-                          {step.description}
-                        </Text>
-                      </Space>
-                    </figcaption>
-                  </figure>
-                </Col>
-              ))}
-            </Row>
-            <Button
-              icon={<DownloadOutlined />}
-              href={getIosMobileConfigUrl()}
-              download="bifrost-ca.mobileconfig"
-              disabled={!certInfo?.available}
-              data-testid="settings-mobile-ios-profile"
-            >
-              Download iOS Profile
-            </Button>
-            {certInfo?.available ? (
-              <Row gutter={[16, 16]} data-testid="settings-mobile-ios-profile-qr-list">
-                {(certInfo.local_ips.length > 0 ? certInfo.local_ips : [""]).map((ip, index) => (
-                  <Col key={ip || index}>
-                    <div style={{ textAlign: "center", width: 180 }}>
-                      <Space direction="vertical" size={2} style={{ marginBottom: 8 }}>
-                        <Text strong style={{ fontSize: 12 }}>
-                          Install Bifrost CA profile
-                        </Text>
-                        <Text type="secondary" style={{ fontSize: 12 }}>
-                          Scan this QR to download the certificate profile.
-                        </Text>
-                      </Space>
+                  }
+                  data-testid="settings-mobile-ios-install-session"
+                />
+              ) : null}
+              <Divider style={{ margin: "4px 0" }} />
+              <Alert
+                type="warning"
+                showIcon
+                message={t("settings.cert.manualTitle")}
+                description={t("settings.cert.manualDescription")}
+              />
+              <Row
+                gutter={[12, 12]}
+                data-testid="settings-mobile-ios-qr-delivery-guide"
+              >
+                {IOS_QR_DELIVERY_STEPS.map((step) => (
+                  <Col xs={24} sm={12} key={step.key}>
+                    <figure
+                      style={{
+                        margin: 0,
+                        border: `1px solid ${token.colorBorderSecondary}`,
+                        borderRadius: token.borderRadius,
+                        padding: 8,
+                        background: token.colorBgContainer,
+                        height: "100%",
+                      }}
+                      data-testid={`settings-mobile-ios-step-${step.key}`}
+                    >
                       <Image
-                        src={getIosMobileConfigQRCodeUrl(ip || undefined)}
-                        alt={`iOS Profile QR Code - ${ip || "current host"}`}
-                        width={120}
-                        height={120}
+                        src={step.image}
+                        alt={`${step.key}: ${t(step.titleKey)}`}
+                        width="100%"
+                        height={260}
+                        style={{
+                          objectFit: "contain",
+                          background: token.colorFillAlter,
+                          borderRadius: token.borderRadiusSM,
+                        }}
                         preview={{
                           mask: <QrcodeOutlined style={{ fontSize: 20 }} />,
                         }}
-                        fallback="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mN8/+F9PQAJpAN4pokyXwAAAABJRU5ErkJggg=="
-                        data-testid={
-                          index === 0
-                            ? "settings-mobile-ios-qrcode"
-                            : `settings-mobile-ios-qrcode-${ip}`
-                        }
                       />
-                      {ip ? (
-                        <div style={{ marginTop: 4 }}>
-                          <Text type="secondary" style={{ fontSize: 12 }}>
-                            Certificate profile from {ip}
+                      <figcaption style={{ marginTop: 8 }}>
+                        <Space direction="vertical" size={2}>
+                          <Text strong style={{ fontSize: 12 }}>
+                            {step.key}: {t(step.titleKey)}
                           </Text>
-                        </div>
-                      ) : null}
-                    </div>
+                          <Text type="secondary" style={{ fontSize: 12 }}>
+                            {t(step.descriptionKey)}
+                          </Text>
+                        </Space>
+                      </figcaption>
+                    </figure>
                   </Col>
                 ))}
               </Row>
-            ) : null}
-            <Divider style={{ margin: "4px 0" }} />
-            <div data-testid="settings-mobile-ios-manual-guide">
-              <Space direction="vertical" size={8} style={{ width: "100%" }}>
-                <Text strong>2. Finish the shared iOS Settings steps</Text>
-                <Row gutter={[12, 12]}>
-                  {IOS_INSTALL_STEPS.map((step) => (
-                    <Col xs={24} sm={12} xl={8} key={step.key}>
-                      <figure
-                        style={{
-                          margin: 0,
-                          border: `1px solid ${token.colorBorderSecondary}`,
-                          borderRadius: token.borderRadius,
-                          padding: 8,
-                          background: token.colorBgContainer,
-                          height: "100%",
-                        }}
-                        data-testid={`settings-mobile-ios-step-${step.key}`}
-                      >
+              <Button
+                icon={<DownloadOutlined />}
+                href={getIosMobileConfigUrl()}
+                download="bifrost-ca.mobileconfig"
+                disabled={!certInfo?.available}
+                data-testid="settings-mobile-ios-profile"
+              >
+                {t("settings.cert.downloadIosProfile")}
+              </Button>
+              {certInfo?.available ? (
+                <Row
+                  gutter={[16, 16]}
+                  data-testid="settings-mobile-ios-profile-qr-list"
+                >
+                  {(certInfo.local_ips.length > 0
+                    ? certInfo.local_ips
+                    : [""]
+                  ).map((ip, index) => (
+                    <Col key={ip || index}>
+                      <div style={{ textAlign: "center", width: 180 }}>
+                        <Space
+                          direction="vertical"
+                          size={2}
+                          style={{ marginBottom: 8 }}
+                        >
+                          <Text strong style={{ fontSize: 12 }}>
+                            {t("settings.cert.qrInstallProfile")}
+                          </Text>
+                          <Text type="secondary" style={{ fontSize: 12 }}>
+                            {t("settings.cert.qrScanHint")}
+                          </Text>
+                        </Space>
                         <Image
-                          src={step.image}
-                          alt={`${step.key}: ${step.title}`}
-                          width="100%"
-                          height={260}
-                          style={{
-                            objectFit: "contain",
-                            background: token.colorFillAlter,
-                            borderRadius: token.borderRadiusSM,
-                          }}
+                          src={getIosMobileConfigQRCodeUrl(ip || undefined)}
+                          alt={t("settings.cert.iosProfileQrAlt", {
+                            host: ip || t("settings.cert.currentHost"),
+                          })}
+                          width={120}
+                          height={120}
                           preview={{
                             mask: <QrcodeOutlined style={{ fontSize: 20 }} />,
                           }}
+                          fallback="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mN8/+F9PQAJpAN4pokyXwAAAABJRU5ErkJggg=="
+                          data-testid={
+                            index === 0
+                              ? "settings-mobile-ios-qrcode"
+                              : `settings-mobile-ios-qrcode-${ip}`
+                          }
                         />
-                        <figcaption style={{ marginTop: 8 }}>
-                          <Space direction="vertical" size={2}>
-                            <Text strong style={{ fontSize: 12 }}>
-                              {step.key}: {step.title}
-                            </Text>
+                        {ip ? (
+                          <div style={{ marginTop: 4 }}>
                             <Text type="secondary" style={{ fontSize: 12 }}>
-                              {step.description}
+                              {t("settings.cert.profileFrom", { ip })}
                             </Text>
-                          </Space>
-                        </figcaption>
-                      </figure>
+                          </div>
+                        ) : null}
+                      </div>
                     </Col>
                   ))}
                 </Row>
-              </Space>
-            </div>
-          </Space>
-        </Card>
-
-        <Card
-          id="certificate-mobile-android"
-          title={
-            <Space>
-              <AndroidOutlined />
-              <span>Android Mobile Installation</span>
-            </Space>
-          }
-          size="small"
-        >
-          <Space direction="vertical" style={{ width: "100%" }} size="middle">
-            <Alert
-              type="info"
-              showIcon
-              icon={<MobileOutlined />}
-              message="Android uses USB guided install"
-              description="Bifrost can detect ADB devices, push the CA file, and open the Android installer or security settings. The phone still needs user confirmation, and many Android 7+ apps only trust user CAs when their Network Security Config allows it."
-            />
-            <Button
-              icon={<ReloadOutlined />}
-              onClick={() => void loadMobileDevices(true)}
-              loading={loadingDevices}
-              data-testid="settings-mobile-detect-android"
-            >
-              Detect Devices
-            </Button>
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              {mobileInfo?.android.message ??
-                "Use ADB to detect USB Android devices and open the certificate installer."}
-            </Text>
-            <List
-              size="small"
-              locale={{ emptyText: "No Android USB devices detected" }}
-              dataSource={mobileInfo?.android.devices ?? []}
-              renderItem={(device) => {
-                const highlighted = isHighlightedDevice(device.id, "android");
-                return (
-                  <List.Item
-                    className={highlighted ? "mobile-device-target-card" : undefined}
-                    data-mobile-device-id={device.id}
-                    data-mobile-device-platform="android"
-                    style={highlighted ? highlightedDeviceStyle : undefined}
-                  >
-                    <Space direction="vertical" size="small" style={{ width: "100%" }}>
-                      <List.Item.Meta
-                        title={
-                          <Space wrap>
-                            <Text>{mobileDeviceTitle(device)}</Text>
-                            <Tag
-                              color={
-                                device.status === "connected"
-                                  ? "green"
-                                  : device.status === "unauthorized"
-                                    ? "orange"
-                                    : "default"
-                              }
-                            >
-                              {device.status}
-                            </Tag>
-                            {device.certificate_status ? (
-                              <Tag color={certificateStateColor(device.certificate_status.state)}>
-                                {certificateStateLabel(device.certificate_status.state)}
-                              </Tag>
-                            ) : null}
-                          </Space>
-                        }
-                        description={mobileDeviceDescription(device)}
-                      />
-                      <div style={{ width: "100%", maxWidth: 260 }}>
-                        <Tooltip
-                          title={
-                            device.status === "connected"
-                              ? "Push CA and open Android installer"
-                              : "Resolve the device status before installation"
-                          }
+              ) : null}
+              <Divider style={{ margin: "4px 0" }} />
+              <div data-testid="settings-mobile-ios-manual-guide">
+                <Space direction="vertical" size={8} style={{ width: "100%" }}>
+                  <Text strong>{t("settings.cert.iosStepFinish")}</Text>
+                  <Row gutter={[12, 12]}>
+                    {IOS_INSTALL_STEPS.map((step) => (
+                      <Col xs={24} sm={12} xl={8} key={step.key}>
+                        <figure
+                          style={{
+                            margin: 0,
+                            border: `1px solid ${token.colorBorderSecondary}`,
+                            borderRadius: token.borderRadius,
+                            padding: 8,
+                            background: token.colorBgContainer,
+                            height: "100%",
+                          }}
+                          data-testid={`settings-mobile-ios-step-${step.key}`}
                         >
-                          <Button
-                            icon={<SendOutlined />}
-                            size="small"
-                            className={highlighted ? "mobile-device-install-cta-pulse" : undefined}
-                            disabled={!certInfo?.available || device.status !== "connected"}
-                            loading={installingDeviceId === device.id}
-                            onClick={() => void handleInstallAndroid(device.id)}
-                            data-mobile-install-cta="true"
-                            data-testid="settings-mobile-install-android"
-                            style={{ width: "100%" }}
-                          >
-                            Install
-                          </Button>
-                        </Tooltip>
-                      </div>
-                    </Space>
-                  </List.Item>
-                );
-              }}
-            />
-            {installSession?.platform === "android" ? (
-              <Alert
-                type={installSession.completed ? "success" : "warning"}
-                showIcon
-                message={installSession.summary}
-                description={
-                  <List
-                    size="small"
-                    dataSource={installSession.steps}
-                    renderItem={(step) => (
-                      <List.Item>
-                        <Space>
-                          {step.success ? <CheckOutlined /> : <ExclamationCircleOutlined />}
-                          <Text>{step.name}</Text>
-                          <Text type="secondary">{step.message}</Text>
-                        </Space>
-                      </List.Item>
-                    )}
-                  />
-                }
-                data-testid="settings-mobile-install-session"
-              />
-            ) : null}
-          </Space>
-        </Card>
-
-        <Card
-          id="certificate-downloads"
-          title={
-            <Space>
-              <QrcodeOutlined />
-              <span>Certificate Downloads and QR Codes</span>
-            </Space>
-          }
-          size="small"
-        >
-          <Space direction="vertical" style={{ width: "100%" }} size="middle">
-            <Button
-              type="primary"
-              icon={<DownloadOutlined />}
-              href={getCertDownloadUrl()}
-              download="bifrost-ca.crt"
-              disabled={!certInfo?.available}
-              data-testid="settings-certificate-download"
-            >
-              Download CA Certificate
-            </Button>
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              {certInfo?.available
-                ? "Download the CA certificate file and install it as a trusted root CA on devices that support manual CA installation."
-                : "The CA certificate file is not available yet, so it cannot be downloaded or trusted on this device."}
-            </Text>
-            {certInfo?.available && certInfo.download_urls.length > 0 ? (
-              <>
-                <Text type="secondary" style={{ fontSize: 12 }}>
-                  Certificate file QR codes remain available for manual installation.
-                </Text>
-                <Row gutter={[16, 16]} justify="start">
-                  {certInfo.download_urls.map((url, index) => {
-                    const ip = certInfo.local_ips[index] || "";
-                    return (
-                      <Col key={ip || index}>
-                        <div style={{ textAlign: "center" }}>
                           <Image
-                            src={getCertQRCodeUrl(ip || undefined)}
-                            alt={`Certificate QR Code - ${ip}`}
-                            width={120}
-                            height={120}
+                            src={step.image}
+                            alt={`${step.key}: ${t(step.titleKey)}`}
+                            width="100%"
+                            height={260}
+                            style={{
+                              objectFit: "contain",
+                              background: token.colorFillAlter,
+                              borderRadius: token.borderRadiusSM,
+                            }}
                             preview={{
                               mask: <QrcodeOutlined style={{ fontSize: 20 }} />,
                             }}
-                            fallback="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mN8/+F9PQAJpAN4pokyXwAAAABJRU5ErkJggg=="
-                            data-testid={
-                              index === 0
-                                ? "settings-certificate-qrcode"
-                                : `settings-certificate-qrcode-${ip}`
-                            }
                           />
-                          <div style={{ marginTop: 4 }}>
-                            <a
-                              href={url}
-                              target="_blank"
-                              rel="noreferrer"
-                              style={{ fontSize: 12 }}
-                            >
-                              {url}
-                            </a>
-                          </div>
-                        </div>
+                          <figcaption style={{ marginTop: 8 }}>
+                            <Space direction="vertical" size={2}>
+                              <Text strong style={{ fontSize: 12 }}>
+                                {step.key}: {t(step.titleKey)}
+                              </Text>
+                              <Text type="secondary" style={{ fontSize: 12 }}>
+                                {t(step.descriptionKey)}
+                              </Text>
+                            </Space>
+                          </figcaption>
+                        </figure>
                       </Col>
-                    );
-                  })}
-                </Row>
-              </>
-            ) : (
-              <Text type="secondary">
-                {certInfo?.available ? "No download URLs available" : "QR code not available"}
+                    ))}
+                  </Row>
+                </Space>
+              </div>
+            </Space>
+          </Card>
+
+          <Card
+            id="certificate-mobile-android"
+            title={
+              <Space>
+                <AndroidOutlined />
+                <span>{t("settings.cert.androidTitle")}</span>
+              </Space>
+            }
+            size="small"
+          >
+            <Space direction="vertical" style={{ width: "100%" }} size="middle">
+              <Alert
+                type="info"
+                showIcon
+                icon={<MobileOutlined />}
+                message={t("settings.cert.androidFlowTitle")}
+                description={t("settings.cert.androidFlowDescription")}
+              />
+              <Button
+                icon={<ReloadOutlined />}
+                onClick={() => void loadMobileDevices(true)}
+                loading={loadingDevices}
+                data-testid="settings-mobile-detect-android"
+              >
+                {t("settings.cert.detectDevices")}
+              </Button>
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                {bm(mobileInfo?.android.message) ??
+                  t("settings.cert.androidDevicesHint")}
               </Text>
-            )}
-          </Space>
-        </Card>
-        <div aria-hidden="true" style={{ height: "50vh", minHeight: 240 }} />
+              <List
+                size="small"
+                locale={{ emptyText: t("settings.cert.androidNoDevices") }}
+                dataSource={mobileInfo?.android.devices ?? []}
+                renderItem={(device) => {
+                  const highlighted = isHighlightedDevice(device.id, "android");
+                  return (
+                    <List.Item
+                      className={
+                        highlighted ? "mobile-device-target-card" : undefined
+                      }
+                      data-mobile-device-id={device.id}
+                      data-mobile-device-platform="android"
+                      style={highlighted ? highlightedDeviceStyle : undefined}
+                    >
+                      <Space
+                        direction="vertical"
+                        size="small"
+                        style={{ width: "100%" }}
+                      >
+                        <List.Item.Meta
+                          title={
+                            <Space wrap>
+                              <Text>{mobileDeviceTitle(device)}</Text>
+                              <Tag
+                                color={
+                                  device.status === "connected"
+                                    ? "green"
+                                    : device.status === "unauthorized"
+                                      ? "orange"
+                                      : "default"
+                                }
+                              >
+                                {device.status}
+                              </Tag>
+                              {device.certificate_status ? (
+                                <Tag
+                                  color={certificateStateColor(
+                                    device.certificate_status.state,
+                                  )}
+                                >
+                                  {certificateStateLabel(
+                                    device.certificate_status.state,
+                                    t,
+                                  )}
+                                </Tag>
+                              ) : null}
+                            </Space>
+                          }
+                          description={mobileDeviceDescription(device)}
+                        />
+                        <div style={{ width: "100%", maxWidth: 260 }}>
+                          <Tooltip
+                            title={
+                              device.status === "connected"
+                                ? t("settings.cert.androidInstallTooltip")
+                                : t("settings.cert.androidResolveStatus")
+                            }
+                          >
+                            <Button
+                              icon={<SendOutlined />}
+                              size="small"
+                              className={
+                                highlighted
+                                  ? "mobile-device-install-cta-pulse"
+                                  : undefined
+                              }
+                              disabled={
+                                !certInfo?.available ||
+                                device.status !== "connected"
+                              }
+                              loading={installingDeviceId === device.id}
+                              onClick={() =>
+                                void handleInstallAndroid(device.id)
+                              }
+                              data-mobile-install-cta="true"
+                              data-testid="settings-mobile-install-android"
+                              style={{ width: "100%" }}
+                            >
+                              {t("settings.cert.install")}
+                            </Button>
+                          </Tooltip>
+                        </div>
+                      </Space>
+                    </List.Item>
+                  );
+                }}
+              />
+              {installSession?.platform === "android" ? (
+                <Alert
+                  type={installSession.completed ? "success" : "warning"}
+                  showIcon
+                  message={bm(installSession.summary)}
+                  description={
+                    <List
+                      size="small"
+                      dataSource={installSession.steps}
+                      renderItem={(step) => (
+                        <List.Item>
+                          <Space>
+                            {step.success ? (
+                              <CheckOutlined />
+                            ) : (
+                              <ExclamationCircleOutlined />
+                            )}
+                            <Text>{step.name}</Text>
+                            <Text type="secondary">{bm(step.message)}</Text>
+                          </Space>
+                        </List.Item>
+                      )}
+                    />
+                  }
+                  data-testid="settings-mobile-install-session"
+                />
+              ) : null}
+            </Space>
+          </Card>
+
+          <Card
+            id="certificate-downloads"
+            title={
+              <Space>
+                <QrcodeOutlined />
+                <span>{t("settings.cert.downloadsTitle")}</span>
+              </Space>
+            }
+            size="small"
+          >
+            <Space direction="vertical" style={{ width: "100%" }} size="middle">
+              <Button
+                type="primary"
+                icon={<DownloadOutlined />}
+                href={getCertDownloadUrl()}
+                download="bifrost-ca.crt"
+                disabled={!certInfo?.available}
+                data-testid="settings-certificate-download"
+              >
+                {t("settings.cert.downloadCa")}
+              </Button>
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                {certInfo?.available
+                  ? t("settings.cert.downloadHint")
+                  : t("settings.cert.downloadUnavailable")}
+              </Text>
+              {certInfo?.available && certInfo.download_urls.length > 0 ? (
+                <>
+                  <Text type="secondary" style={{ fontSize: 12 }}>
+                    {t("settings.cert.qrRemainHint")}
+                  </Text>
+                  <Row gutter={[16, 16]} justify="start">
+                    {certInfo.download_urls.map((url, index) => {
+                      const ip = certInfo.local_ips[index] || "";
+                      return (
+                        <Col key={ip || index}>
+                          <div style={{ textAlign: "center" }}>
+                            <Image
+                              src={getCertQRCodeUrl(ip || undefined)}
+                              alt={t("settings.cert.certQrAlt", { ip })}
+                              width={120}
+                              height={120}
+                              preview={{
+                                mask: (
+                                  <QrcodeOutlined style={{ fontSize: 20 }} />
+                                ),
+                              }}
+                              fallback="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mN8/+F9PQAJpAN4pokyXwAAAABJRU5ErkJggg=="
+                              data-testid={
+                                index === 0
+                                  ? "settings-certificate-qrcode"
+                                  : `settings-certificate-qrcode-${ip}`
+                              }
+                            />
+                            <div style={{ marginTop: 4 }}>
+                              <a
+                                href={url}
+                                target="_blank"
+                                rel="noreferrer"
+                                style={{ fontSize: 12 }}
+                              >
+                                {url}
+                              </a>
+                            </div>
+                          </div>
+                        </Col>
+                      );
+                    })}
+                  </Row>
+                </>
+              ) : (
+                <Text type="secondary">
+                  {certInfo?.available
+                    ? t("settings.cert.noDownloadUrls")
+                    : t("settings.cert.qrUnavailable")}
+                </Text>
+              )}
+            </Space>
+          </Card>
+          <div aria-hidden="true" style={{ height: "50vh", minHeight: 240 }} />
         </Space>
       </Col>
     </Row>

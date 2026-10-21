@@ -19,21 +19,23 @@ import {
   WarningOutlined,
 } from "@ant-design/icons";
 import { usePendingAuthStore } from "../../stores/usePendingAuthStore";
+import { useI18n, type TFunction } from "../../i18n";
 
 const { Text } = Typography;
 
-function formatTimeAgo(timestamp: number) {
+function formatTimeAgo(t: TFunction, timestamp: number) {
   const now = Math.floor(Date.now() / 1000);
   const diff = now - timestamp;
-  if (diff < 60) return `${diff}s ago`;
-  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
-  return `${Math.floor(diff / 86400)}d ago`;
+  if (diff < 60) return t("app.timeAgo.seconds", { n: diff });
+  if (diff < 3600) return t("app.timeAgo.minutes", { n: Math.floor(diff / 60) });
+  if (diff < 86400) return t("app.timeAgo.hours", { n: Math.floor(diff / 3600) });
+  return t("app.timeAgo.days", { n: Math.floor(diff / 86400) });
 }
 
 export default function PendingAuthModal() {
   const navigate = useNavigate();
   const { token } = theme.useToken();
+  const { t } = useI18n();
   const pendingList = usePendingAuthStore((s) => s.pendingList);
   const pendingCount = usePendingAuthStore((s) => s.pendingCount);
   const approvePending = usePendingAuthStore((s) => s.approvePending);
@@ -66,12 +68,12 @@ export default function PendingAuthModal() {
       dismissCurrentPending();
       const ok = await approvePending(ip);
       if (ok) {
-        message.success(`Approved ${ip}`);
+        message.success(t("app.pendingAuth.approved", { ip }));
       } else {
-        message.error(`Failed to approve ${ip}`);
+        message.error(t("app.pendingAuth.approveFailed", { ip }));
       }
     },
-    [approvePending, dismissCurrentPending],
+    [approvePending, dismissCurrentPending, t],
   );
 
   const handleReject = useCallback(
@@ -79,23 +81,23 @@ export default function PendingAuthModal() {
       dismissCurrentPending();
       const ok = await rejectPending(ip);
       if (ok) {
-        message.success(`Rejected ${ip}`);
+        message.success(t("app.pendingAuth.rejected", { ip }));
       } else {
-        message.error(`Failed to reject ${ip}`);
+        message.error(t("app.pendingAuth.rejectFailed", { ip }));
       }
     },
-    [rejectPending, dismissCurrentPending],
+    [rejectPending, dismissCurrentPending, t],
   );
 
   const handleClearAll = useCallback(async () => {
     dismissCurrentPending();
     const ok = await clearPending();
     if (ok) {
-      message.success("Cleared all pending authorizations");
+      message.success(t("app.pendingAuth.cleared"));
     } else {
-      message.error("Failed to clear pending authorizations");
+      message.error(t("app.pendingAuth.clearFailed"));
     }
-  }, [clearPending, dismissCurrentPending]);
+  }, [clearPending, dismissCurrentPending, t]);
 
   const handleOpenAccessControl = useCallback(() => {
     dismissCurrentPending();
@@ -108,7 +110,7 @@ export default function PendingAuthModal() {
       title={
         <Space>
           <WarningOutlined style={{ color: token.colorWarning }} />
-          <span>Pending Authorization Requests</span>
+          <span>{t("app.pendingAuth.title")}</span>
           <Badge
             count={pendingCount}
             style={{ backgroundColor: token.colorWarning }}
@@ -122,21 +124,21 @@ export default function PendingAuthModal() {
             onClick={handleOpenAccessControl}
             data-testid="pending-auth-modal-settings"
           >
-            Settings
+            {t("common.settings")}
           </Button>
           {pendingList.length > 0 && (
             <Popconfirm
-              title="Clear all pending authorizations?"
-              description="This will reject all pending requests."
+              title={t("app.pendingAuth.clearConfirmTitle")}
+              description={t("app.pendingAuth.clearConfirmDescription")}
               onConfirm={handleClearAll}
-              okText="Yes"
-              cancelText="No"
+              okText={t("common.yes")}
+              cancelText={t("common.no")}
             >
               <Button
                 icon={<ClearOutlined />}
                 data-testid="pending-auth-modal-clear-all"
               >
-                Clear All
+                {t("app.pending.clearAll")}
               </Button>
             </Popconfirm>
           )}
@@ -153,12 +155,12 @@ export default function PendingAuthModal() {
     >
       <div data-testid="pending-auth-modal-content">
         <Text type="secondary" style={{ display: "block", marginBottom: 12 }}>
-          The following devices are requesting proxy access. Allow trusted devices only.
+          {t("app.pendingAuth.description")}
         </Text>
         <List
           size="small"
           dataSource={pendingList}
-          locale={{ emptyText: "No pending requests" }}
+          locale={{ emptyText: t("app.pairing.noPendingRequests") }}
           renderItem={(item) => (
             <List.Item
               actions={[
@@ -170,7 +172,7 @@ export default function PendingAuthModal() {
                   onClick={() => handleApprove(item.ip)}
                   data-testid={`pending-auth-approve-${item.ip}`}
                 >
-                  Allow
+                  {t("app.pendingAuth.allow")}
                 </Button>,
                 <Button
                   key="reject"
@@ -180,7 +182,7 @@ export default function PendingAuthModal() {
                   onClick={() => handleReject(item.ip)}
                   data-testid={`pending-auth-reject-${item.ip}`}
                 >
-                  Deny
+                  {t("app.pendingAuth.deny")}
                 </Button>,
               ]}
             >
@@ -188,8 +190,10 @@ export default function PendingAuthModal() {
                 title={<Text code>{item.ip}</Text>}
                 description={
                   <Text type="secondary">
-                    First seen: {formatTimeAgo(item.first_seen)} · Attempts:{" "}
-                    {item.attempt_count}
+                    {t("app.pending.firstSeenAttempts", {
+                      time: formatTimeAgo(t, item.first_seen),
+                      count: item.attempt_count,
+                    })}
                   </Text>
                 }
               />

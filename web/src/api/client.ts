@@ -15,6 +15,7 @@ import {
   isInvalidAdminCsrfMessage,
   isUnsafeHttpMethod,
 } from './csrf';
+import { t } from '../i18n';
 
 const client = axios.create({
   timeout: 30000,
@@ -77,7 +78,7 @@ export function getApiErrorPayload(error: unknown): ApiErrorPayload {
   return {
     kind: isConnectionIssue ? 'connection' : 'business',
     message: isConnectionIssue
-      ? 'Bifrost core is starting. Reconnecting the interface...'
+      ? t('shared.core.starting')
       : extractErrorMessage(error),
     status,
   };
@@ -96,7 +97,7 @@ export function isNotFoundError(error: unknown): boolean {
 
 export function normalizeApiErrorMessage(
   error: unknown,
-  fallback = 'Request failed',
+  fallback = t('shared.request.failed'),
 ): string {
   const payload = getApiErrorPayload(error);
   return payload.message || fallback;
@@ -104,7 +105,7 @@ export function normalizeApiErrorMessage(
 
 export function notifyApiBusinessError(
   error: unknown,
-  fallback = 'Request failed',
+  fallback = t('shared.request.failed'),
 ): void {
   const payload = getApiErrorPayload(error);
   if (payload.kind === 'connection') {

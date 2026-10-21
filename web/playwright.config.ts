@@ -26,6 +26,21 @@ export default defineConfig({
   },
   use: {
     baseURL: `http://127.0.0.1:${serveBuiltFrontend ? backendPort : webPort}`,
+    // UI specs assert the English copy; the app defaults to zh-CN.
+    storageState: {
+      cookies: [],
+      origins: [
+        {
+          origin: `http://127.0.0.1:${serveBuiltFrontend ? backendPort : webPort}`,
+          localStorage: [
+            {
+              name: "bifrost-locale",
+              value: JSON.stringify({ state: { locale: "en" }, version: 0 }),
+            },
+          ],
+        },
+      ],
+    },
     trace: "retain-on-failure",
     screenshot: "only-on-failure",
     video: "retain-on-failure",

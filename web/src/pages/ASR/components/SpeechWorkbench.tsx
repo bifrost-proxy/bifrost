@@ -27,6 +27,7 @@ import type {
   SpeechPipelinesStatus,
   VoiceRealtimeTranscriptSegment,
 } from "../../../api/asr";
+import { t as translate, useI18n } from "../../../i18n";
 import type { WorkState } from "../asrUtils";
 
 const { Text, Paragraph } = Typography;
@@ -92,6 +93,7 @@ export default function SpeechWorkbench({
   onStopService,
   onCancel,
 }: SpeechWorkbenchProps) {
+  const { t } = useI18n();
   const liveTimelineRows = partialRealtimeSegment
     ? [...realtimeSegments, partialRealtimeSegment]
     : realtimeSegments;
@@ -102,24 +104,24 @@ export default function SpeechWorkbench({
       title={
         <Space>
           <AudioOutlined />
-          <span>Speech to Text</span>
+          <span>{t("asr.workbench.title")}</span>
           {status?.installed ? (
-            ready ? <Tag color="success">Service Running</Tag> : <Tag color="processing">Model Installed</Tag>
+            ready ? <Tag color="success">{t("asr.workbench.serviceRunning")}</Tag> : <Tag color="processing">{t("asr.workbench.modelInstalled")}</Tag>
           ) : (
-            <Tag color="warning">Not Installed</Tag>
+            <Tag color="warning">{t("asr.workbench.notInstalled")}</Tag>
           )}
         </Space>
       }
     >
       <Space direction="vertical" size={16} style={{ width: "100%" }}>
-        <section aria-label="Workbench ASR Service">
+        <section aria-label={t("asr.workbench.serviceAria")}>
           <Space style={{ marginBottom: 12 }}>
             <AudioOutlined />
-            <Text strong>Workbench Model and Service</Text>
+            <Text strong>{t("asr.workbench.modelAndService")}</Text>
           </Space>
           <Space wrap style={{ width: "100%" }}>
             <Select
-              aria-label="Workbench ASR model"
+              aria-label={t("asr.workbench.modelAria")}
               value={params.model || "Qwen3-ASR-0.6B"}
               style={{ minWidth: 180 }}
               options={[
@@ -129,20 +131,20 @@ export default function SpeechWorkbench({
               onChange={(model) => onParamsChange((previous) => ({ ...previous, model }))}
             />
             <Select
-              aria-label="Workbench ASR language"
+              aria-label={t("asr.workbench.languageAria")}
               value={params.language || "chinese"}
               style={{ minWidth: 140 }}
               options={[
-                { value: "chinese", label: "Chinese" },
-                { value: "english", label: "English" },
-                { value: "auto", label: "Auto" },
+                { value: "chinese", label: t("asr.language.chinese") },
+                { value: "english", label: t("asr.language.english") },
+                { value: "auto", label: t("asr.language.auto") },
               ]}
               onChange={(language) =>
                 onParamsChange((previous) => ({ ...previous, language }))
               }
             />
             <Input
-              aria-label="Workbench ASR host"
+              aria-label={t("asr.workbench.hostAria")}
               value={params.host || "127.0.0.1"}
               style={{ width: 150 }}
               onChange={(event) =>
@@ -150,37 +152,43 @@ export default function SpeechWorkbench({
               }
             />
             <Button type="primary" loading={serviceBusy} onClick={onStartService}>
-              Start Service
+              {t("asr.workbench.startService")}
             </Button>
             <Button danger loading={serviceBusy} disabled={!status?.managed} onClick={onStopService}>
-              Stop Service
+              {t("asr.workbench.stopService")}
             </Button>
             {status?.server_url ? <Tag>{status.server_url}</Tag> : null}
           </Space>
           <Space wrap style={{ marginTop: 8 }}>
             <Tag color={speechStatus?.runtime.realtime_voice_active ? "processing" : "default"}>
-              Realtime {speechStatus?.runtime.realtime_voice_active ? "active" : "idle"}
+              {speechStatus?.runtime.realtime_voice_active
+                ? t("asr.workbench.realtimeActive")
+                : t("asr.workbench.realtimeIdle")}
             </Tag>
             <Tag color={speechStatus?.runtime.offline_asr_active ? "processing" : "default"}>
-              Offline {speechStatus?.runtime.offline_asr_active ? "running" : "idle"}
+              {speechStatus?.runtime.offline_asr_active
+                ? t("asr.workbench.offlineRunning")
+                : t("asr.workbench.offlineIdle")}
             </Tag>
             <Tag color={speechStatus?.runtime.diarization_ready ? "success" : "warning"}>
-              Diarization {speechStatus?.runtime.diarization_ready ? "ready" : "not ready"}
+              {speechStatus?.runtime.diarization_ready
+                ? t("asr.workbench.diarizationReady")
+                : t("asr.workbench.diarizationNotReady")}
             </Tag>
           </Space>
         </section>
 
-        <section aria-label="Audio Input">
+        <section aria-label={t("asr.workbench.audioInput")}>
           <Space style={{ marginBottom: 12 }}>
             <AudioOutlined />
-            <Text strong>Audio Input</Text>
+            <Text strong>{t("asr.workbench.audioInput")}</Text>
           </Space>
           {!status?.installed ? (
             <Alert
               type="warning"
               showIcon
-              message="ASR model not installed"
-              description="Initialize Qwen3-ASR from AI > Tools > ASR before using speech features."
+              message={t("asr.workbench.modelNotInstalled")}
+              description={t("asr.workbench.modelNotInstalledDesc")}
               style={{ marginBottom: 16 }}
             />
           ) : null}
@@ -217,11 +225,11 @@ export default function SpeechWorkbench({
           >
             <InboxOutlined style={{ fontSize: 32, color: ready ? token.colorPrimary : token.colorTextDisabled }} />
             {ready ? (
-              <Text>Drop an audio file here</Text>
+              <Text>{t("asr.workbench.dropAudio")}</Text>
             ) : (
-              <Text type="secondary">Start ASR Service above before uploading files</Text>
+              <Text type="secondary">{t("asr.workbench.startServiceFirst")}</Text>
             )}
-            <Button icon={<UploadOutlined />} disabled={!ready}>Choose File</Button>
+            <Button icon={<UploadOutlined />} disabled={!ready}>{t("asr.workbench.chooseFile")}</Button>
             <input
               ref={fileInputRef}
               type="file"
@@ -240,7 +248,7 @@ export default function SpeechWorkbench({
           <Space style={{ marginTop: 16 }} wrap>
             {workState === "recording" ? (
               <Button danger icon={<StopOutlined />} onClick={onStopRecording}>
-                Stop Mic
+                {t("asr.workbench.stopMic")}
               </Button>
             ) : (
               <Button
@@ -249,16 +257,16 @@ export default function SpeechWorkbench({
                 onClick={onStartRecording}
                 disabled={!status?.installed || workState === "transcribing"}
               >
-                Start Mic
+                {t("asr.workbench.startMic")}
               </Button>
             )}
             <Button onClick={onCancel} disabled={!busy}>
-              Cancel
+              {t("common.cancel")}
             </Button>
           </Space>
 
           <div
-            aria-label="Microphone input level"
+            aria-label={t("asr.workbench.micLevelAria")}
             style={{
               marginTop: 16,
               minHeight: 76,
@@ -307,14 +315,16 @@ export default function SpeechWorkbench({
                 fontSize: 12,
               }}
             >
-              <span>{workState === "recording" ? "Live microphone level" : "Mic level"}</span>
+              <span>{workState === "recording"
+                  ? t("asr.workbench.liveMicLevel")
+                  : t("asr.workbench.micLevel")}</span>
               <span>{Math.round(micPeak * 100)}%</span>
             </div>
           </div>
 
           {showFileProgress ? (
             <div
-              aria-label="File transcription progress"
+              aria-label={t("asr.workbench.fileProgressAria")}
               data-testid="asr-file-progress"
               style={{ marginTop: 16 }}
             >
@@ -333,8 +343,8 @@ export default function SpeechWorkbench({
               <Text type="secondary">
                 {workState === "transcribing"
                   ? offlineJob
-                    ? `Offline subtitle job ${offlineJob.status}`
-                    : "Offline subtitle job starting"
+                    ? t("asr.workbench.offlineJobStatus", { status: offlineJob.status })
+                    : t("asr.workbench.offlineJobStarting")
                   : selectedName}
               </Text>
             </div>
@@ -342,7 +352,7 @@ export default function SpeechWorkbench({
         </section>
 
         <section
-          aria-label="Transcript"
+          aria-label={t("asr.workbench.transcript")}
           style={{
             borderTop: `1px solid ${token.colorBorderSecondary}`,
             paddingTop: 16,
@@ -350,13 +360,13 @@ export default function SpeechWorkbench({
         >
           <Space style={{ marginBottom: 12 }}>
             {workState === "transcribing" ? <LoadingOutlined /> : <AudioOutlined />}
-            <Text strong>Transcript</Text>
+            <Text strong>{t("asr.workbench.transcript")}</Text>
           </Space>
           {errorText ? (
             <Alert
               type="error"
               showIcon
-              message="Transcription failed"
+              message={t("asr.workbench.transcriptionFailed")}
               description={errorText}
               style={{ marginBottom: 16, whiteSpace: "pre-wrap" }}
             />
@@ -372,13 +382,18 @@ export default function SpeechWorkbench({
               color: token.colorText,
             }}
           >
-            {transcript || "Waiting for transcription text."}
+            {transcript || t("asr.workbench.waitingTranscript")}
           </Paragraph>
           {liveTimelineRows.length > 0 ? (
             <div style={{ marginBottom: 12 }}>
               <Space style={{ marginBottom: 8 }}>
-                <Text strong>Live Timeline</Text>
-                <Tag>{new Set(liveTimelineRows.map((row) => row.speaker).filter(Boolean)).size || 1} speakers</Tag>
+                <Text strong>{t("asr.workbench.liveTimeline")}</Text>
+                <Tag>
+                  {t("asr.workbench.speakerCount", {
+                    count:
+                      new Set(liveTimelineRows.map((row) => row.speaker).filter(Boolean)).size || 1,
+                  })}
+                </Tag>
                 <Button
                   size="small"
                   icon={<DownloadOutlined />}
@@ -420,7 +435,7 @@ export default function SpeechWorkbench({
                 </Button>
               </Space>
               <div
-                aria-label="Realtime speaker timeline"
+                aria-label={t("asr.workbench.realtimeTimelineAria")}
                 style={{
                   border: `1px solid ${token.colorBorderSecondary}`,
                   borderRadius: 6,
@@ -443,7 +458,7 @@ export default function SpeechWorkbench({
                     <Text type="secondary">{formatRealtimeRange(segment)}</Text>
                     <Space size={4} wrap>
                       <Tag color={segment.speaker_profile_id ? "success" : "blue"}>
-                        {segment.speaker_display_name || segment.speaker || "Unknown"}
+                        {segment.speaker_display_name || segment.speaker || t("common.unknown")}
                       </Tag>
                       {segment.speaker_confidence !== undefined ? (
                         <Text type="secondary">{Math.round(segment.speaker_confidence * 100)}%</Text>
@@ -475,7 +490,7 @@ export default function SpeechWorkbench({
                     URL.revokeObjectURL(url);
                   }}
                 >
-                  Download {format}
+                  {t("asr.workbench.downloadFormat", { format })}
                 </Button>
               ))}
             </Space>
@@ -494,7 +509,7 @@ export default function SpeechWorkbench({
               whiteSpace: "pre-wrap",
             }}
           >
-            {events.length ? events.join("\n") : "No stream events yet."}
+            {events.length ? events.join("\n") : t("asr.workbench.noEvents")}
           </div>
         </section>
       </Space>
@@ -516,7 +531,7 @@ function renderRealtimeSegmentsAsText(segments: VoiceRealtimeTranscriptSegment[]
   return segments
     .map(
       (segment) =>
-        `[${formatRealtimeRange(segment)}] ${segment.speaker_display_name || segment.speaker || "Unknown"}: ${segment.text}`,
+        `[${formatRealtimeRange(segment)}] ${segment.speaker_display_name || segment.speaker || translate("common.unknown")}: ${segment.text}`,
     )
     .join("\n");
 }
@@ -527,7 +542,7 @@ function renderRealtimeSegmentsAsSrt(segments: VoiceRealtimeTranscriptSegment[])
       [
         String(index + 1),
         `${formatSrtTime(segment.start_ms || 0)} --> ${formatSrtTime(segment.end_ms || segment.start_ms || 0)}`,
-        `${segment.speaker_display_name || segment.speaker || "Unknown"}: ${segment.text}`,
+        `${segment.speaker_display_name || segment.speaker || translate("common.unknown")}: ${segment.text}`,
       ].join("\n"),
     )
     .join("\n\n");

@@ -1,0 +1,113 @@
+const en = {
+  // Page list
+  title: "DevTools",
+  subtitle: "Online pages that matched a devtools:// rule",
+  searchPages: "Search online pages",
+  refreshPages: "Refresh Pages",
+  noOnlinePages: "No online pages",
+  untitled: "(untitled)",
+  stateAttached: "Attached",
+  stateOnline: "Online",
+  controlEnabled: " · Control enabled",
+
+  // Detail header
+  trafficLink: "Traffic {id}",
+  copyUrl: "Copy URL",
+  copyTargetUrlAria: "Copy target URL",
+  copyFailed: "Failed to copy",
+  urlCopied: "URL copied",
+  copyUrlFailed: "Failed to copy URL",
+  inspectElement: "Select an element from the target page",
+  "search.elements": "Search Elements",
+  "search.network": "Search Network",
+  "search.cookies": "Search Cookies",
+  "search.localStorage": "Search LocalStorage",
+  "search.sessionStorage": "Search SessionStorage",
+  "search.console": "Search Console",
+
+  // Tabs
+  "tab.elements": "Elements",
+  "tab.network": "Network",
+  "tab.cookies": "Cookies",
+  "tab.localStorage": "LocalStorage",
+  "tab.sessionStorage": "SessionStorage",
+  "tab.console": "Console",
+
+  // Messages
+  refreshFailed: "Failed to refresh DevTools data",
+  bridgeDisconnected: "Target page DevTools bridge disconnected",
+  openSessionFailed: "Failed to open DevTools session",
+  highlightFailed: "Failed to highlight element",
+  pickerHint: "Click an element in the target page to select it",
+  pickerFailed: "Failed to start element picker",
+  storageKeyRequired: "Storage key is required",
+  storageUpdated: "Storage updated",
+  storageUpdateFailed: "Failed to update storage",
+  storageDeleted: "Storage deleted",
+  storageDeleteFailed: "Failed to delete storage",
+  trafficDetailNotFound:
+    "Traffic detail not found. It may have been deleted or captured only as a CONNECT tunnel.",
+  noMatchingTraffic:
+    "No matching Traffic record. It may have been deleted or captured only as a CONNECT tunnel.",
+  detailRequestReplaced: "Network detail request was replaced.",
+
+  // Network event detail
+  "network.selectRequest": "Select a network request",
+  "network.method": "Method",
+  "network.status": "Status",
+  "network.type": "Type",
+  "network.fromCache": "From Cache",
+  "network.yes": "yes",
+  "network.no": "no",
+  "network.host": "Host",
+  "network.path": "Path",
+  "network.protocol": "Protocol",
+  "network.clientRequestId": "Client Request ID",
+  "network.trafficId": "Traffic ID",
+  "network.trafficMatch": "Traffic Match",
+  "network.time": "Time",
+  "network.detailTitle": "Network Detail",
+  "network.query": "Query",
+  "network.requestHeaders": "Request Headers",
+  "network.responseHeaders": "Response Headers",
+  "network.noCapturedQuery": "No captured query",
+  "network.noCapturedRequestHeaders": "No captured request headers",
+  "network.noCapturedResponseHeaders": "No captured response headers",
+  "network.noEvents": "No network events yet",
+  "network.clientRequestTooltip": "DevTools client request id: {id}",
+  "network.capturedFromBridge": "Captured from target page bridge",
+  "network.clientPage": "page",
+
+  // Storage
+  "storage.noSnapshot": "No storage snapshot yet",
+  "storage.countOne": "{filtered} / {total} item",
+  "storage.countOther": "{filtered} / {total} items",
+  "storage.key": "Key",
+  "storage.empty": "Empty",
+  "storage.deleteAria": "Delete {key}",
+  "storage.copyAria": "Copy {key}",
+  "storage.editAria": "Edit {key}",
+  "storage.saveAria": "Save storage",
+  "storage.cancelAria": "Cancel storage edit",
+
+  // Console
+  "console.noMessages": "No console messages yet",
+  "console.placeholder": "Run JavaScript in the remote page",
+  "console.openEditorAria": "Open fullscreen JavaScript editor",
+  "console.run": "Run",
+  "console.editorTitle": "JavaScript Console",
+  "console.copyRaw": "Copy raw console content",
+  "console.collapseValue": "Collapse console value",
+  "console.expandValue": "Expand console value",
+  "console.overflowMore": "... {count} more",
+
+  // Elements
+  "elements.noSnapshot": "No DOM snapshot yet",
+  "elements.collapseNode": "Collapse node",
+  "elements.expandNode": "Expand node",
+  "elements.moreNodes": "... {count} more nodes",
+  "elements.textNode": "Text node",
+  "elements.view": "view",
+};
+
+export default en;

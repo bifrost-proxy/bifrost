@@ -36,7 +36,8 @@ import { NetworkList } from "./components/NetworkPanel";
 import { StorageView } from "./components/StoragePanel";
 import { consoleValueFromRuntimeResult } from "./components/consoleValueUtils";
 import { collectDefaultExpandedDomKeys, findDomNodePathById, findFirstDomSearchMatch } from "./components/domUtils";
-import { tabSearchLabel } from "./components/sharedUtils";
+import { tabSearchPlaceholderKey } from "./components/sharedUtils";
+import { t as translate, useI18n } from "../../i18n";
 import "./index.css";
 
 const { Text, Title } = Typography;
@@ -45,6 +46,7 @@ export default function DevTools() {
   const navigate = useNavigate();
   const { pageId: routePageId } = useParams<{ pageId?: string }>();
   const { token } = theme.useToken();
+  const { t } = useI18n();
   const setTrafficSelectedId = useTrafficStore((state) => state.setSelectedId);
   const [pages, setPages] = useState<DebugPage[]>([]);
   const [query, setQuery] = useState("");
@@ -120,11 +122,11 @@ export default function DevTools() {
       await requestDevtoolsSnapshotRefresh(sessionId, options.full ? "full" : activeToolTab);
       setSnapshot((previous) => previous ?? null);
     } catch (error) {
-      message.error(error instanceof Error ? error.message : "Failed to refresh DevTools data");
+      message.error(error instanceof Error ? error.message : t("devtools.refreshFailed"));
     } finally {
       setSnapshotLoading(false);
     }
-  }, [activeToolTab]);
+  }, [activeToolTab, t]);
 
   const requestCurrentTabRefresh = useCallback(async (sessionId: string, tabKey: string) => {
     const scope =
@@ -216,7 +218,7 @@ export default function DevTools() {
               ? { ...current, state: "disconnected" }
               : current,
           );
-          message.warning(liveMessage.reason || "Target page DevTools bridge disconnected");
+          message.warning(liveMessage.reason || t("devtools.bridgeDisconnected"));
         }
       } catch (error) {
         console.warn("Failed to parse DevTools live message", error);
@@ -234,7 +236,7 @@ export default function DevTools() {
       );
     };
     return () => socket.close();
-  }, [navigate, routePageId, selectDomNodeFromTarget, sessionId]);
+  }, [navigate, routePageId, selectDomNodeFromTarget, sessionId, t]);
 
   useEffect(() => {
     if (!sessionId || !sessionWsReady) return;
@@ -324,12 +326,12 @@ export default function DevTools() {
       setSession(nextSession);
       setSnapshot(emptySnapshot(page));
     } catch (error) {
-      message.error(error instanceof Error ? error.message : "Failed to open DevTools session");
+      message.error(error instanceof Error ? error.message : t("devtools.openSessionFailed"));
     } finally {
       setLoading(false);
       openingPageIdRef.current = null;
     }
-  }, [clearNetworkDetail, navigate]);
+  }, [clearNetworkDetail, navigate, t]);
 
   useEffect(() => {
     if (!routePageId) {
@@ -392,7 +394,7 @@ export default function DevTools() {
       setSelectedNodeId(nodeId);
       await sendDevtoolsCommand(session.session_id, "dom.highlight", { node_id: nodeId });
     } catch (error) {
-      message.error(error instanceof Error ? error.message : "Failed to highlight element");
+      message.error(error instanceof Error ? error.message : t("devtools.highlightFailed"));
     }
   };
 
@@ -403,11 +405,11 @@ export default function DevTools() {
     setElementInspecting(true);
     try {
       await sendDevtoolsCommand(session.session_id, "dom.inspect", {});
-      message.info("Click an element in the target page to select it");
+      message.info(t("devtools.pickerHint"));
     } catch (error) {
       elementInspectingRef.current = false;
       setElementInspecting(false);
-      message.error(error instanceof Error ? error.message : "Failed to start element picker");
+      message.error(error instanceof Error ? error.message : t("devtools.pickerFailed"));
     }
   };
 
@@ -428,7 +430,7 @@ export default function DevTools() {
   const updateStorageValue = async () => {
     if (!session) return;
     if (!storageKey.trim()) {
-      message.warning("Storage key is required");
+      message.warning(t("devtools.storageKeyRequired"));
       return;
     }
     setStorageSaving(true);
@@ -448,9 +450,9 @@ export default function DevTools() {
       setStorageEditingKey(null);
       setStorageKey("");
       setStorageValue("");
-      message.success("Storage updated");
+      message.success(t("devtools.storageUpdated"));
     } catch (error) {
-      message.error(error instanceof Error ? error.message : "Failed to update storage");
+      message.error(error instanceof Error ? error.message : t("devtools.storageUpdateFailed"));
     } finally {
       setStorageSaving(false);
     }
@@ -462,9 +464,9 @@ export default function DevTools() {
     try {
       await sendDevtoolsCommand(session.session_id, "storage.delete", { area, key });
       await refreshSnapshot(session.session_id);
-      message.success("Storage deleted");
+      message.success(t("devtools.storageDeleted"));
     } catch (error) {
-      message.error(error instanceof Error ? error.message : "Failed to delete storage");
+      message.error(error instanceof Error ? error.message : t("devtools.storageDeleteFailed"));
     } finally {
       setStorageSaving(false);
     }
@@ -473,9 +475,9 @@ export default function DevTools() {
   const copyStorageValue = async (value: string) => {
     try {
       await navigator.clipboard.writeText(value);
-      message.success("Copied");
+      message.success(t("common.copied"));
     } catch {
-      message.error("Failed to copy");
+      message.error(t("devtools.copyFailed"));
     }
   };
 
@@ -483,9 +485,9 @@ export default function DevTools() {
     if (!selectedPage?.url) return;
     try {
       await navigator.clipboard.writeText(selectedPage.url);
-      message.success("URL copied");
+      message.success(t("devtools.urlCopied"));
     } catch {
-      message.error("Failed to copy URL");
+      message.error(t("devtools.copyUrlFailed"));
     }
   };
 
@@ -520,7 +522,7 @@ export default function DevTools() {
       const errorText =
         error instanceof Error
           ? error.message
-          : "Traffic detail not found. It may have been deleted or captured only as a CONNECT tunnel.";
+          : t("devtools.trafficDetailNotFound");
       setNetworkDetailError(errorText);
       message.warning(errorText);
     } finally {
@@ -559,7 +561,7 @@ export default function DevTools() {
         setNetworkDetailError(
           error instanceof Error
             ? error.message
-            : "No matching Traffic record. It may have been deleted or captured only as a CONNECT tunnel.",
+            : t("devtools.noMatchingTraffic"),
         );
         setNetworkDetailLoading(false);
       }
@@ -571,7 +573,7 @@ export default function DevTools() {
       setNetworkRecord(null);
       setNetworkRequestBody(null);
       setNetworkResponseBody(null);
-      setNetworkDetailError("No matching Traffic record. It may have been deleted or captured only as a CONNECT tunnel.");
+      setNetworkDetailError(t("devtools.noMatchingTraffic"));
       setNetworkDetailLoading(false);
       return;
     }
@@ -590,19 +592,19 @@ export default function DevTools() {
         <Space direction="vertical" size={16} style={{ width: "100%", minHeight: 0 }}>
           <div style={listHeaderStyle}>
             <Space direction="vertical" size={4} style={{ minWidth: 0 }}>
-              <Title level={3} style={{ margin: 0 }}>DevTools</Title>
-              <Text type="secondary">Online pages that matched a devtools:// rule</Text>
+              <Title level={3} style={{ margin: 0 }}>{t("devtools.title")}</Title>
+              <Text type="secondary">{t("devtools.subtitle")}</Text>
             </Space>
             <Space.Compact style={{ width: "min(520px, 100%)" }}>
               <Input.Search
                 allowClear
-                placeholder="Search online pages"
+                placeholder={t("devtools.searchPages")}
                 value={query}
                 onChange={(event) => setQuery(event.target.value)}
                 onSearch={() => void refreshPages()}
               />
               <Button icon={<ReloadOutlined />} onClick={() => void refreshPages()}>
-                Refresh Pages
+                {t("devtools.refreshPages")}
               </Button>
             </Space.Compact>
           </div>
@@ -610,7 +612,7 @@ export default function DevTools() {
           <div data-testid="devtools-page-list" style={cardGridStyle}>
             {filteredPages.length === 0 ? (
               <div style={emptyListStyle}>
-                <Empty description="No online pages" />
+                <Empty description={t("devtools.noOnlinePages")} />
               </div>
             ) : (
               filteredPages.map((page) => (
@@ -624,15 +626,17 @@ export default function DevTools() {
                   <Space direction="vertical" size={10} style={{ width: "100%", minWidth: 0 }}>
                     <Space direction="vertical" size={2} style={{ width: "100%", minWidth: 0 }}>
                       <Text strong ellipsis style={{ maxWidth: "100%", fontSize: 16 }}>
-                        {page.title || "(untitled)"}
+                        {page.title || t("devtools.untitled")}
                       </Text>
                       <Text type="secondary" ellipsis style={{ maxWidth: "100%" }}>
                         {page.url}
                       </Text>
                     </Space>
                     <Text type="secondary">
-                      {page.state === "fallback_attached" ? "Attached" : "Online"}
-                      {page.mode === "control" ? " · Control enabled" : ""}
+                      {page.state === "fallback_attached"
+                        ? t("devtools.stateAttached")
+                        : t("devtools.stateOnline")}
+                      {page.mode === "control" ? t("devtools.controlEnabled") : ""}
                     </Text>
                   </Space>
                 </button>
@@ -671,12 +675,12 @@ export default function DevTools() {
               navigate("/devtools");
             }}
           >
-            Back
+            {t("common.back")}
           </Button>
           <div style={titleClusterStyle}>
             <Space size={8} style={{ minWidth: 0 }}>
               <Text strong ellipsis style={{ maxWidth: 260, fontSize: 16 }}>
-                {selectedPage.title || "(untitled)"}
+                {selectedPage.title || t("devtools.untitled")}
               </Text>
               {selectedTrafficId ? (
                 <Button
@@ -686,7 +690,7 @@ export default function DevTools() {
                   style={trafficLinkStyle}
                   onClick={openTrafficRecord}
                 >
-                  Traffic {selectedTrafficId}
+                  {t("devtools.trafficLink", { id: selectedTrafficId })}
                 </Button>
               ) : null}
             </Space>
@@ -699,11 +703,11 @@ export default function DevTools() {
               <Text type="secondary" ellipsis style={{ minWidth: 0, maxWidth: "min(780px, 56vw)" }}>
                 {selectedPage.url}
               </Text>
-              <Tooltip title="Copy URL">
+              <Tooltip title={t("devtools.copyUrl")}>
                 <Button
                   size="small"
                   type="text"
-                  aria-label="Copy target URL"
+                  aria-label={t("devtools.copyTargetUrlAria")}
                   data-testid="devtools-copy-url"
                   icon={<CopyOutlined />}
                   style={{
@@ -747,7 +751,7 @@ export default function DevTools() {
             right: (
               <Space size={8}>
                 {activeToolTab === "elements" ? (
-                  <Tooltip title="Select an element from the target page">
+                  <Tooltip title={t("devtools.inspectElement")}>
                     <Button
                       icon={<AimOutlined />}
                       loading={elementInspecting}
@@ -763,7 +767,7 @@ export default function DevTools() {
                   data-testid="devtools-panel-search"
                   value={panelSearch}
                   onChange={(event) => setPanelSearch(event.target.value)}
-                  placeholder={`Search ${tabSearchLabel(activeToolTab)}`}
+                  placeholder={t(tabSearchPlaceholderKey(activeToolTab))}
                   style={panelSearchStyle}
                 />
               </Space>
@@ -772,7 +776,7 @@ export default function DevTools() {
           items={[
             {
               key: "elements",
-              label: <TabLabel icon={<BranchesOutlined />} text="Elements" />,
+              label: <TabLabel icon={<BranchesOutlined />} text={t("devtools.tab.elements")} />,
               children: (
                 <section data-testid="devtools-elements-panel" style={panelStyle}>
                   <DomTree
@@ -799,7 +803,7 @@ export default function DevTools() {
             },
             {
               key: "network",
-              label: <TabLabel icon={<GlobalOutlined />} text="Network" />,
+              label: <TabLabel icon={<GlobalOutlined />} text={t("devtools.tab.network")} />,
               children: (
                 <section
                   data-testid="devtools-network-panel"
@@ -813,7 +817,7 @@ export default function DevTools() {
                         message.warning(
                           error instanceof Error
                             ? error.message
-                            : "No matching Traffic record. It may have been deleted or captured only as a CONNECT tunnel.",
+                            : t("devtools.noMatchingTraffic"),
                         );
                       });
                     }}
@@ -841,7 +845,7 @@ export default function DevTools() {
             },
             {
               key: "cookie",
-              label: <TabLabel icon={<DatabaseOutlined />} text="Cookies" />,
+              label: <TabLabel icon={<DatabaseOutlined />} text={t("devtools.tab.cookies")} />,
               children: (
                 <section data-testid="devtools-cookies-panel" style={panelStyle}>
                   <StorageView
@@ -880,7 +884,7 @@ export default function DevTools() {
             },
             {
               key: "local_storage",
-              label: <TabLabel icon={<DatabaseOutlined />} text="LocalStorage" />,
+              label: <TabLabel icon={<DatabaseOutlined />} text={t("devtools.tab.localStorage")} />,
               children: (
                 <section data-testid="devtools-local-storage-panel" style={panelStyle}>
                   <StorageView
@@ -919,7 +923,7 @@ export default function DevTools() {
             },
             {
               key: "session_storage",
-              label: <TabLabel icon={<DatabaseOutlined />} text="SessionStorage" />,
+              label: <TabLabel icon={<DatabaseOutlined />} text={t("devtools.tab.sessionStorage")} />,
               children: (
                 <section data-testid="devtools-session-storage-panel" style={panelStyle}>
                   <StorageView
@@ -958,7 +962,7 @@ export default function DevTools() {
             },
             {
               key: "console",
-              label: <TabLabel icon={<CodeOutlined />} text="Console" />,
+              label: <TabLabel icon={<CodeOutlined />} text={t("devtools.tab.console")} />,
               children: (
                 <section data-testid="devtools-console-panel" style={panelStyle}>
                   <ConsoleView
@@ -998,7 +1002,7 @@ async function findTrafficForDevtoolsRequestWithRetry(
   let lastError: unknown = null;
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     if (!isCurrent()) {
-      throw new Error("Network detail request was replaced.");
+      throw new Error(translate("devtools.detailRequestReplaced"));
     }
     try {
       return await findTrafficForDevtoolsRequest(clientReqId);
@@ -1010,7 +1014,7 @@ async function findTrafficForDevtoolsRequestWithRetry(
   }
   throw lastError instanceof Error
     ? lastError
-    : new Error("No matching Traffic record. It may have been deleted or captured only as a CONNECT tunnel.");
+    : new Error(translate("devtools.noMatchingTraffic"));
 }
 
 function sleep(ms: number): Promise<void> {
@@ -1024,56 +1028,88 @@ function NetworkEventDetail({
   event: DebugNetworkEvent | null;
   warning?: string | null;
 }) {
+  const { t } = useI18n();
   if (!event) {
     return (
       <div style={networkEventDetailEmptyStyle}>
-        <Empty description="Select a network request" />
+        <Empty description={t("devtools.network.selectRequest")} />
       </div>
     );
   }
   const parsed = parseNetworkEventUrl(event.url);
-  const rows: Array<[string, string]> = [
-    ["URL", event.url || "-"],
-    ["Method", event.method || "-"],
-    ["Status", event.status == null ? "-" : String(event.status)],
-    ["Type", event.resource_type || "-"],
-    ["From Cache", event.from_cache == null ? "-" : event.from_cache ? "yes" : "no"],
-    ["Host", parsed.host],
-    ["Path", parsed.path],
-    ["Protocol", parsed.protocol],
-    ["Client Request ID", event.client_req_id || "-"],
-    ["Traffic ID", event.traffic_id || "-"],
-    ["Traffic Match", warning || "No matching Traffic record. It may have been deleted or captured only as a CONNECT tunnel."],
-    ["Time", formatNetworkEventTime(event.at_ms)],
+  // [row id, label, value, copyable]
+  const rows: Array<[string, string, string, boolean]> = [
+    ["url", "URL", event.url || "-", true],
+    ["method", t("devtools.network.method"), event.method || "-", false],
+    ["status", t("devtools.network.status"), event.status == null ? "-" : String(event.status), false],
+    ["type", t("devtools.network.type"), event.resource_type || "-", false],
+    [
+      "from_cache",
+      t("devtools.network.fromCache"),
+      event.from_cache == null ? "-" : event.from_cache ? t("devtools.network.yes") : t("devtools.network.no"),
+      false,
+    ],
+    ["host", t("devtools.network.host"), parsed.host, false],
+    ["path", t("devtools.network.path"), parsed.path, false],
+    ["protocol", t("devtools.network.protocol"), parsed.protocol, false],
+    ["client_req_id", t("devtools.network.clientRequestId"), event.client_req_id || "-", true],
+    ["traffic_id", t("devtools.network.trafficId"), event.traffic_id || "-", false],
+    ["traffic_match", t("devtools.network.trafficMatch"), warning || t("devtools.noMatchingTraffic"), false],
+    ["time", t("devtools.network.time"), formatNetworkEventTime(event.at_ms), false],
   ];
   return (
     <div style={networkEventDetailShellStyle}>
       <div style={networkEventDetailHeaderStyle}>
-        <Text strong>Network Detail</Text>
+        <Text strong>{t("devtools.network.detailTitle")}</Text>
         <Tag>{event.method || "GET"}</Tag>
       </div>
       {warning ? <Alert type="warning" showIcon message={warning} style={{ marginBottom: 10 }} /> : null}
       <div data-testid="devtools-network-fallback-detail" style={networkEventDetailGridStyle}>
-        {rows.map(([label, value]) => (
-          <div key={label} style={networkEventDetailRowStyle}>
+        {rows.map(([id, label, value, copyable]) => (
+          <div key={id} style={networkEventDetailRowStyle}>
             <Text type="secondary" style={networkEventDetailLabelStyle}>{label}</Text>
-            <Text copyable={label === "URL" || label === "Client Request ID"} style={networkEventDetailValueStyle}>
+            <Text copyable={copyable} style={networkEventDetailValueStyle}>
               {value}
             </Text>
           </div>
         ))}
       </div>
-      <NetworkPairSection title="Query" pairs={event.query_params} />
-      <NetworkPairSection title="Request Headers" pairs={event.request_headers} />
-      <NetworkPairSection title="Response Headers" pairs={event.response_headers} />
+      <NetworkPairSection
+        testId="query"
+        title={t("devtools.network.query")}
+        emptyText={t("devtools.network.noCapturedQuery")}
+        pairs={event.query_params}
+      />
+      <NetworkPairSection
+        testId="request-headers"
+        title={t("devtools.network.requestHeaders")}
+        emptyText={t("devtools.network.noCapturedRequestHeaders")}
+        pairs={event.request_headers}
+      />
+      <NetworkPairSection
+        testId="response-headers"
+        title={t("devtools.network.responseHeaders")}
+        emptyText={t("devtools.network.noCapturedResponseHeaders")}
+        pairs={event.response_headers}
+      />
     </div>
   );
 }
 
-function NetworkPairSection({ title, pairs }: { title: string; pairs?: Array<[string, string]> }) {
+function NetworkPairSection({
+  testId,
+  title,
+  emptyText,
+  pairs,
+}: {
+  testId: string;
+  title: string;
+  emptyText: string;
+  pairs?: Array<[string, string]>;
+}) {
   const visiblePairs = pairs?.filter(([key]) => key) ?? [];
   return (
-    <div data-testid={`devtools-network-${title.toLowerCase().replace(/\s+/g, "-")}`} style={networkPairSectionStyle}>
+    <div data-testid={`devtools-network-${testId}`} style={networkPairSectionStyle}>
       <Text strong>{title}</Text>
       {visiblePairs.length ? (
         <div style={networkPairGridStyle}>
@@ -1085,7 +1121,7 @@ function NetworkPairSection({ title, pairs }: { title: string; pairs?: Array<[st
           ))}
         </div>
       ) : (
-        <Text type="secondary">No captured {title.toLowerCase()}</Text>
+        <Text type="secondary">{emptyText}</Text>
       )}
     </div>
   );

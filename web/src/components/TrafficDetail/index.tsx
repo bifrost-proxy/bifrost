@@ -26,6 +26,7 @@ import { QueryView } from "./panes/Query";
 import { Messages } from "./panes/Messages";
 import ScriptLogsPane from "./panes/ScriptLogs";
 import { BreakpointBanner } from "./BreakpointBanner";
+import { useI18n } from "../../i18n";
 import { getResponseBodyContentUrl } from "../../api/traffic";
 import type { TrafficBodyContent } from "../../api/traffic";
 import { parseSseTextToEvents } from "../VirtualMessageViewer";
@@ -112,6 +113,7 @@ const styles: Record<string, CSSProperties> = {
 const MAX_EMPTY_SUGGESTIONS = 20;
 
 function EmptySequenceSearch({ onSelect }: { onSelect: (id: string) => void }) {
+  const { t } = useI18n();
   const records = useTrafficStore((state) => state.records);
   const [searchValue, setSearchValue] = useState("");
 
@@ -157,7 +159,7 @@ function EmptySequenceSearch({ onSelect }: { onSelect: (id: string) => void }) {
     >
       <Input
         size="small"
-        placeholder="Search by sequence number..."
+        placeholder={t("trafficDetail.empty.searchBySequence")}
         allowClear
         style={{ fontSize: 12 }}
       />
@@ -177,6 +179,7 @@ export default function TrafficDetail({
   onResponseBodyChange,
   onSelectById,
 }: TrafficDetailProps) {
+  const { t } = useI18n();
   const [expandedRequestPanelSize, setExpandedRequestPanelSize] = useState<
     number | string
   >("50%");
@@ -434,7 +437,7 @@ export default function TrafficDetail({
     return [
       {
         key: "Overview",
-        label: "Overview",
+        label: t("trafficDetail.tabs.overview"),
         children: (
           <Overview
             record={record}
@@ -445,7 +448,7 @@ export default function TrafficDetail({
       },
       {
         key: "Header",
-        label: "Header",
+        label: t("trafficDetail.tabs.requestHeader"),
         children: (
           <HeaderView
             headers={pausedRequest?.headers ?? record.request_headers}
@@ -463,7 +466,7 @@ export default function TrafficDetail({
       },
       {
         key: "Cookie",
-        label: "Cookie",
+        label: t("trafficDetail.tabs.cookie"),
         enable: hasCookies(record.request_headers),
         children: (
           <CookieView
@@ -476,7 +479,7 @@ export default function TrafficDetail({
       },
       {
         key: "Query",
-        label: "Query",
+        label: t("trafficDetail.tabs.query"),
         enable: hasQueryParams(pausedRequest?.url ?? record.url) || !!pausedRequest,
         children: (
           <QueryView
@@ -500,7 +503,7 @@ export default function TrafficDetail({
       },
       {
         key: "Body",
-        label: "Body",
+        label: t("trafficDetail.tabs.requestBody"),
         enable: !!requestBodyForView || !!requestRawBody || requestBodyEditable,
         children: (
           <Body
@@ -520,7 +523,7 @@ export default function TrafficDetail({
       },
       {
         key: "Raw",
-        label: "Raw",
+        label: t("trafficDetail.tabs.raw"),
         children: (
           <Raw
             type="request"
@@ -536,7 +539,7 @@ export default function TrafficDetail({
       },
       {
         key: "Script",
-        label: "Script",
+        label: t("trafficDetail.tabs.script"),
         enable: !!(record.req_script_results && record.req_script_results.length > 0),
         children: (
           <ScriptLogsPane results={record.req_script_results || []} />
@@ -558,6 +561,7 @@ export default function TrafficDetail({
     handleRequestBodyChange,
     updatePausedHeaders,
     updatePausedMetadata,
+    t,
   ]);
 
   const openAiLikeAssembly = useMemo(() => {
@@ -650,7 +654,7 @@ export default function TrafficDetail({
     return [
       {
         key: "Header",
-        label: "Header",
+        label: t("trafficDetail.tabs.responseHeader"),
         children: (
           <HeaderView
             headers={effectiveResponseHeaders}
@@ -685,7 +689,10 @@ export default function TrafficDetail({
       },
       {
         key: "Messages",
-        label: `Messages${messageCount > 0 ? ` (${messageCount})` : ""}`,
+        label:
+          messageCount > 0
+            ? t("trafficDetail.tabs.messagesWithCount", { count: messageCount })
+            : t("trafficDetail.tabs.messages"),
         enable: hasMessages,
         children: (
           <Messages
@@ -737,7 +744,7 @@ export default function TrafficDetail({
       },
       {
         key: "Body",
-        label: "Body",
+        label: t("trafficDetail.tabs.responseBody"),
         enable: !!responseBodyForView || !!responseRawBody || canPreviewResponseImage || responseBodyEditable,
         children: (
           <Body
@@ -759,7 +766,7 @@ export default function TrafficDetail({
       },
       {
         key: "Raw",
-        label: "Raw",
+        label: t("trafficDetail.tabs.raw"),
         children: (
           <Raw
             type="response"
@@ -778,7 +785,7 @@ export default function TrafficDetail({
       },
       {
         key: "Script",
-        label: "Script",
+        label: t("trafficDetail.tabs.script"),
         enable: !!(record.res_script_results && record.res_script_results.length > 0),
         children: (
           <ScriptLogsPane results={record.res_script_results || []} />
@@ -804,6 +811,7 @@ export default function TrafficDetail({
     handleResponseBodySourceChange,
     handleResponseBodyChange,
     updatePausedHeaders,
+    t,
   ]);
 
   useEffect(() => {
@@ -975,7 +983,7 @@ export default function TrafficDetail({
     return (
       <div style={styles.emptyContainer}>
         <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 16 }}>
-          <Empty description="Select a request to view details" />
+          <Empty description={t("trafficDetail.empty.selectRequest")} />
           {onSelectById && <EmptySequenceSearch onSelect={onSelectById} />}
         </div>
       </div>

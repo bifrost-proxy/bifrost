@@ -39,57 +39,61 @@ import type {
 import { getMossModelStatus, listAsrExternalVolumes } from "../../../api/asr";
 import { formatSchedule, formatTime } from "../asrUtils";
 import {
-  DIRECTORY_TASK_MODE_HISTORY_NOTE,
+  directoryTaskModeHistoryNote,
   directoryTaskModeFields,
   directoryTaskModeOptions,
 } from "../directoryTaskMode";
+import { t as tNow, useI18n, type TFunction } from "../../../i18n";
 
 const { Text } = Typography;
 
-function pauseStatusLabel(task: AsrDirectoryTask): string {
+function pauseStatusLabel(t: TFunction, task: AsrDirectoryTask): string {
   if (!task.paused) {
-    return task.summary.running ? "Running" : task.last_error ? "Error" : "Ready";
+    return task.summary.running
+      ? t("asrTasks.status.running")
+      : task.last_error
+        ? t("asrTasks.status.error")
+        : t("asrTasks.status.ready");
   }
   if (task.summary.running) {
-    return "Pausing";
+    return t("asrTasks.status.pausing");
   }
-  return task.next_run_at_ms ? "Paused until schedule" : "Paused";
+  return task.next_run_at_ms
+    ? t("asrTasks.status.pausedUntilSchedule")
+    : t("asrTasks.status.paused");
 }
 
-const RUNTIME_STRATEGY_OPTIONS: Array<{
+const runtimeStrategyOptions = (
+  t: TFunction,
+): Array<{
   value: AsrRuntimeStrategy;
   label: string;
   description: string;
-}> = [
+}> => [
   {
     value: "reuse_per_file",
-    label: "Reuse / file",
-    description:
-      "Default for most offline tasks. Reuses one managed ASR server within each file, then releases it at the file boundary.",
+    label: t("asrTasks.runtime.reusePerFile"),
+    description: t("asrTasks.runtime.reusePerFileDescription"),
   },
   {
     value: "fork_per_chunk",
-    label: "Fork / chunk",
-    description:
-      "Most isolated mode. Starts a fresh ASR process for every chunk, which is slower but useful when debugging stability issues.",
+    label: t("asrTasks.runtime.forkPerChunk"),
+    description: t("asrTasks.runtime.forkPerChunkDescription"),
   },
   {
     value: "reuse_server",
-    label: "Reuse server",
-    description:
-      "Keeps one ASR server for the whole task run. Faster when stable, but can carry memory or server-state issues across files.",
+    label: t("asrTasks.runtime.reuseServer"),
+    description: t("asrTasks.runtime.reuseServerDescription"),
   },
   {
     value: "auto",
-    label: "Auto fallback",
-    description:
-      "Starts with server reuse and automatically falls back to isolated chunk processing after server errors or clear speed regression.",
+    label: t("asrTasks.runtime.auto"),
+    description: t("asrTasks.runtime.autoDescription"),
   },
   {
     value: "compare",
-    label: "Compare",
-    description:
-      "Diagnostic mode. Runs both isolated and server paths for each chunk, keeps the isolated output, and records performance differences.",
+    label: t("asrTasks.runtime.compare"),
+    description: t("asrTasks.runtime.compareDescription"),
   },
 ];
 
@@ -120,12 +124,19 @@ function externalImportProgressStatus(
   return "normal";
 }
 
-function externalImportProgressLabel(progress: AsrExternalImportRunProgress): string {
+function externalImportProgressLabel(
+  t: TFunction,
+  progress: AsrExternalImportRunProgress,
+): string {
   if (progress.status === "importing") {
     if (progress.current_device) {
-      return `${progress.current_device}: processed ${progress.processed_files}/${progress.total_files_discovered}`;
+      return t("asrTasks.import.deviceProgress", {
+        device: progress.current_device,
+        processed: progress.processed_files,
+        total: progress.total_files_discovered,
+      });
     }
-    return "Import queued";
+    return t("asrTasks.import.queued");
   }
   return progress.message;
 }
@@ -149,7 +160,10 @@ function externalImportCurrentFileName(progress: AsrExternalImportRunProgress): 
   return progress.current_file.split(/[\\/]/).filter(Boolean).pop() ?? progress.current_file;
 }
 
-function externalImportCurrentFileCopyLabel(progress: AsrExternalImportRunProgress): string | null {
+function externalImportCurrentFileCopyLabel(
+  t: TFunction,
+  progress: AsrExternalImportRunProgress,
+): string | null {
   if (!progress.current_file_size || progress.current_file_size <= 0) {
     return null;
   }
@@ -158,7 +172,7 @@ function externalImportCurrentFileCopyLabel(progress: AsrExternalImportRunProgre
     0,
     Math.min(100, Math.round((copied / progress.current_file_size) * 100)),
   );
-  return `Current file ${percent}%`;
+  return t("asrTasks.import.currentFilePercent", { percent });
 }
 
 interface DirectoryTasksPanelProps {
@@ -192,6 +206,7 @@ export default function DirectoryTasksPanel({
   onResumeTask,
   onRemoveTask,
 }: DirectoryTasksPanelProps) {
+  const { t } = useI18n();
   const [createOpen, setCreateOpen] = useState(false);
   const [editingTask, setEditingTask] = useState<AsrDirectoryTask | null>(null);
   const [creating, setCreating] = useState(false);
@@ -212,8 +227,8 @@ export default function DirectoryTasksPanel({
   const transcriptionPrompt = Form.useWatch<string>("transcription_prompt", taskForm) ?? "";
   const { showMossPrompt, showStandardPipeline } = directoryTaskModeFields(transcriptionMode);
   const configTitle = editingTask
-    ? `Edit Directory Task: ${editingTask.name}`
-    : "New Directory Task";
+    ? t("asrTasks.tasks.editTitle", { name: editingTask.name })
+    : t("asrTasks.tasks.newTitle");
   const expandedImportTaskIds = tasks
     .filter((task) => {
       const progress = externalImportProgressByTask[task.id];
@@ -237,7 +252,7 @@ export default function DirectoryTasksPanel({
       .catch(() => {
         if (cancelled) return;
         setMossPlatformSupported(false);
-        setMossUnsupportedReason("MOSS platform availability could not be verified.");
+        setMossUnsupportedReason(tNow("asrTasks.tasks.mossUnverified"));
       });
     return () => {
       cancelled = true;
@@ -373,7 +388,7 @@ export default function DirectoryTasksPanel({
       title={
         <Space>
           <AudioOutlined />
-          <span>Directory Tasks</span>
+          <span>{t("asrTasks.tasks.directoryTasks")}</span>
           <Tag>{tasks.length}</Tag>
         </Space>
       }
@@ -383,7 +398,7 @@ export default function DirectoryTasksPanel({
           icon={<PlusOutlined />}
           onClick={openCreate}
         >
-          New
+          {t("common.new")}
         </Button>
       }
       style={{ marginTop: 16 }}
@@ -391,7 +406,7 @@ export default function DirectoryTasksPanel({
       <Modal
         title={configTitle}
         open={configOpen}
-        okText={editingTask ? "Save" : "Create"}
+        okText={editingTask ? t("common.save") : t("common.create")}
         confirmLoading={creating}
         onOk={() => void handleSave()}
         onCancel={closeConfig}
@@ -422,41 +437,41 @@ export default function DirectoryTasksPanel({
         >
           <Row gutter={[12, 0]}>
             <Col xs={24} md={8}>
-              <Form.Item name="name" label="Name">
-                <Input placeholder="Meeting audio watcher" />
+              <Form.Item name="name" label={t("common.name")}>
+                <Input placeholder={t("asrTasks.tasks.namePlaceholder")} />
               </Form.Item>
             </Col>
             <Col xs={24} md={16}>
               <Form.Item
                 name="audio_dir"
-                label="Audio Directory"
-                rules={[{ required: true, message: "Enter a local directory path" }]}
+                label={t("asrTasks.tasks.audioDirectory")}
+                rules={[{ required: true, message: t("asrTasks.tasks.audioDirectoryRequired") }]}
               >
                 <Input placeholder="~/Recordings" />
               </Form.Item>
             </Col>
             <Col xs={24} md={8}>
-              <Form.Item name="schedule_kind" label="Cycle">
+              <Form.Item name="schedule_kind" label={t("asrTasks.tasks.cycle")}>
                 <Select
                   options={[
-                    { value: "hourly", label: "Hourly" },
-                    { value: "daily", label: "Daily" },
-                    { value: "weekly", label: "Weekly" },
-                    { value: "monthly", label: "Monthly" },
+                    { value: "hourly", label: t("asrTasks.tasks.cycle.hourly") },
+                    { value: "daily", label: t("asrTasks.tasks.cycle.daily") },
+                    { value: "weekly", label: t("asrTasks.tasks.cycle.weekly") },
+                    { value: "monthly", label: t("asrTasks.tasks.cycle.monthly") },
                   ]}
                 />
               </Form.Item>
             </Col>
             {taskScheduleKind === "hourly" ? (
               <Col xs={24} md={8}>
-                <Form.Item name="schedule_minute" label="Minute">
+                <Form.Item name="schedule_minute" label={t("asrTasks.tasks.minute")}>
                   <InputNumber min={0} max={59} style={{ width: "100%" }} />
                 </Form.Item>
               </Col>
             ) : null}
             {taskScheduleKind === "daily" ? (
               <Col xs={24} md={8}>
-                <Form.Item name="schedule_time" label="Time">
+                <Form.Item name="schedule_time" label={t("asrTasks.tasks.time")}>
                   <Input type="time" />
                 </Form.Item>
               </Col>
@@ -464,22 +479,22 @@ export default function DirectoryTasksPanel({
             {taskScheduleKind === "weekly" ? (
               <>
                 <Col xs={24} md={8}>
-                  <Form.Item name="schedule_weekday" label="Weekday">
+                  <Form.Item name="schedule_weekday" label={t("asrTasks.tasks.weekday")}>
                     <Select
                       options={[
-                        { value: 1, label: "Mon" },
-                        { value: 2, label: "Tue" },
-                        { value: 3, label: "Wed" },
-                        { value: 4, label: "Thu" },
-                        { value: 5, label: "Fri" },
-                        { value: 6, label: "Sat" },
-                        { value: 7, label: "Sun" },
+                        { value: 1, label: t("asrTasks.tasks.weekday.mon") },
+                        { value: 2, label: t("asrTasks.tasks.weekday.tue") },
+                        { value: 3, label: t("asrTasks.tasks.weekday.wed") },
+                        { value: 4, label: t("asrTasks.tasks.weekday.thu") },
+                        { value: 5, label: t("asrTasks.tasks.weekday.fri") },
+                        { value: 6, label: t("asrTasks.tasks.weekday.sat") },
+                        { value: 7, label: t("asrTasks.tasks.weekday.sun") },
                       ]}
                     />
                   </Form.Item>
                 </Col>
                 <Col xs={24} md={8}>
-                  <Form.Item name="schedule_time" label="Time">
+                  <Form.Item name="schedule_time" label={t("asrTasks.tasks.time")}>
                     <Input type="time" />
                   </Form.Item>
                 </Col>
@@ -488,19 +503,19 @@ export default function DirectoryTasksPanel({
             {taskScheduleKind === "monthly" ? (
               <>
                 <Col xs={24} md={8}>
-                  <Form.Item name="schedule_day" label="Day">
+                  <Form.Item name="schedule_day" label={t("asrTasks.tasks.day")}>
                     <InputNumber min={1} max={31} style={{ width: "100%" }} />
                   </Form.Item>
                 </Col>
                 <Col xs={24} md={8}>
-                  <Form.Item name="schedule_time" label="Time">
+                  <Form.Item name="schedule_time" label={t("asrTasks.tasks.time")}>
                     <Input type="time" />
                   </Form.Item>
                 </Col>
               </>
             ) : null}
             <Col xs={24}>
-              <Form.Item name="transcription_mode" label="Transcription Mode">
+              <Form.Item name="transcription_mode" label={t("asrTasks.tasks.transcriptionMode")}>
                 <Select
                   data-testid="asr-transcription-mode-select"
                   options={directoryTaskModeOptions(mossPlatformSupported)}
@@ -508,13 +523,12 @@ export default function DirectoryTasksPanel({
               </Form.Item>
               <Text type="secondary" style={{ display: "block", marginTop: -16, marginBottom: 16 }}>
                 {showMossPrompt
-                  ? `MOSS uses one global MLX decode for timestamps and consistent speaker labels. The verified Apple Silicon runtime and 8-bit model initialize automatically; inference is stopped if it exceeds 0.5x the audio duration. ${DIRECTORY_TASK_MODE_HISTORY_NOTE}`
-                  : `Uses the existing Qwen transcription pipeline and optional external speaker diarization. ${DIRECTORY_TASK_MODE_HISTORY_NOTE}`}
+                  ? t("asrTasks.tasks.mossModeHint", { note: directoryTaskModeHistoryNote() })
+                  : t("asrTasks.tasks.standardModeHint", { note: directoryTaskModeHistoryNote() })}
               </Text>
               {showMossPrompt && mossPlatformSupported === false ? (
                 <Text type="warning" style={{ display: "block", marginTop: -12, marginBottom: 16 }}>
-                  {mossUnsupportedReason ??
-                    "MOSS joint transcription requires Apple Silicon macOS."}
+                  {mossUnsupportedReason ?? t("asrTasks.tasks.mossRequiresAppleSilicon")}
                 </Text>
               ) : null}
             </Col>
@@ -522,7 +536,7 @@ export default function DirectoryTasksPanel({
               <Col xs={24}>
                 <Form.Item
                   name="transcription_prompt"
-                  label="MOSS Prompt"
+                  label={t("asrTasks.tasks.mossPrompt")}
                   extra={
                     <span
                       style={{
@@ -532,10 +546,7 @@ export default function DirectoryTasksPanel({
                         gap: 12,
                       }}
                     >
-                      <span>
-                        Optional meeting context, names, and specialist terms. Bifrost appends it to
-                        the required MOSS protocol prompt and saves it with this task.
-                      </span>
+                      <span>{t("asrTasks.tasks.mossPromptHelp")}</span>
                       <span data-testid="asr-transcription-prompt-count" style={{ whiteSpace: "nowrap" }}>
                         {Array.from(transcriptionPrompt).length} / 4000
                       </span>
@@ -544,7 +555,7 @@ export default function DirectoryTasksPanel({
                   rules={[
                     {
                       max: 4000,
-                      message: "Prompt must not exceed 4000 characters",
+                      message: t("asrTasks.tasks.mossPromptTooLong"),
                     },
                   ]}
                 >
@@ -552,7 +563,7 @@ export default function DirectoryTasksPanel({
                     data-testid="asr-transcription-prompt-input"
                     rows={4}
                     maxLength={4000}
-                    placeholder="Example: This is a Bifrost and NextOnCall project meeting. Preserve product names and mixed Chinese/English terms."
+                    placeholder={t("asrTasks.tasks.mossPromptPlaceholder")}
                   />
                 </Form.Item>
               </Col>
@@ -560,14 +571,14 @@ export default function DirectoryTasksPanel({
             {showStandardPipeline ? (
               <>
                 <Col xs={24} md={8}>
-                  <Form.Item name="runtime_strategy" label="Runtime">
+                  <Form.Item name="runtime_strategy" label={t("asrTasks.field.runtime")}>
                     <Select
                       data-testid="asr-runtime-strategy-select"
                       listHeight={420}
                       optionLabelProp="label"
                       popupMatchSelectWidth={false}
                     >
-                      {RUNTIME_STRATEGY_OPTIONS.map((option) => (
+                      {runtimeStrategyOptions(t).map((option) => (
                         <Select.Option key={option.value} value={option.value} label={option.label}>
                           <Space
                             direction="vertical"
@@ -585,21 +596,21 @@ export default function DirectoryTasksPanel({
                   </Form.Item>
                 </Col>
                 <Col xs={24} md={8}>
-                  <Form.Item name="max_concurrent_files" label="File Concurrency">
+                  <Form.Item name="max_concurrent_files" label={t("asrTasks.tasks.fileConcurrency")}>
                     <InputNumber min={1} max={16} style={{ width: "100%" }} />
                   </Form.Item>
                 </Col>
                 <Col xs={12} md={8}>
                   <Form.Item
                     name="diarization_enabled"
-                    label="Speaker Diarization"
+                    label={t("asrTasks.field.speakerDiarization")}
                     valuePropName="checked"
                   >
                     <Switch />
                   </Form.Item>
                 </Col>
                 <Col xs={12} md={8}>
-                  <Form.Item name="diarization_profile" label="Diarization Profile">
+                  <Form.Item name="diarization_profile" label={t("asrTasks.tasks.diarizationProfile")}>
                     <Select
                       options={[
                         { value: "sherpa-onnx-balanced", label: "sherpa-onnx balanced" },
@@ -609,11 +620,11 @@ export default function DirectoryTasksPanel({
                   </Form.Item>
                 </Col>
                 <Col xs={12} md={8}>
-                  <Form.Item name="diarization_known_speaker_count" label="Known Speakers">
+                  <Form.Item name="diarization_known_speaker_count" label={t("asrTasks.tasks.knownSpeakers")}>
                     <InputNumber
                       min={1}
                       max={8}
-                      placeholder="Auto"
+                      placeholder={t("asrTasks.tasks.auto")}
                       style={{ width: "100%" }}
                     />
                   </Form.Item>
@@ -621,14 +632,14 @@ export default function DirectoryTasksPanel({
                 <Col xs={12} md={8}>
                   <Form.Item
                     name="voiceprint_matching"
-                    label="Voiceprint Matching"
+                    label={t("asrTasks.tasks.voiceprintMatching")}
                     valuePropName="checked"
                   >
                     <Switch />
                   </Form.Item>
                 </Col>
                 <Col xs={24} md={8}>
-                  <Form.Item name="model" label="Task Model">
+                  <Form.Item name="model" label={t("asrTasks.tasks.taskModel")}>
                     <Select
                       data-testid="asr-task-model-select"
                       options={[
@@ -639,12 +650,12 @@ export default function DirectoryTasksPanel({
                   </Form.Item>
                 </Col>
                 <Col xs={24} md={8}>
-                  <Form.Item name="language" label="Task Language">
+                  <Form.Item name="language" label={t("asrTasks.tasks.taskLanguage")}>
                     <Select
                       options={[
-                        { value: "chinese", label: "Chinese" },
-                        { value: "english", label: "English" },
-                        { value: "auto", label: "Auto" },
+                        { value: "chinese", label: t("asrTasks.tasks.language.chinese") },
+                        { value: "english", label: t("asrTasks.tasks.language.english") },
+                        { value: "auto", label: t("asrTasks.tasks.auto") },
                       ]}
                     />
                   </Form.Item>
@@ -652,25 +663,24 @@ export default function DirectoryTasksPanel({
               </>
             ) : null}
             <Col xs={12} md={8}>
-              <Form.Item name="recursive" label="Recursive" valuePropName="checked">
+              <Form.Item name="recursive" label={t("asrTasks.tasks.recursive")} valuePropName="checked">
                 <Switch />
               </Form.Item>
             </Col>
             <Col xs={12} md={8}>
-              <Form.Item name="enabled" label="Enabled" valuePropName="checked">
+              <Form.Item name="enabled" label={t("common.enabled")} valuePropName="checked">
                 <Switch />
               </Form.Item>
             </Col>
             <Col xs={24}>
-              <Form.Item name="external_devices" label="External Devices">
+              <Form.Item name="external_devices" label={t("asrTasks.tasks.externalDevices")}>
                 <Input.TextArea
                   rows={2}
-                  placeholder="Optional device names, one per line or comma-separated, e.g. LEFT, RIGHT"
+                  placeholder={t("asrTasks.tasks.externalDevicesPlaceholder")}
                 />
               </Form.Item>
               <Text type="secondary" style={{ fontSize: 12 }}>
-                Matching mounted devices are imported into Audio Directory under a root folder with
-                the same device name. Imported files keep their original relative paths.
+                {t("asrTasks.tasks.externalDevicesHelp")}
               </Text>
             </Col>
           </Row>
@@ -684,7 +694,7 @@ export default function DirectoryTasksPanel({
         pagination={false}
         columns={[
           {
-            title: "Task",
+            title: t("asrTasks.field.task"),
             dataIndex: "name",
             render: (_value, record) => (
               <Space direction="vertical" size={0}>
@@ -695,7 +705,7 @@ export default function DirectoryTasksPanel({
                   style={{ padding: 0, height: "auto", alignSelf: "flex-start" }}
                   onClick={() => onOpenTask(record.id)}
                 >
-                  View details
+                  {t("asrTasks.tasks.viewDetails")}
                 </Button>
                 <Text type="secondary" style={{ fontSize: 12 }}>
                   {record.audio_dir}
@@ -704,17 +714,20 @@ export default function DirectoryTasksPanel({
                   <Tag>{record.model}</Tag>
                   <Tag>{record.language}</Tag>
                   <Tag>
-                    {record.summary.effective_max_concurrent_files ??
-                      record.max_concurrent_files ??
-                      1}
-                    /{record.max_concurrent_files ?? 1} files
+                    {t("asrTasks.tasks.filesConcurrency", {
+                      effective:
+                        record.summary.effective_max_concurrent_files ??
+                        record.max_concurrent_files ??
+                        1,
+                      max: record.max_concurrent_files ?? 1,
+                    })}
                   </Tag>
                 </Space>
               </Space>
             ),
           },
           {
-            title: "Progress",
+            title: t("asrTasks.tasks.progress"),
             render: (_value, record) => {
               const total = record.summary.processed + record.summary.pending;
               const percent = total ? Math.round((record.summary.processed / total) * 100) : 0;
@@ -722,42 +735,53 @@ export default function DirectoryTasksPanel({
                 <Space direction="vertical" style={{ width: "100%" }} size={0}>
                   <Progress percent={percent} size="small" />
                   <Text type="secondary" style={{ fontSize: 12 }}>
-                    processed {record.summary.processed}, pending {record.summary.pending},
-                    failed {record.summary.failed}
-                    {record.summary.partial_success > 0
-                      ? `, partial ${record.summary.partial_success} (${record.summary.failed_chunk_count} chunks)`
-                      : ""}
-                    , deleted after processing {record.summary.deleted_after_processing}
+                    {t("asrTasks.tasks.progressSummary", {
+                      processed: record.summary.processed,
+                      pending: record.summary.pending,
+                      failed: record.summary.failed,
+                      partial:
+                        record.summary.partial_success > 0
+                          ? t("asrTasks.tasks.progressPartial", {
+                              partial: record.summary.partial_success,
+                              chunks: record.summary.failed_chunk_count,
+                            })
+                          : "",
+                      deleted: record.summary.deleted_after_processing,
+                    })}
                   </Text>
                 </Space>
               );
             },
           },
           {
-            title: "Schedule",
+            title: t("asrTasks.field.schedule"),
             render: (_value, record) => (
               <Space direction="vertical" size={0}>
-                <Text>{record.enabled ? formatSchedule(record.schedule) : "Disabled"}</Text>
+                <Text>{record.enabled ? formatSchedule(record.schedule) : t("common.disabled")}</Text>
                 <Text type="secondary" style={{ fontSize: 12 }}>
-                  next {formatTime(record.next_run_at_ms)}
+                  {t("asrTasks.tasks.nextRun", { time: formatTime(record.next_run_at_ms) })}
                 </Text>
                 <Tag>{record.runtime_strategy}</Tag>
                 <Tag color={record.transcription_mode === "moss_joint" ? "cyan" : "default"}>
-                  {record.transcription_mode === "moss_joint" ? "MOSS joint" : "standard"}
+                  {record.transcription_mode === "moss_joint"
+                    ? t("asrTasks.tasks.mode.mossJoint")
+                    : t("asrTasks.tasks.mode.standard")}
                 </Tag>
                 {record.summary.effective_max_concurrent_files !== record.max_concurrent_files ? (
-                  <Tag color="warning">effective 1</Tag>
+                  <Tag color="warning">{t("asrTasks.tasks.effectiveOne")}</Tag>
                 ) : null}
                 {record.transcription_mode !== "moss_joint" && record.diarization?.enabled ? (
                   <Tag color={record.summary.diarization_ready ? "purple" : "warning"}>
-                    {record.summary.diarization_ready ? "speakers ready" : "speakers setup"}
+                    {record.summary.diarization_ready
+                      ? t("asrTasks.tasks.speakersReady")
+                      : t("asrTasks.tasks.speakersSetup")}
                   </Tag>
                 ) : null}
               </Space>
             ),
           },
           {
-            title: "Status",
+            title: t("common.status"),
             render: (_value, record) => (
               <Space direction="vertical" size={0}>
                 <Tag
@@ -771,7 +795,7 @@ export default function DirectoryTasksPanel({
                           : "success"
                   }
                 >
-                  {pauseStatusLabel(record)}
+                  {pauseStatusLabel(t, record)}
                 </Tag>
                 {record.last_error ? (
                   <Text type="danger" style={{ fontSize: 12 }}>
@@ -782,7 +806,7 @@ export default function DirectoryTasksPanel({
             ),
           },
           {
-            title: "Actions",
+            title: t("common.actions"),
             render: (_value, record) => {
               const importProgress = externalImportProgressByTask[record.id];
               const importing = importProgress?.status === "importing";
@@ -793,7 +817,7 @@ export default function DirectoryTasksPanel({
                     disabled={record.summary.running || Boolean(record.paused)}
                     onClick={() => onRunTask(record.id)}
                   >
-                    {record.summary.running ? "Running..." : "Run"}
+                    {record.summary.running ? t("asrTasks.tasks.runningEllipsis") : t("asrTasks.field.run")}
                   </Button>
                   {record.external_devices?.length ? (
                     <Button
@@ -803,12 +827,12 @@ export default function DirectoryTasksPanel({
                       disabled={record.summary.running || importing}
                       title={
                         record.summary.running
-                          ? "Pause the ASR run before importing external files."
+                          ? t("asrTasks.tasks.pauseBeforeImport")
                           : undefined
                       }
                       onClick={() => onRunExternalImport(record.id)}
                     >
-                      {importing ? "Importing" : "Import External"}
+                      {importing ? t("asrTasks.tasks.importing") : t("asrTasks.tasks.importExternal")}
                     </Button>
                   ) : null}
                   {record.paused ? (
@@ -818,7 +842,7 @@ export default function DirectoryTasksPanel({
                       icon={<PlayCircleOutlined />}
                       onClick={() => onResumeTask(record.id)}
                     >
-                      Resume
+                      {t("common.resume")}
                     </Button>
                   ) : (
                     <Dropdown
@@ -827,12 +851,12 @@ export default function DirectoryTasksPanel({
                         items: [
                           {
                             key: "temporary",
-                            label: "Pause until next schedule",
+                            label: t("asrTasks.pause.untilNextSchedule"),
                             icon: <PauseCircleOutlined />,
                           },
                           {
                             key: "long_term",
-                            label: "Pause indefinitely",
+                            label: t("asrTasks.pause.indefinitely"),
                             icon: <StopOutlined />,
                           },
                         ],
@@ -841,18 +865,18 @@ export default function DirectoryTasksPanel({
                       }}
                     >
                       <Button size="small" icon={<PauseCircleOutlined />}>
-                        Pause
+                        {t("common.pause")}
                       </Button>
                     </Dropdown>
                   )}
                   {record.summary.running && !record.paused ? (
                     <Popconfirm
-                      title="Force pause this ASR task?"
-                      description="The current native ASR process will be terminated and the file will resume from pending later."
+                      title={t("asrTasks.pause.forceConfirmTitle")}
+                      description={t("asrTasks.pause.forceConfirmDescription")}
                       onConfirm={() => onPauseTask(record.id, true, "long_term")}
                     >
                       <Button size="small" danger icon={<StopOutlined />}>
-                        Force Pause
+                        {t("asrTasks.pause.force")}
                       </Button>
                     </Popconfirm>
                   ) : null}
@@ -861,7 +885,7 @@ export default function DirectoryTasksPanel({
                     icon={<SettingOutlined />}
                     onClick={() => openEdit(record)}
                   >
-                    Edit
+                    {t("common.edit")}
                   </Button>
                   <Button
                     size="small"
@@ -871,7 +895,7 @@ export default function DirectoryTasksPanel({
                       setDeleteConfirmName("");
                     }}
                   >
-                    Delete
+                    {t("common.delete")}
                   </Button>
                 </Space>
               );
@@ -887,7 +911,7 @@ export default function DirectoryTasksPanel({
             if (!importProgress) {
               return null;
             }
-            const currentFileCopy = externalImportCurrentFileCopyLabel(importProgress);
+            const currentFileCopy = externalImportCurrentFileCopyLabel(t, importProgress);
             return (
               <div style={{ padding: "8px 16px 12px" }}>
                 <Progress
@@ -896,20 +920,34 @@ export default function DirectoryTasksPanel({
                   status={externalImportProgressStatus(importProgress)}
                 />
                 <Space wrap size={[12, 6]} style={{ marginTop: 8 }}>
-                  <Text strong>{externalImportProgressLabel(importProgress)}</Text>
+                  <Text strong>{externalImportProgressLabel(t, importProgress)}</Text>
                   <Text type="secondary">
-                    Current file: {externalImportCurrentFileName(importProgress)}
+                    {t("asrTasks.import.currentFile", {
+                      name: externalImportCurrentFileName(importProgress),
+                    })}
                   </Text>
-                  <Tag>Scanned total: {importProgress.total_files_discovered}</Tag>
-                  <Tag color="success">Imported: {importProgress.imported}</Tag>
+                  <Tag>
+                    {t("asrTasks.import.scannedTotal", {
+                      count: importProgress.total_files_discovered,
+                    })}
+                  </Tag>
+                  <Tag color="success">
+                    {t("asrTasks.import.imported", { count: importProgress.imported })}
+                  </Tag>
                   {importProgress.processed_record_skipped > 0 ? (
                     <Tag color="blue">
-                      Already processed: {importProgress.processed_record_skipped}
+                      {t("asrTasks.import.alreadyProcessed", {
+                        count: importProgress.processed_record_skipped,
+                      })}
                     </Tag>
                   ) : null}
-                  <Tag>Processed: {importProgress.processed_files}</Tag>
+                  <Tag>
+                    {t("asrTasks.import.processed", { count: importProgress.processed_files })}
+                  </Tag>
                   {importProgress.failed > 0 ? (
-                    <Tag color="error">Failed: {importProgress.failed}</Tag>
+                    <Tag color="error">
+                      {t("asrTasks.import.failed", { count: importProgress.failed })}
+                    </Tag>
                   ) : null}
                   {currentFileCopy ? <Text type="secondary">{currentFileCopy}</Text> : null}
                 </Space>
@@ -919,9 +957,9 @@ export default function DirectoryTasksPanel({
         }}
       />
       <Modal
-        title="Delete ASR task"
+        title={t("asrTasks.tasks.deleteTitle")}
         open={Boolean(deleteTarget)}
-        okText="Delete"
+        okText={t("common.delete")}
         okButtonProps={{
           danger: true,
           disabled: !deleteTarget || deleteConfirmName !== deleteTarget.name,
@@ -939,7 +977,7 @@ export default function DirectoryTasksPanel({
       >
         <Space direction="vertical" style={{ width: "100%" }}>
           <Text>
-            This is a destructive operation. Type the full task name to confirm.
+            {t("asrTasks.tasks.deleteWarning")}
           </Text>
           {deleteTarget ? (
             <>
@@ -949,7 +987,7 @@ export default function DirectoryTasksPanel({
           ) : null}
           <Input
             value={deleteConfirmName}
-            placeholder="Type task name"
+            placeholder={t("asrTasks.field.typeTaskName")}
             onChange={(event) => setDeleteConfirmName(event.target.value)}
           />
         </Space>
@@ -957,12 +995,12 @@ export default function DirectoryTasksPanel({
       <Modal
         title={
           volumePrompt && volumePrompt.volumes.length === 1
-            ? "External device detected"
-            : "External devices detected"
+            ? t("asrTasks.tasks.deviceDetectedOne")
+            : t("asrTasks.tasks.deviceDetectedOther")
         }
         open={Boolean(volumePrompt)}
-        okText="Add"
-        cancelText="Skip"
+        okText={t("common.add")}
+        cancelText={t("asrTasks.tasks.skip")}
         confirmLoading={volumePromptLoading}
         onOk={() => void addPromptedVolumes()}
         onCancel={closeVolumePrompt}
@@ -972,8 +1010,8 @@ export default function DirectoryTasksPanel({
           <Space direction="vertical" size={8} style={{ width: "100%" }}>
             <Text type="secondary">
               {volumePrompt.task
-                ? "Add the following device to this task and import its data."
-                : "Add the following device to this task configuration."}
+                ? t("asrTasks.tasks.addDeviceAndImport")
+                : t("asrTasks.tasks.addDeviceToConfig")}
             </Text>
             {volumePrompt.volumes.map((volume) => (
               <Card key={`${volume.name}:${volume.mount_path}`} size="small">

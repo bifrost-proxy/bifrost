@@ -8,6 +8,7 @@ import type {
 } from '../../../types';
 import { Search } from '../Search';
 import { BodyTypeMenu } from '../panes/Body/BodyTypeMenu';
+import { useI18n } from '../../../i18n';
 
 const { Text } = Typography;
 
@@ -55,6 +56,7 @@ export const Panel = ({
   contentOverflow = 'auto',
   bodyFormatTabs = ['Body'],
 }: PanelProps) => {
+  const { t } = useI18n();
   const { token } = theme.useToken();
 
   const enabledTabs = tabs.filter((tab) => tab.enable !== false);
@@ -101,7 +103,9 @@ export const Panel = ({
           }}
         >
           <Text strong style={{ fontSize: 14 }}>
-            {name}
+            {name === 'Request'
+              ? t('trafficDetail.panel.request')
+              : t('trafficDetail.panel.response')}
           </Text>
           <div
             style={{

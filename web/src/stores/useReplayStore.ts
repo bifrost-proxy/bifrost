@@ -27,6 +27,7 @@ import { buildApiUrl, buildWsUrl } from '../runtime';
 import { isConnectionIssueError, notifyApiBusinessError } from '../api/client';
 
 import type { RequestType } from '../types';
+import { t } from '../i18n';
 
 export type RequestPanelTab = 'params' | 'headers' | 'cookies' | 'body' | 'history';
 export type ResponsePanelTab = 'Body' | 'Header' | 'Set-Cookie' | 'Matched Rules' | 'Messages';
@@ -397,7 +398,7 @@ export const useReplayStore = create<ReplayState>()(
             });
           } else {
             const saved = await replayApi.createRequest({
-              name: name || `Request ${Date.now()}`,
+              name: name || t('shared.replay.defaultRequestName', { id: Date.now() }),
               request_type: currentRequest.request_type,
               method: currentRequest.method,
               url: currentRequest.url,
@@ -435,10 +436,10 @@ export const useReplayStore = create<ReplayState>()(
             await get().loadAllHistory(1, nextUiState.historyPageSize);
           }
 
-          message.success('Request saved');
+          message.success(t('shared.replay.requestSaved'));
           return true;
         } catch (e) {
-          message.error(`Failed to save: ${e}`);
+          message.error(t('shared.replay.saveFailed', { error: String(e) }));
           return false;
         } finally {
           set({ loading: false });
@@ -455,7 +456,7 @@ export const useReplayStore = create<ReplayState>()(
               headers: [],
               duration_ms: 0,
               applied_rules: [],
-              error: 'Please enter a URL',
+              error: t('shared.replay.enterUrl'),
             },
             responsePanelCollapsed: false,
           });
@@ -542,7 +543,7 @@ export const useReplayStore = create<ReplayState>()(
 
             const reader = response.body?.getReader();
             if (!reader) {
-              throw new Error('No response body');
+              throw new Error(t('shared.replay.noResponseBody'));
             }
 
             const sseController = {
@@ -677,7 +678,7 @@ export const useReplayStore = create<ReplayState>()(
                 await loadAllHistory(1, nextUiState.historyPageSize);
               }
             } else {
-              throw new Error(result.error || 'Unknown error');
+              throw new Error(result.error || t('shared.replay.unknownError'));
             }
             set({ executing: false, abortControllerRef: null });
           }
@@ -708,7 +709,7 @@ export const useReplayStore = create<ReplayState>()(
             requestsTotal: response.total,
           });
         } catch (e) {
-          handleReplayLoadError(e, 'Failed to load requests');
+          handleReplayLoadError(e, t('shared.replay.loadRequestsFailed'));
         } finally {
           set({ loading: false });
         }
@@ -722,7 +723,7 @@ export const useReplayStore = create<ReplayState>()(
             historyTotal: response.total,
           });
         } catch (e) {
-          handleReplayLoadError(e, 'Failed to load history');
+          handleReplayLoadError(e, t('shared.replay.loadHistoryFailed'));
         }
       },
 
@@ -749,7 +750,7 @@ export const useReplayStore = create<ReplayState>()(
             },
           });
         } catch (e) {
-          handleReplayLoadError(e, 'Failed to load history');
+          handleReplayLoadError(e, t('shared.replay.loadHistoryFailed'));
         } finally {
           set({ loading: false });
         }
@@ -760,7 +761,7 @@ export const useReplayStore = create<ReplayState>()(
           const groups = await replayApi.listGroups();
           set({ groups });
         } catch (e) {
-          handleReplayLoadError(e, 'Failed to load groups');
+          handleReplayLoadError(e, t('shared.replay.loadGroupsFailed'));
         }
       },
 
@@ -772,10 +773,10 @@ export const useReplayStore = create<ReplayState>()(
               ? state.groups.map((item) => (item.id === group.id ? group : item))
               : [...state.groups, group],
           }));
-          message.success('Folder created');
+          message.success(t('shared.replay.folderCreated'));
           return true;
         } catch (e) {
-          message.error(`Failed to create folder: ${e}`);
+          message.error(t('shared.replay.createFolderFailed', { error: String(e) }));
           return false;
         }
       },
@@ -785,10 +786,10 @@ export const useReplayStore = create<ReplayState>()(
           await replayApi.deleteGroup(id);
           const { groups } = get();
           set({ groups: groups.filter(g => g.id !== id) });
-          message.success('Folder deleted');
+          message.success(t('shared.replay.folderDeleted'));
           return true;
         } catch (e) {
-          message.error(`Failed to delete folder: ${e}`);
+          message.error(t('shared.replay.deleteFolderFailed', { error: String(e) }));
           return false;
         }
       },
@@ -800,10 +801,10 @@ export const useReplayStore = create<ReplayState>()(
           set({
             groups: groups.map(g => g.id === id ? { ...g, name } : g),
           });
-          message.success('Folder renamed');
+          message.success(t('shared.replay.folderRenamed'));
           return true;
         } catch (e) {
-          message.error(`Failed to rename folder: ${e}`);
+          message.error(t('shared.replay.renameFolderFailed', { error: String(e) }));
           return false;
         }
       },
@@ -825,10 +826,10 @@ export const useReplayStore = create<ReplayState>()(
               },
             });
           }
-          message.success('Request moved');
+          message.success(t('shared.replay.requestMoved'));
           return true;
         } catch (e) {
-          message.error(`Failed to move request: ${e}`);
+          message.error(t('shared.replay.moveRequestFailed', { error: String(e) }));
           return false;
         }
       },
@@ -870,10 +871,10 @@ export const useReplayStore = create<ReplayState>()(
           if (uiState.mode === 'history') {
             await loadAllHistory(1);
           }
-          message.success('Request deleted');
+          message.success(t('shared.replay.requestDeleted'));
           return true;
         } catch (e) {
-          message.error(`Failed to delete: ${e}`);
+          message.error(t('shared.replay.deleteFailed', { error: String(e) }));
           return false;
         } finally {
           set({
@@ -889,10 +890,10 @@ export const useReplayStore = create<ReplayState>()(
           set({
             recentHistory: recentHistory.filter(h => h.id !== id),
           });
-          message.success('History deleted');
+          message.success(t('shared.replay.historyDeleted'));
           return true;
         } catch (e) {
-          message.error(`Failed to delete: ${e}`);
+          message.error(t('shared.replay.deleteFailed', { error: String(e) }));
           return false;
         }
       },
@@ -902,12 +903,12 @@ export const useReplayStore = create<ReplayState>()(
           const result = await replayApi.clearHistory(requestId);
           if (result.success) {
             set({ recentHistory: [] });
-            message.success(`Deleted ${result.deleted} history records`);
+            message.success(t('shared.replay.historyCleared', { count: result.deleted }));
             return true;
           }
           return false;
         } catch (e) {
-          message.error(`Failed to clear: ${e}`);
+          message.error(t('shared.replay.clearFailed', { error: String(e) }));
           return false;
         }
       },
@@ -958,7 +959,7 @@ export const useReplayStore = create<ReplayState>()(
             }
           }
         } catch (e) {
-          handleReplayLoadError(e, 'Failed to load request');
+          handleReplayLoadError(e, t('shared.replay.loadRequestFailed'));
         } finally {
           set({ loading: false });
         }
@@ -982,7 +983,7 @@ export const useReplayStore = create<ReplayState>()(
             });
           }
         } catch (e) {
-          handleReplayLoadError(e, 'Failed to load history detail');
+          handleReplayLoadError(e, t('shared.replay.loadHistoryDetailFailed'));
         }
       },
 
@@ -1021,7 +1022,7 @@ export const useReplayStore = create<ReplayState>()(
             });
           }
         } catch (e) {
-          handleReplayLoadError(e, 'Failed to load history detail');
+          handleReplayLoadError(e, t('shared.replay.loadHistoryDetailFailed'));
         } finally {
           set({ historyDetailLoading: false });
         }
@@ -1063,9 +1064,9 @@ export const useReplayStore = create<ReplayState>()(
             },
           });
 
-          message.success('Request imported from traffic');
+          message.success(t('shared.replay.importedFromTraffic'));
         } catch (e) {
-          message.error(`Failed to import: ${e}`);
+          message.error(t('shared.replay.importFailed', { error: String(e) }));
         } finally {
           set({ loading: false });
         }
@@ -1106,7 +1107,7 @@ export const useReplayStore = create<ReplayState>()(
           },
         });
 
-        message.success('Replay parameters restored from history');
+        message.success(t('shared.replay.restoredFromHistory'));
       },
 
       setResponsePanelCollapsed: (collapsed) => {
@@ -1156,7 +1157,7 @@ export const useReplayStore = create<ReplayState>()(
               headers: [],
               duration_ms: 0,
               applied_rules: [],
-              error: 'Please enter a URL',
+              error: t('shared.replay.enterUrl'),
             },
             responsePanelCollapsed: false,
           });
@@ -1243,7 +1244,9 @@ export const useReplayStore = create<ReplayState>()(
                   ...streamingConnection,
                   status: 'disconnected',
                   endedAt: Date.now(),
-                  error: event.code !== 1000 ? `Closed: ${event.code} ${event.reason}` : undefined,
+                  error: event.code !== 1000
+                    ? t('shared.replay.wsClosed', { code: event.code, reason: event.reason })
+                    : undefined,
                 }
                 : null,
               webSocketRef: null,
@@ -1257,7 +1260,7 @@ export const useReplayStore = create<ReplayState>()(
                 ? {
                   ...streamingConnection,
                   status: 'error',
-                  error: 'Connection error',
+                  error: t('shared.connectionError'),
                   endedAt: Date.now(),
                 }
                 : null,
@@ -1312,7 +1315,7 @@ export const useReplayStore = create<ReplayState>()(
             set({
               streamingConnection: {
                 ...streamingConnection,
-                error: `Failed to send: ${e}`,
+                error: t('shared.replay.sendFailed', { error: String(e) }),
               },
             });
           }

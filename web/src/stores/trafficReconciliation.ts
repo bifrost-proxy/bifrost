@@ -30,6 +30,7 @@ import {
   createRecordsMutation,
   compactTrafficSummaryToTrafficSummary,
 } from "./trafficRecordModel";
+import { t } from "../i18n";
 
 function withinReconciliationDeadline<T>(
   request: Promise<T>,
@@ -340,7 +341,7 @@ export function createTrafficReconciliation(
                           : state.detailLoading,
                       detailError:
                         selectionRemoved || !state.selectedId
-                          ? "Request was deleted"
+                          ? t("shared.traffic.requestDeleted")
                           : state.detailError,
                     }
                   : {}),
@@ -759,7 +760,7 @@ export function createTrafficReconciliation(
           responseRawBody: detailRemoved ? null : prevState.responseRawBody,
           detailLoading: detailRemoved ? false : prevState.detailLoading,
           detailError: detailRemoved
-            ? "Request was deleted"
+            ? t("shared.traffic.requestDeleted")
             : prevState.detailError,
           selectedId: selectedDeleted ? undefined : prevState.selectedId,
           filterVersion:

@@ -4,6 +4,7 @@ import { getIpTlsPending, approveIpTls, skipIpTls, clearIpTlsPending } from "../
 import { getClientId } from "../services/clientId";
 import { buildApiUrl } from "../runtime";
 import { isConnectionIssueError } from "../api/client";
+import { t } from "../i18n";
 
 interface PendingIpTlsEvent {
   event_type: "new" | "approved" | "skipped";
@@ -110,8 +111,8 @@ export const usePendingIpTlsStore = create<PendingIpTlsState>((set, get) => ({
                 pendingCount: data.total_pending,
               });
               if (Notification.permission === "granted") {
-                new Notification("New IP TLS Interception Request", {
-                  body: `IP ${data.pending.ip} is requesting TLS interception decision`,
+                new Notification(t("shared.pendingIpTls.notifyTitle"), {
+                  body: t("shared.pendingIpTls.notifyBody", { ip: data.pending.ip }),
                   icon: "/favicon.ico",
                   tag: "pending-ip-tls",
                   requireInteraction: true,

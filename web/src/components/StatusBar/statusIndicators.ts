@@ -1,4 +1,5 @@
 import type { TlsConfig } from "../../api/config";
+import { t as globalT, type TFunction } from "../../i18n";
 
 export interface TlsInterceptionIndicator {
   active: boolean;
@@ -9,12 +10,13 @@ export interface TlsInterceptionIndicator {
 
 export function getTlsInterceptionIndicator(
   config: TlsConfig | null,
+  t: TFunction = globalT,
 ): TlsInterceptionIndicator {
   if (!config) {
     return {
       active: false,
-      text: "Unknown",
-      detail: "TLS interception status has not loaded yet",
+      text: t("common.unknown"),
+      detail: t("app.statusBar.tlsNotLoaded"),
       state: "unknown",
     };
   }
@@ -22,8 +24,8 @@ export function getTlsInterceptionIndicator(
   if (config.enable_tls_interception) {
     return {
       active: true,
-      text: "Full On",
-      detail: "HTTPS interception is globally enabled for all TLS traffic",
+      text: t("app.statusBar.tlsFullOn"),
+      detail: t("app.statusBar.tlsFullOnDetail"),
       state: "full",
     };
   }
@@ -36,16 +38,21 @@ export function getTlsInterceptionIndicator(
   if (scopedCount > 0) {
     return {
       active: false,
-      text: "Scoped",
-      detail: `${scopedCount} domain, app, or IP rule${scopedCount === 1 ? "" : "s"} can still enable HTTPS interception`,
+      text: t("app.statusBar.tlsScoped"),
+      detail: t(
+        scopedCount === 1
+          ? "app.statusBar.tlsScopedDetailOne"
+          : "app.statusBar.tlsScopedDetailOther",
+        { count: scopedCount },
+      ),
       state: "limited",
     };
   }
 
   return {
     active: false,
-    text: "Off",
-    detail: "Global HTTPS interception is disabled",
+    text: t("common.off"),
+    detail: t("app.statusBar.tlsOffDetail"),
     state: "limited",
   };
 }

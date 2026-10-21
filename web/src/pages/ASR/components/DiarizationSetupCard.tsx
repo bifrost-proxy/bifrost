@@ -32,6 +32,7 @@ import {
   updateAsrAssistedVoiceprintLabels,
   verifyAsrSpeakerEnrollmentPrompt,
 } from "../../../api/asr";
+import { t as translate, useI18n } from "../../../i18n";
 
 const { Text } = Typography;
 const DEFAULT_PROFILE = "sherpa-onnx-balanced";
@@ -44,6 +45,7 @@ const IDENTITY_VERIFY_MAX_RECORDING_MS = 12000;
 const IDENTITY_VERIFY_INTERVAL_MS = 1400;
 
 export default function DiarizationSetupCard() {
+  const { t } = useI18n();
   const [status, setStatus] = useState<AsrDiarizationStatus | null>(null);
   const [speakerProfiles, setSpeakerProfiles] = useState<AsrSpeakerProfileSummary[]>([]);
   const [loading, setLoading] = useState(false);
@@ -81,7 +83,7 @@ export default function DiarizationSetupCard() {
       setStatus(nextStatus);
       setSpeakerProfiles(profiles);
     } catch (error) {
-      message.error(error instanceof Error ? error.message : "Failed to load diarization status");
+      message.error(error instanceof Error ? error.message : t("asr.diarization.loadStatusFailed"));
     } finally {
       setLoading(false);
     }
@@ -96,9 +98,9 @@ export default function DiarizationSetupCard() {
     try {
       const next = await initAsrDiarizationProfile(DEFAULT_PROFILE);
       setStatus(next);
-      message.success("Speaker diarization profile initialized");
+      message.success(t("asr.diarization.initialized"));
     } catch (error) {
-      message.error(error instanceof Error ? error.message : "Failed to initialize diarization");
+      message.error(error instanceof Error ? error.message : t("asr.diarization.initFailed"));
     } finally {
       setInitializing(false);
     }
@@ -107,7 +109,7 @@ export default function DiarizationSetupCard() {
   const enrollSpeaker = async () => {
     const name = speakerName.trim();
     if (!name) {
-      message.warning("Speaker name is required");
+      message.warning(t("asr.diarization.speakerNameRequired"));
       return;
     }
     setEnrolling(true);
@@ -133,7 +135,7 @@ export default function DiarizationSetupCard() {
         await appendAsrSpeakerEnrollmentAudio(session.id, prompt.id, audio, true);
       }
       const result = await finishAsrSpeakerEnrollment(session.id);
-      message.success(`Voiceprint enrolled for ${result.profile.display_name}`);
+      message.success(t("asr.diarization.enrolled", { name: result.profile.display_name }));
       setEnrollOpen(false);
       setSpeakerName("");
       setActivePrompt(null);
@@ -143,7 +145,7 @@ export default function DiarizationSetupCard() {
       setActiveMatchScore(0);
       await refresh();
     } catch (error) {
-      message.error(error instanceof Error ? error.message : "Failed to enroll speaker voiceprint");
+      message.error(error instanceof Error ? error.message : t("asr.diarization.enrollFailed"));
     } finally {
       setEnrolling(false);
     }
@@ -152,13 +154,13 @@ export default function DiarizationSetupCard() {
   const deleteProfile = async (profileId: string) => {
     try {
       await deleteAsrSpeakerProfile(profileId);
-      message.success("Voiceprint deleted");
+      message.success(t("asr.diarization.voiceprintDeleted"));
       if (identityResult?.profile_id === profileId) {
         setIdentityResult(null);
       }
       await refresh();
     } catch (error) {
-      message.error(error instanceof Error ? error.message : "Failed to delete voiceprint");
+      message.error(error instanceof Error ? error.message : t("asr.diarization.deleteVoiceprintFailed"));
     }
   };
 
@@ -174,14 +176,14 @@ export default function DiarizationSetupCard() {
       });
       setIdentityResult(result);
       if (result.matched) {
-        message.success(`Current speaker: ${result.display_name}`);
+        message.success(t("asr.diarization.currentSpeaker", { name: result.display_name }));
       } else if (result.status === "insufficient_audio") {
-        message.warning("Need more speech to identify the current speaker");
+        message.warning(t("asr.diarization.needMoreSpeech"));
       } else {
-        message.warning(`Current speaker: ${result.display_name}`);
+        message.warning(t("asr.diarization.currentSpeaker", { name: result.display_name }));
       }
     } catch (error) {
-      message.error(error instanceof Error ? error.message : "Failed to identify current speaker");
+      message.error(error instanceof Error ? error.message : t("asr.diarization.identifyFailed"));
     } finally {
       setIdentifying(false);
     }
@@ -198,7 +200,7 @@ export default function DiarizationSetupCard() {
     try {
       setAssistedTasks(await listAsrTasks());
     } catch (error) {
-      message.error(error instanceof Error ? error.message : "Failed to load ASR tasks");
+      message.error(error instanceof Error ? error.message : t("asr.diarization.loadTasksFailed"));
     }
   };
 
@@ -209,7 +211,7 @@ export default function DiarizationSetupCard() {
     try {
       setAssistedTask(await getAsrTask(taskId));
     } catch (error) {
-      message.error(error instanceof Error ? error.message : "Failed to load task recordings");
+      message.error(error instanceof Error ? error.message : t("asr.diarization.loadRecordingsFailed"));
     }
   };
 
@@ -225,7 +227,7 @@ export default function DiarizationSetupCard() {
       });
       setAssistedSession(payload);
     } catch (error) {
-      message.error(error instanceof Error ? error.message : "Failed to prepare voiceprint candidates");
+      message.error(error instanceof Error ? error.message : t("asr.diarization.prepareCandidatesFailed"));
     } finally {
       setAssistedBusy(false);
     }
@@ -239,7 +241,7 @@ export default function DiarizationSetupCard() {
       ]);
       setAssistedSession(payload);
     } catch (error) {
-      message.error(error instanceof Error ? error.message : "Failed to save candidate label");
+      message.error(error instanceof Error ? error.message : t("asr.diarization.saveLabelFailed"));
     }
   };
 
@@ -262,12 +264,12 @@ export default function DiarizationSetupCard() {
     setAssistedBusy(true);
     try {
       const result = await finishAsrAssistedVoiceprintSession(assistedSession.session.id);
-      message.success(`Voiceprint samples saved for ${result.profile.display_name}`);
+      message.success(t("asr.diarization.samplesSaved", { name: result.profile.display_name }));
       setAssistedOpen(false);
       setAssistedSession(null);
       await refresh();
     } catch (error) {
-      message.error(error instanceof Error ? error.message : "Failed to finish voiceprint enrollment");
+      message.error(error instanceof Error ? error.message : t("asr.diarization.finishFailed"));
     } finally {
       setAssistedBusy(false);
     }
@@ -297,7 +299,7 @@ export default function DiarizationSetupCard() {
       setProfileDetail(await getAsrSpeakerProfile(profileId));
       setProfileDetailOpen(true);
     } catch (error) {
-      message.error(error instanceof Error ? error.message : "Failed to load voiceprint samples");
+      message.error(error instanceof Error ? error.message : t("asr.diarization.loadSamplesFailed"));
     }
   };
 
@@ -306,9 +308,9 @@ export default function DiarizationSetupCard() {
       await deleteAsrSpeakerProfileSample(profileId, sampleId);
       setProfileDetail(await getAsrSpeakerProfile(profileId));
       await refresh();
-      message.success("Voiceprint sample deleted and profile rebuilt");
+      message.success(t("asr.diarization.sampleDeleted"));
     } catch (error) {
-      message.error(error instanceof Error ? error.message : "Failed to delete voiceprint sample");
+      message.error(error instanceof Error ? error.message : t("asr.diarization.deleteSampleFailed"));
     }
   };
 
@@ -320,15 +322,17 @@ export default function DiarizationSetupCard() {
         title={
           <Space>
             <AudioOutlined />
-            <span>Speaker Diarization</span>
+            <span>{t("asr.diarization.title")}</span>
             <Tag color={status?.profile.ready ? "success" : "warning"}>
-              {status?.profile.ready ? "Ready" : "Not initialized"}
+              {status?.profile.ready ? t("asr.diarization.ready") : t("asr.diarization.notInitialized")}
             </Tag>
           </Space>
         }
         extra={
           <Space>
-            <Button size="small" icon={<ReloadOutlined />} loading={loading} onClick={() => void refresh()} />
+            <Button size="small" icon={<ReloadOutlined />} loading={loading} onClick={() => void refresh()}
+              aria-label={t("common.refresh")}
+            />
             <Button
               size="small"
               type="primary"
@@ -337,7 +341,7 @@ export default function DiarizationSetupCard() {
               disabled={!status?.profile.ready}
               onClick={() => void openAssistedEnrollment()}
             >
-              Add from Recording
+              {t("asr.diarization.addFromRecording")}
             </Button>
             <Button
               size="small"
@@ -346,7 +350,7 @@ export default function DiarizationSetupCard() {
               disabled={!status?.profile.ready}
               onClick={() => setEnrollOpen(true)}
             >
-              Record Voice
+              {t("asr.diarization.recordVoice")}
             </Button>
             <Button
               size="small"
@@ -356,7 +360,7 @@ export default function DiarizationSetupCard() {
               loading={identifying}
               onClick={() => void verifyCurrentSpeaker()}
             >
-              Verify Voice
+              {t("asr.diarization.verifyVoice")}
             </Button>
             <Button
               size="small"
@@ -365,23 +369,23 @@ export default function DiarizationSetupCard() {
               loading={initializing}
               onClick={() => void initProfile()}
             >
-              Initialize
+              {t("asr.diarization.initialize")}
             </Button>
           </Space>
         }
         style={{ marginTop: 16 }}
       >
         <Descriptions size="small" column={{ xs: 1, sm: 2, md: 4 }}>
-          <Descriptions.Item label="Profile">
+          <Descriptions.Item label={t("asr.diarization.profile")}>
             {status?.profile.id ?? DEFAULT_PROFILE}
           </Descriptions.Item>
-          <Descriptions.Item label="Engine">
+          <Descriptions.Item label={t("asr.diarization.engine")}>
             {status?.profile.engine ?? "-"}
           </Descriptions.Item>
-          <Descriptions.Item label="Voiceprints">
+          <Descriptions.Item label={t("asr.diarization.voiceprints")}>
             {status?.speaker_profile_count ?? speakerProfiles.length}
           </Descriptions.Item>
-          <Descriptions.Item label="Install dir">
+          <Descriptions.Item label={t("asr.diarization.installDir")}>
             <Text ellipsis={{ tooltip: status?.profile.install_dir }} style={{ maxWidth: 260 }}>
               {status?.profile.install_dir ?? "-"}
             </Text>
@@ -395,15 +399,15 @@ export default function DiarizationSetupCard() {
               <List.Item
                 actions={[
                   <Button key="samples" size="small" onClick={() => void showProfileDetail(profile.id)}>
-                    Samples
+                    {t("asr.diarization.samples")}
                   </Button>,
                   <Button key="append" size="small" onClick={() => void openAssistedEnrollment(profile)}>
-                    Add samples
+                    {t("asr.diarization.addSamples")}
                   </Button>,
                   <Popconfirm
                     key="delete"
-                    title="Delete this voiceprint?"
-                    okText="Delete"
+                    title={t("asr.diarization.deleteVoiceprintConfirm")}
+                    okText={t("common.delete")}
                     okButtonProps={{ danger: true }}
                     onConfirm={() => void deleteProfile(profile.id)}
                   >
@@ -411,7 +415,7 @@ export default function DiarizationSetupCard() {
                       danger
                       size="small"
                       icon={<DeleteOutlined />}
-                      aria-label={`Delete ${profile.display_name} voiceprint`}
+                      aria-label={t("asr.diarization.deleteVoiceprintAria", { name: profile.display_name })}
                       data-testid={`asr-delete-speaker-${profile.id}`}
                     />
                   </Popconfirm>,
@@ -422,7 +426,11 @@ export default function DiarizationSetupCard() {
                   <Text type="secondary">{profile.id}</Text>
                   <Text type="secondary">{profile.embedding_dim}d</Text>
                   <Text type="secondary">
-                    {profile.template_count} samples · {profile.prototype_count} prototypes · {Math.round(profile.total_duration_ms / 100) / 10}s
+                    {t("asr.diarization.profileSummary", {
+                      samples: profile.template_count,
+                      prototypes: profile.prototype_count,
+                      seconds: Math.round(profile.total_duration_ms / 100) / 10,
+                    })}
                   </Text>
                 </Space>
               </List.Item>
@@ -437,17 +445,21 @@ export default function DiarizationSetupCard() {
               </Tag>
               <Text type="secondary">
                 {identityResult.status === "insufficient_audio"
-                  ? `Listening: ${Math.round((identityResult.speech_duration_ms ?? 0) / 100) / 10}s speech`
-                  : `${Math.round(identityResult.confidence * 100)}% match`}
+                  ? t("asr.diarization.listeningSpeech", {
+                      seconds: Math.round((identityResult.speech_duration_ms ?? 0) / 100) / 10,
+                    })
+                  : t("asr.diarization.matchPercent", {
+                      percent: Math.round(identityResult.confidence * 100),
+                    })}
               </Text>
             </Space>
           </Card>
         ) : null}
       </Card>
       <Modal
-        title="Enroll Voiceprint"
+        title={t("asr.diarization.enrollTitle")}
         open={enrollOpen}
-        okText={enrolling ? "Recording" : "Start"}
+        okText={enrolling ? t("asr.diarization.recording") : t("common.start")}
         confirmLoading={enrolling}
         onOk={() => void enrollSpeaker()}
         onCancel={() => {
@@ -467,7 +479,7 @@ export default function DiarizationSetupCard() {
         <Space direction="vertical" style={{ width: "100%" }}>
           <Input
             data-testid="asr-enroll-speaker-name-input"
-            placeholder="Speaker name"
+            placeholder={t("asr.diarization.speakerName")}
             value={speakerName}
             disabled={enrolling}
             onChange={(event) => setSpeakerName(event.target.value)}
@@ -476,11 +488,16 @@ export default function DiarizationSetupCard() {
             <Card size="small" data-testid="asr-enroll-active-prompt">
               <Space direction="vertical">
                 <Tag color="processing">
-                  Listening {activePromptIndex}/{activePromptTotal || 1}
+                  {t("asr.diarization.listeningPrompt", {
+                    index: activePromptIndex,
+                    total: activePromptTotal || 1,
+                  })}
                 </Tag>
                 <Text>{activePrompt.text}</Text>
                 <Text type="secondary" data-testid="asr-enroll-recognized-text">
-                  {activeTranscript ? `Recognized: ${activeTranscript}` : "Waiting for recognized speech"}
+                  {activeTranscript
+                    ? t("asr.diarization.recognized", { text: activeTranscript })
+                    : t("asr.diarization.waitingSpeech")}
                 </Text>
                 <Progress
                   percent={Math.round(activeMatchScore * 100)}
@@ -494,11 +511,17 @@ export default function DiarizationSetupCard() {
         </Space>
       </Modal>
       <Modal
-        title={assistedProfileId ? "Add Voiceprint Samples" : "Initialize Voiceprint from Recording"}
+        title={
+          assistedProfileId
+            ? t("asr.diarization.addSamplesTitle")
+            : t("asr.diarization.initFromRecordingTitle")
+        }
         open={assistedOpen}
         width={860}
         confirmLoading={assistedBusy}
-        okText={assistedSession ? "Save Voiceprint" : "Find Speaker Segments"}
+        okText={
+          assistedSession ? t("asr.diarization.saveVoiceprint") : t("asr.diarization.findSegments")
+        }
         onOk={() => void (assistedSession ? finishAssistedSession() : createAssistedSession())}
         onCancel={() => void closeAssistedEnrollment()}
         okButtonProps={{
@@ -515,12 +538,12 @@ export default function DiarizationSetupCard() {
             <Alert
               type="info"
               showIcon
-              message="Choose a real meeting recording, then confirm only the segments spoken by you."
-              description="Bifrost excludes overlapping and short segments. Nothing is added permanently until you save the voiceprint."
+              message={t("asr.diarization.assistedHint")}
+              description={t("asr.diarization.assistedHintDesc")}
             />
             <Input
               data-testid="asr-assisted-speaker-name"
-              placeholder="Speaker name"
+              placeholder={t("asr.diarization.speakerName")}
               value={speakerName}
               disabled={Boolean(assistedProfileId)}
               onChange={(event) => setSpeakerName(event.target.value)}
@@ -528,7 +551,7 @@ export default function DiarizationSetupCard() {
             <Select
               data-testid="asr-assisted-task-select"
               style={{ width: "100%" }}
-              placeholder="Select an ASR task"
+              placeholder={t("asr.diarization.selectTask")}
               value={assistedTaskId}
               options={assistedTasks.map((task) => ({ label: task.name, value: task.id }))}
               onChange={(value) => void selectAssistedTask(value)}
@@ -536,13 +559,13 @@ export default function DiarizationSetupCard() {
             <Select
               data-testid="asr-assisted-file-select"
               style={{ width: "100%" }}
-              placeholder="Select a completed speaker-aware recording"
+              placeholder={t("asr.diarization.selectRecording")}
               value={assistedFileKey}
               disabled={!assistedTask}
               options={(assistedTask?.files ?? [])
                 .filter((file) => ["success", "partial_success"].includes(file.status) && file.output_timeline_path)
                 .map((file) => ({
-                  label: `${file.source_path.split("/").at(-1) ?? file.source_path}${file.speaker_count ? ` · ${file.speaker_count} speakers` : ""}`,
+                  label: `${file.source_path.split("/").at(-1) ?? file.source_path}${file.speaker_count ? ` · ${t("asr.diarization.speakerCount", { count: file.speaker_count })}` : ""}`,
                   value: file.key,
                 }))}
               onChange={setAssistedFileKey}
@@ -564,10 +587,16 @@ export default function DiarizationSetupCard() {
             <Alert
               type={assistedSession.ready_to_finish ? "success" : "warning"}
               showIcon
-              message={`${assistedSession.selected_count} segments selected · ${Math.round(assistedSession.selected_duration_ms / 100) / 10}s`}
+              message={t("asr.diarization.segmentsSelected", {
+                count: assistedSession.selected_count,
+                seconds: Math.round(assistedSession.selected_duration_ms / 100) / 10,
+              })}
               description={assistedSession.ready_to_finish
-                ? "Enough confirmed speech is selected. More varied, clean segments can improve cross-device recognition."
-                : `Select at least ${assistedSession.minimum_clips} segments and ${assistedSession.minimum_duration_ms / 1000}s of your speech.`}
+                ? t("asr.diarization.enoughSpeech")
+                : t("asr.diarization.selectAtLeast", {
+                    clips: assistedSession.minimum_clips,
+                    seconds: assistedSession.minimum_duration_ms / 1000,
+                  })}
             />
             <List
               size="small"
@@ -582,16 +611,16 @@ export default function DiarizationSetupCard() {
                       icon={<PlayCircleOutlined />}
                       onClick={() => playAssistedCandidate(candidate.start_ms, candidate.end_ms)}
                     >
-                      Play
+                      {t("asr.diarization.play")}
                     </Button>,
                     <Segmented<AsrAssistedCandidateLabel>
                       key="label"
                       size="small"
                       value={candidate.label}
                       options={[
-                        { label: "Mine", value: "mine" },
-                        { label: "Not mine", value: "not_mine" },
-                        { label: "Skip", value: "unsure" },
+                        { label: t("asr.diarization.label.mine"), value: "mine" },
+                        { label: t("asr.diarization.label.notMine"), value: "not_mine" },
+                        { label: t("asr.diarization.label.skip"), value: "unsure" },
                       ]}
                       onChange={(value) => void labelAssistedCandidate(candidate.id, value)}
                     />,
@@ -604,10 +633,10 @@ export default function DiarizationSetupCard() {
                         {(candidate.start_ms / 1000).toFixed(1)}–{(candidate.end_ms / 1000).toFixed(1)}s · {(candidate.duration_ms / 1000).toFixed(1)}s
                       </Text>
                       <Tag color={candidate.quality >= 0.8 ? "success" : "processing"}>
-                        {Math.round(candidate.quality * 100)}% quality
+                        {t("asr.diarization.quality", { percent: Math.round(candidate.quality * 100) })}
                       </Tag>
                     </Space>
-                    <Text ellipsis={{ tooltip: candidate.text }}>{candidate.text || "No transcript text"}</Text>
+                    <Text ellipsis={{ tooltip: candidate.text }}>{candidate.text || t("asr.diarization.noTranscriptText")}</Text>
                   </Space>
                 </List.Item>
               )}
@@ -616,7 +645,11 @@ export default function DiarizationSetupCard() {
         )}
       </Modal>
       <Modal
-        title={profileDetail ? `${profileDetail.display_name} Voiceprint Samples` : "Voiceprint Samples"}
+        title={
+          profileDetail
+            ? t("asr.diarization.profileSamplesTitle", { name: profileDetail.display_name })
+            : t("asr.diarization.samplesTitle")
+        }
         open={profileDetailOpen}
         footer={null}
         onCancel={() => setProfileDetailOpen(false)}
@@ -625,8 +658,8 @@ export default function DiarizationSetupCard() {
         {profileDetail ? (
           <>
             <Descriptions size="small" column={2}>
-              <Descriptions.Item label="Templates">{profileDetail.templates.length}</Descriptions.Item>
-              <Descriptions.Item label="Total speech">{Math.round(profileDetail.total_duration_ms / 100) / 10}s</Descriptions.Item>
+              <Descriptions.Item label={t("asr.diarization.templates")}>{profileDetail.templates.length}</Descriptions.Item>
+              <Descriptions.Item label={t("asr.diarization.totalSpeech")}>{Math.round(profileDetail.total_duration_ms / 100) / 10}s</Descriptions.Item>
             </Descriptions>
             <Divider />
             {profileDetail.templates.length ? (
@@ -638,7 +671,7 @@ export default function DiarizationSetupCard() {
                     actions={[
                       <Popconfirm
                         key="delete"
-                        title="Delete this sample and rebuild the profile?"
+                        title={t("asr.diarization.deleteSampleConfirm")}
                         onConfirm={() => void deleteProfileSample(profileDetail.id, sample.id)}
                       >
                         <Button danger size="small" icon={<DeleteOutlined />} disabled={profileDetail.templates.length <= 1} />
@@ -657,7 +690,11 @@ export default function DiarizationSetupCard() {
                 )}
               />
             ) : (
-              <Alert type="info" message="Legacy centroid profile" description="Add recording samples to migrate this profile to editable multi-template format." />
+              <Alert
+                type="info"
+                message={t("asr.diarization.legacyProfile")}
+                description={t("asr.diarization.legacyProfileDesc")}
+              />
             )}
           </>
         ) : null}
@@ -719,7 +756,7 @@ async function recordPromptPcm16(
       };
       const timeoutId = window.setTimeout(() => {
         settle(() =>
-          reject(new Error("The recognized speech did not match the prompt before timeout")),
+          reject(new Error(translate("asr.diarization.promptTimeout"))),
         );
       }, options.maxDurationMs);
 
@@ -857,7 +894,7 @@ async function recordIdentityPcm16(options: IdentityRecordingOptions): Promise<A
               lastResult ?? {
               matched: false,
               profile_id: null,
-              display_name: "用户A",
+              display_name: translate("asr.diarization.defaultSpeakerName"),
               speaker: "speaker_00",
               confidence: 0,
               status: "insufficient_audio",

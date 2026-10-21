@@ -7,31 +7,33 @@ import {
   ThunderboltOutlined,
 } from "@ant-design/icons";
 import { Button, Popover, message, theme } from "antd";
-import type { CSSProperties } from "react";
+import type { CSSProperties, ReactNode } from "react";
 import { useMemo, useState } from "react";
+import { useI18n, type TranslationKey } from "../../i18n";
 import { copyToClipboard } from "../../utils/clipboard";
 import styles from "./index.module.css";
 
 const INSTALL_COMMAND = "bifrost install-skill -y";
 const SKILL_DOC_URL = "https://github.com/bifrost-proxy/bifrost/blob/main/SKILL.md";
 
-const scenarios = [
+const scenarios: Array<{ icon: ReactNode; labelKey: TranslationKey }> = [
   {
     icon: <FileTextOutlined />,
-    label: "通过 AI 操作规则增删改查",
+    labelKey: "ai.skill.scenario.rules",
   },
   {
     icon: <SearchOutlined />,
-    label: "流量搜索和问题排查",
+    labelKey: "ai.skill.scenario.traffic",
   },
   {
     icon: <ThunderboltOutlined />,
-    label: "多端口独立规则",
+    labelKey: "ai.skill.scenario.ports",
   },
 ];
 
 export default function AiSkillAssistant() {
   const { token } = theme.useToken();
+  const { t } = useI18n();
   const [open, setOpen] = useState(false);
 
   const cssVariables = useMemo(
@@ -52,10 +54,10 @@ export default function AiSkillAssistant() {
   const copyInstallCommand = async () => {
     const ok = await copyToClipboard(INSTALL_COMMAND);
     if (ok) {
-      message.success("Skill install command copied");
+      message.success(t("ai.skill.copied"));
       return;
     }
-    message.error("Failed to copy skill install command");
+    message.error(t("ai.skill.copyFailed"));
   };
 
   const content = (
@@ -69,10 +71,8 @@ export default function AiSkillAssistant() {
           <RobotOutlined />
         </div>
         <div className={styles.titleGroup}>
-          <div className={styles.title}>AI Skill 加速 Bifrost 操作</div>
-          <div className={styles.subtitle}>
-            安装后让强大的 Agent 直接理解代理、规则、流量和远程能力。
-          </div>
+          <div className={styles.title}>{t("ai.skill.title")}</div>
+          <div className={styles.subtitle}>{t("ai.skill.subtitle")}</div>
         </div>
       </div>
       <div className={styles.commandRow}>
@@ -85,19 +85,19 @@ export default function AiSkillAssistant() {
           icon={<CopyOutlined />}
           onClick={copyInstallCommand}
         >
-          Copy
+          {t("common.copy")}
         </Button>
       </div>
       <ul className={styles.scenarioList}>
         {scenarios.map((scenario) => (
-          <li className={styles.scenario} key={scenario.label}>
+          <li className={styles.scenario} key={scenario.labelKey}>
             <span className={styles.scenarioIcon}>{scenario.icon}</span>
-            <span>{scenario.label}</span>
+            <span>{t(scenario.labelKey)}</span>
           </li>
         ))}
       </ul>
       <div className={styles.footer}>
-        <span className={styles.hint}>安装后可在 Agent 中直接调用 Bifrost 能力。</span>
+        <span className={styles.hint}>{t("ai.skill.hint")}</span>
         <Button
           className={styles.link}
           data-testid="ai-skill-assistant-skill-link"
@@ -127,11 +127,11 @@ export default function AiSkillAssistant() {
         type="button"
         className={styles.statusButton}
         data-testid="ai-skill-assistant-trigger"
-        aria-label="Open Bifrost AI skill guide"
+        aria-label={t("ai.skill.triggerAriaLabel")}
         style={cssVariables}
       >
         <RobotOutlined />
-        <span>Skill</span>
+        <span>{t("ai.skill.trigger")}</span>
       </button>
     </Popover>
   );

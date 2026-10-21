@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Alert,
   Button,
@@ -38,24 +38,25 @@ import {
   type AdminAuthStatus,
   type LoginAuditEntry,
 } from "../../../services/adminAuth";
+import { useI18n, type TFunction } from "../../../i18n";
 
 const { Text } = Typography;
 
-const auditColumns: ColumnsType<LoginAuditEntry> = [
+const getAuditColumns = (t: TFunction): ColumnsType<LoginAuditEntry> => [
   {
-    title: "Status",
+    title: t("common.status"),
     dataIndex: "success",
     key: "success",
     width: 80,
     render: (success: boolean) =>
       success ? (
-        <Tag icon={<CheckCircleOutlined />} color="success">OK</Tag>
+        <Tag icon={<CheckCircleOutlined />} color="success">{t("common.ok")}</Tag>
       ) : (
-        <Tag icon={<CloseCircleOutlined />} color="error">Failed</Tag>
+        <Tag icon={<CloseCircleOutlined />} color="error">{t("common.failed")}</Tag>
       ),
   },
   {
-    title: "Time",
+    title: t("settings.remote.time"),
     dataIndex: "ts",
     key: "ts",
     width: 180,
@@ -75,7 +76,7 @@ const auditColumns: ColumnsType<LoginAuditEntry> = [
     width: 160,
   },
   {
-    title: "Username",
+    title: t("settings.access.username"),
     dataIndex: "username",
     key: "username",
     width: 120,
@@ -96,6 +97,8 @@ const auditColumns: ColumnsType<LoginAuditEntry> = [
 ];
 
 export default function RemoteAccessTab() {
+  const { t } = useI18n();
+  const auditColumns = useMemo(() => getAuditColumns(t), [t]);
   const [status, setStatus] = useState<AdminAuthStatus | null>(null);
   const [loading, setLoading] = useState(false);
   const [username, setUsername] = useState("admin");
@@ -145,11 +148,11 @@ export default function RemoteAccessTab() {
       const s = await setRemoteAccess(enabled);
       setStatus(s);
       message.success(
-        enabled ? "Remote access enabled" : "Remote access disabled",
+        enabled ? t("settings.remote.enabledMsg") : t("settings.remote.disabledMsg"),
       );
     } catch (e) {
       message.error(
-        e instanceof Error ? e.message : "Failed to toggle remote access",
+        e instanceof Error ? e.message : t("settings.remote.toggleFailed"),
       );
     } finally {
       setLoading(false);
@@ -158,34 +161,34 @@ export default function RemoteAccessTab() {
 
   const handleChangePassword = async () => {
     if (!password.trim()) {
-      message.warning("Please enter a password");
+      message.warning(t("settings.remote.enterPassword"));
       return;
     }
     const minLen = status?.min_password_length ?? 6;
     if (password.length < minLen) {
-      message.warning(`Password must be at least ${minLen} characters`);
+      message.warning(t("settings.remote.passwordMinLength", { count: minLen }));
       return;
     }
     const hasLetter = /[a-zA-Z]/.test(password);
     const hasDigit = /\d/.test(password);
     if (!hasLetter || !hasDigit) {
-      message.warning("Password must contain both letters and digits");
+      message.warning(t("settings.remote.passwordLettersDigits"));
       return;
     }
     if (password !== confirmPassword) {
-      message.warning("Passwords do not match");
+      message.warning(t("settings.remote.passwordMismatch"));
       return;
     }
     setLoading(true);
     try {
       await changeAdminPassword(password, username);
-      message.success("Password updated");
+      message.success(t("settings.remote.passwordUpdated"));
       setPassword("");
       setConfirmPassword("");
       await refresh();
     } catch (e) {
       message.error(
-        e instanceof Error ? e.message : "Failed to change password",
+        e instanceof Error ? e.message : t("settings.remote.changePasswordFailed"),
       );
     } finally {
       setLoading(false);
@@ -196,10 +199,10 @@ export default function RemoteAccessTab() {
     setLoading(true);
     try {
       await revokeAllSessions();
-      message.success("All sessions revoked");
+      message.success(t("settings.remote.sessionsRevoked"));
     } catch (e) {
       message.error(
-        e instanceof Error ? e.message : "Failed to revoke sessions",
+        e instanceof Error ? e.message : t("settings.remote.revokeFailed"),
       );
     } finally {
       setLoading(false);
@@ -214,30 +217,30 @@ export default function RemoteAccessTab() {
             title={
               <Space>
                 <SafetyOutlined />
-                <span>Remote Access Status</span>
+                <span>{t("settings.remote.statusTitle")}</span>
               </Space>
             }
             size="small"
           >
             <Descriptions column={1} size="small">
-              <Descriptions.Item label="Remote Access">
+              <Descriptions.Item label={t("settings.tabRemoteAccess")}>
                 {status?.remote_access_enabled ? (
-                  <Tag color="green">Enabled</Tag>
+                  <Tag color="green">{t("common.enabled")}</Tag>
                 ) : (
-                  <Tag color="default">Disabled</Tag>
+                  <Tag color="default">{t("common.disabled")}</Tag>
                 )}
               </Descriptions.Item>
-              <Descriptions.Item label="Admin Username">
+              <Descriptions.Item label={t("settings.remote.adminUsername")}>
                 <Text code>{status?.username || "admin"}</Text>
               </Descriptions.Item>
-              <Descriptions.Item label="Password">
+              <Descriptions.Item label={t("settings.access.password")}>
                 {status?.has_password ? (
-                  <Tag color="green">Set</Tag>
+                  <Tag color="green">{t("settings.remote.set")}</Tag>
                 ) : (
-                  <Tag color="orange">Not Set</Tag>
+                  <Tag color="orange">{t("settings.remote.notSet")}</Tag>
                 )}
               </Descriptions.Item>
-              <Descriptions.Item label="Failed Attempts">
+              <Descriptions.Item label={t("settings.remote.failedAttempts")}>
                 {(status?.failed_attempts ?? 0) > 0 ? (
                   <Tag color="red">{status?.failed_attempts}/{status?.max_attempts ?? 5}</Tag>
                 ) : (
@@ -250,8 +253,8 @@ export default function RemoteAccessTab() {
               <Alert
                 type="error"
                 icon={<WarningOutlined />}
-                message="Brute-Force Lockout Active"
-                description="Remote access was automatically disabled due to too many failed login attempts. The password has been cleared. Set a new password below to re-enable."
+                message={t("settings.remote.lockoutTitle")}
+                description={t("settings.remote.lockoutDescription")}
                 showIcon
                 style={{ margin: "12px 0" }}
               />
@@ -266,12 +269,11 @@ export default function RemoteAccessTab() {
                 loading={loading}
                 data-testid="settings-remote-access-toggle"
               />
-              <Text>Enable Remote Admin Access</Text>
+              <Text>{t("settings.remote.enable")}</Text>
             </Space>
             <br />
             <Text type="secondary" style={{ fontSize: 12 }}>
-              When enabled, the admin interface can be accessed from remote IPs
-              (e.g. LAN devices). A login with username and password is required.
+              {t("settings.remote.enableHint")}
             </Text>
           </Card>
         </Col>
@@ -281,7 +283,7 @@ export default function RemoteAccessTab() {
             title={
               <Space>
                 <KeyOutlined />
-                <span>Admin Credentials</span>
+                <span>{t("settings.remote.credentialsTitle")}</span>
               </Space>
             }
             size="small"
@@ -289,7 +291,7 @@ export default function RemoteAccessTab() {
             <Space direction="vertical" style={{ width: "100%" }}>
               <div>
                 <Text type="secondary" style={{ marginBottom: 4, display: "block" }}>
-                  Username
+                  {t("settings.access.username")}
                 </Text>
                 <Input
                   prefix={<UserOutlined />}
@@ -301,28 +303,28 @@ export default function RemoteAccessTab() {
               </div>
               <div>
                 <Text type="secondary" style={{ marginBottom: 4, display: "block" }}>
-                  New Password
+                  {t("settings.remote.newPassword")}
                 </Text>
                 <Input.Password
                   prefix={<LockOutlined />}
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
-                  placeholder="Enter new password"
+                  placeholder={t("settings.remote.newPasswordPlaceholder")}
                   data-testid="settings-remote-password"
                 />
                 <Text type="secondary" style={{ fontSize: 11 }}>
-                  Min {status?.min_password_length ?? 6} chars, must include letters and digits
+                  {t("settings.remote.passwordRule", { count: status?.min_password_length ?? 6 })}
                 </Text>
               </div>
               <div>
                 <Text type="secondary" style={{ marginBottom: 4, display: "block" }}>
-                  Confirm Password
+                  {t("settings.remote.confirmPassword")}
                 </Text>
                 <Input.Password
                   prefix={<LockOutlined />}
                   value={confirmPassword}
                   onChange={(e) => setConfirmPassword(e.target.value)}
-                  placeholder="Confirm new password"
+                  placeholder={t("settings.remote.confirmPasswordPlaceholder")}
                   onPressEnter={handleChangePassword}
                   data-testid="settings-remote-confirm-password"
                 />
@@ -333,14 +335,14 @@ export default function RemoteAccessTab() {
                 loading={loading}
                 data-testid="settings-remote-save-password"
               >
-                Save Credentials
+                {t("settings.remote.saveCredentials")}
               </Button>
             </Space>
 
             {!status?.has_password && (
               <Alert
                 type="info"
-                message="Set a password to enable remote admin access"
+                message={t("settings.remote.setPasswordHint")}
                 showIcon
                 style={{ marginTop: 12 }}
               />
@@ -353,7 +355,7 @@ export default function RemoteAccessTab() {
             title={
               <Space>
                 <StopOutlined />
-                <span>Session Management</span>
+                <span>{t("settings.remote.sessionsTitle")}</span>
               </Space>
             }
             extra={
@@ -363,15 +365,14 @@ export default function RemoteAccessTab() {
                 onClick={() => void refreshAudit(auditPage)}
                 loading={auditLoading}
               >
-                Refresh
+                {t("common.refresh")}
               </Button>
             }
             size="small"
           >
             <Space direction="vertical" style={{ width: "100%" }}>
               <Text type="secondary">
-                Recent admin login sessions. You can revoke all sessions to
-                force re-authentication.
+                {t("settings.remote.sessionsHint")}
               </Text>
               <Table<LoginAuditEntry>
                 columns={auditColumns}
@@ -383,7 +384,7 @@ export default function RemoteAccessTab() {
                   current: auditPage,
                   pageSize: auditPageSize,
                   total: auditTotal,
-                  showTotal: (total) => `${total} records`,
+                  showTotal: (total) => t("settings.remote.records", { total }),
                   showSizeChanger: false,
                   onChange: (page) => void refreshAudit(page),
                 }}
@@ -391,18 +392,18 @@ export default function RemoteAccessTab() {
               />
               <Divider style={{ margin: "4px 0" }} />
               <Popconfirm
-                title="Revoke all sessions?"
-                description="All logged-in admin sessions will be invalidated."
+                title={t("settings.remote.revokeTitle")}
+                description={t("settings.remote.revokeDescription")}
                 onConfirm={handleRevokeAll}
-                okText="Revoke"
-                cancelText="Cancel"
+                okText={t("settings.remote.revoke")}
+                cancelText={t("common.cancel")}
               >
                 <Button
                   danger
                   loading={loading}
                   data-testid="settings-remote-revoke-all"
                 >
-                  Revoke All Sessions
+                  {t("settings.remote.revokeAll")}
                 </Button>
               </Popconfirm>
             </Space>

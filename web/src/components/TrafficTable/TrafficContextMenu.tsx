@@ -21,6 +21,7 @@ import { useReplayStore } from '../../stores/useReplayStore';
 import { useExportBifrost } from '../../hooks/useExportBifrost';
 import { useTlsConfigStore } from '../../stores/useTlsConfigStore';
 import { showTlsWhitelistChangeSuccess } from '../../utils/tlsInterceptionNotice';
+import { useI18n } from '../../i18n';
 
 const MENU_WIDTH = 220;
 
@@ -39,6 +40,7 @@ export default function TrafficContextMenu({
   onClose,
   selectedRecords = [],
 }: TrafficContextMenuProps) {
+  const { t } = useI18n();
   const menuRef = useRef<HTMLDivElement>(null);
   const navigate = useNavigate();
   const importFromTraffic = useReplayStore((state) => state.importFromTraffic);
@@ -129,12 +131,12 @@ export default function TrafficContextMenu({
     if (!record) return;
     try {
       await copyToClipboard(record.url);
-      message.success('URL copied to clipboard');
+      message.success(t('traffic.contextMenu.urlCopied'));
     } catch {
-      message.error('Failed to copy URL');
+      message.error(t('traffic.contextMenu.copyUrlFailed'));
     }
     onClose();
-  }, [record, onClose]);
+  }, [record, onClose, t]);
 
   const copyAsCurl = useCallback(async () => {
     if (!record) return;
@@ -163,20 +165,20 @@ export default function TrafficContextMenu({
       }
       const curl = generateCurl(fullRecord);
       await copyToClipboard(curl);
-      message.success('cURL command copied to clipboard');
+      message.success(t('traffic.contextMenu.curlCopied'));
     } catch (error) {
-      message.error('Failed to generate cURL command');
+      message.error(t('traffic.contextMenu.curlFailed'));
       console.error(error);
     }
     onClose();
-  }, [record, onClose]);
+  }, [record, onClose, t]);
 
   const downloadAsHAR = useCallback(async () => {
     const recordsToExport = selectedRecords.length > 1 ? selectedRecords : (record ? [record] : []);
     if (recordsToExport.length === 0) return;
 
     try {
-      message.loading({ content: 'Generating HAR file...', key: 'har-download' });
+      message.loading({ content: t('traffic.contextMenu.generatingHar'), key: 'har-download' });
       const fullRecords: TrafficRecord[] = [];
       
       for (const r of recordsToExport) {
@@ -193,13 +195,13 @@ export default function TrafficContextMenu({
       }
       
       downloadHAR(fullRecords);
-      message.success({ content: `Downloaded ${fullRecords.length} request(s) as HAR`, key: 'har-download' });
+      message.success({ content: t('traffic.contextMenu.harDownloaded', { count: fullRecords.length }), key: 'har-download' });
     } catch (error) {
-      message.error({ content: 'Failed to download HAR file', key: 'har-download' });
+      message.error({ content: t('traffic.contextMenu.harDownloadFailed'), key: 'har-download' });
       console.error(error);
     }
     onClose();
-  }, [record, selectedRecords, onClose]);
+  }, [record, selectedRecords, onClose, t]);
 
   const addDomainToInterceptList = useCallback(() => {
     if (!record?.host) return;
@@ -208,25 +210,25 @@ export default function TrafficContextMenu({
     onClose();
 
     Modal.confirm({
-      title: 'Add Domain to Intercept List',
-      content: `Add "${host}" to TLS intercept list? This will enable HTTPS decryption for this domain.`,
-      okText: 'Add',
-      cancelText: 'Cancel',
+      title: t('traffic.contextMenu.addDomainTitle'),
+      content: t('traffic.contextMenu.addDomainContent', { host }),
+      okText: t('common.add'),
+      cancelText: t('common.cancel'),
       onOk: async () => {
         try {
           const success = await addDomainToIntercept(host);
           if (success) {
-            showTlsWhitelistChangeSuccess(`Added "${host}" to intercept list`);
+            showTlsWhitelistChangeSuccess(t('traffic.contextMenu.addDomainSuccess', { host }));
           } else {
-            message.error('Failed to add domain to intercept list');
+            message.error(t('traffic.contextMenu.addDomainFailed'));
           }
         } catch (error) {
-          message.error('Failed to add domain to intercept list');
+          message.error(t('traffic.contextMenu.addDomainFailed'));
           console.error(error);
         }
       },
     });
-  }, [record, onClose, addDomainToIntercept]);
+  }, [record, onClose, addDomainToIntercept, t]);
 
   const addAppToInterceptList = useCallback(() => {
     if (!record?.client_app) return;
@@ -235,25 +237,25 @@ export default function TrafficContextMenu({
     onClose();
 
     Modal.confirm({
-      title: 'Add App to Intercept List',
-      content: `Add "${app}" to app intercept list? This will enable HTTPS decryption for traffic from this app.`,
-      okText: 'Add',
-      cancelText: 'Cancel',
+      title: t('traffic.contextMenu.addAppTitle'),
+      content: t('traffic.contextMenu.addAppContent', { app }),
+      okText: t('common.add'),
+      cancelText: t('common.cancel'),
       onOk: async () => {
         try {
           const success = await addAppToIntercept(app);
           if (success) {
-            showTlsWhitelistChangeSuccess(`Added "${app}" to app intercept list`);
+            showTlsWhitelistChangeSuccess(t('traffic.contextMenu.addAppSuccess', { app }));
           } else {
-            message.error('Failed to add app to intercept list');
+            message.error(t('traffic.contextMenu.addAppFailed'));
           }
         } catch (error) {
-          message.error('Failed to add app to intercept list');
+          message.error(t('traffic.contextMenu.addAppFailed'));
           console.error(error);
         }
       },
     });
-  }, [record, onClose, addAppToIntercept]);
+  }, [record, onClose, addAppToIntercept, t]);
 
   const addIpToInterceptList = useCallback(() => {
     if (!record?.client_ip) return;
@@ -262,25 +264,25 @@ export default function TrafficContextMenu({
     onClose();
 
     Modal.confirm({
-      title: 'Add Client IP to Intercept List',
-      content: `Add "${ip}" to IP TLS intercept list? This will enable HTTPS decryption for traffic from this IP.`,
-      okText: 'Add',
-      cancelText: 'Cancel',
+      title: t('traffic.contextMenu.addIpTitle'),
+      content: t('traffic.contextMenu.addIpContent', { ip }),
+      okText: t('common.add'),
+      cancelText: t('common.cancel'),
       onOk: async () => {
         try {
           const success = await addIpToIntercept(ip);
           if (success) {
-            showTlsWhitelistChangeSuccess(`Added "${ip}" to IP intercept list`);
+            showTlsWhitelistChangeSuccess(t('traffic.contextMenu.addIpSuccess', { ip }));
           } else {
-            message.error('Failed to add IP to intercept list');
+            message.error(t('traffic.contextMenu.addIpFailed'));
           }
         } catch (error) {
-          message.error('Failed to add IP to intercept list');
+          message.error(t('traffic.contextMenu.addIpFailed'));
           console.error(error);
         }
       },
     });
-  }, [record, onClose, addIpToIntercept]);
+  }, [record, onClose, addIpToIntercept, t]);
 
   const replayRequest = useCallback(async () => {
     if (!record) return;
@@ -304,7 +306,7 @@ export default function TrafficContextMenu({
       items.push({
         key: 'add-domain-intercept',
         icon: <UnlockOutlined />,
-        label: `Intercept ${record?.host}`,
+        label: t('traffic.contextMenu.interceptTarget', { target: record?.host }),
         onClick: addDomainToInterceptList,
       });
     }
@@ -312,7 +314,7 @@ export default function TrafficContextMenu({
       items.push({
         key: 'add-app-intercept',
         icon: <AppstoreOutlined />,
-        label: `Intercept ${record?.client_app}`,
+        label: t('traffic.contextMenu.interceptTarget', { target: record?.client_app }),
         onClick: addAppToInterceptList,
       });
     }
@@ -320,12 +322,12 @@ export default function TrafficContextMenu({
       items.push({
         key: 'add-ip-intercept',
         icon: <UnlockOutlined />,
-        label: `Intercept IP ${record?.client_ip}`,
+        label: t('traffic.contextMenu.interceptIp', { ip: record?.client_ip }),
         onClick: addIpToInterceptList,
       });
     }
     return items;
-  }, [hasHost, hasClientApp, hasClientIp, domainAlreadyInIntercept, appAlreadyInIntercept, ipAlreadyInIntercept, record, addDomainToInterceptList, addAppToInterceptList, addIpToInterceptList]);
+  }, [hasHost, hasClientApp, hasClientIp, domainAlreadyInIntercept, appAlreadyInIntercept, ipAlreadyInIntercept, record, addDomainToInterceptList, addAppToInterceptList, addIpToInterceptList, t]);
 
   if (!visible || !record) return null;
 
@@ -334,13 +336,13 @@ export default function TrafficContextMenu({
         {
           key: 'download-har',
           icon: <DownloadOutlined />,
-          label: `Download ${selectedRecords.length} requests as HAR`,
+          label: t('traffic.contextMenu.downloadManyAsHar', { count: selectedRecords.length }),
           onClick: downloadAsHAR,
         },
         {
           key: 'export-bifrost',
           icon: <ExportOutlined />,
-          label: `Export ${selectedRecords.length} requests as .bifrost`,
+          label: t('traffic.contextMenu.exportManyAsBifrost', { count: selectedRecords.length }),
           onClick: exportAsBifrost,
         },
       ]
@@ -349,7 +351,7 @@ export default function TrafficContextMenu({
           {
             key: 'replay',
             icon: <SendOutlined />,
-            label: 'Replay',
+            label: t('traffic.contextMenu.replay'),
             onClick: replayRequest,
           },
           { type: 'divider' as const },
@@ -357,25 +359,25 @@ export default function TrafficContextMenu({
         {
           key: 'copy-url',
           icon: <CopyOutlined />,
-          label: 'Copy URL',
+          label: t('traffic.contextMenu.copyUrl'),
           onClick: copyUrl,
         },
         {
           key: 'copy-curl',
           icon: <CodeOutlined />,
-          label: 'Copy as cURL',
+          label: t('traffic.contextMenu.copyAsCurl'),
           onClick: copyAsCurl,
         },
         {
           key: 'download-har',
           icon: <DownloadOutlined />,
-          label: 'Download as HAR',
+          label: t('traffic.contextMenu.downloadAsHar'),
           onClick: downloadAsHAR,
         },
         {
           key: 'export-bifrost',
           icon: <ExportOutlined />,
-          label: 'Export as .bifrost',
+          label: t('traffic.contextMenu.exportAsBifrost'),
           onClick: exportAsBifrost,
         },
         ...(interceptMenuItems.length > 0 ? [

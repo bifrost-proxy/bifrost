@@ -2,6 +2,7 @@ import { getClientId } from '../services/clientId';
 import { buildApiUrl } from '../runtime';
 import { apiFetch } from './apiFetch';
 import type { TrafficRecord } from '../types';
+import { t } from '../i18n';
 
 interface AxiosLikeError {
   isAxiosError: true;
@@ -106,18 +107,27 @@ export function getImportedItemCount(result: ImportResponse): number | undefined
 
 export function formatImportSuccessMessage(result: ImportResponse, filename?: string): string {
   const count = getImportedItemCount(result);
-  const target = filename ? `${filename} ` : '';
 
   if (count === undefined) {
-    return `Imported ${target}successfully`;
+    return filename
+      ? t('shared.bifrostFile.importFileSuccess', { filename })
+      : t('shared.bifrostFile.importSuccess');
   }
 
   if (count === 0) {
-    return `${target || 'File '}contains no ${result.file_type} items to import`;
+    return filename
+      ? t('shared.bifrostFile.importFileEmpty', { filename, type: result.file_type })
+      : t('shared.bifrostFile.importEmpty', { type: result.file_type });
   }
 
-  const item = count === 1 ? 'item' : 'items';
-  return `Imported ${target}successfully (${count} ${item})`;
+  if (filename) {
+    return count === 1
+      ? t('shared.bifrostFile.importFileSuccessCountOne', { filename, count })
+      : t('shared.bifrostFile.importFileSuccessCountOther', { filename, count });
+  }
+  return count === 1
+    ? t('shared.bifrostFile.importSuccessCountOne', { count })
+    : t('shared.bifrostFile.importSuccessCountOther', { count });
 }
 
 export function formatBifrostFileError(error: unknown): string {
@@ -208,13 +218,13 @@ export function getEmptyExportMessage(
 
   switch (fileType) {
     case 'network':
-      return 'Select at least one Network record before exporting a .bifrost file';
+      return t('shared.bifrostFile.exportEmpty.network');
     case 'rules':
-      return 'Select at least one rule before exporting a .bifrost file';
+      return t('shared.bifrostFile.exportEmpty.rules');
     case 'script':
-      return 'Select at least one script before exporting a .bifrost file';
+      return t('shared.bifrostFile.exportEmpty.script');
     case 'template':
-      return 'Select at least one replay item before exporting a .bifrost file';
+      return t('shared.bifrostFile.exportEmpty.template');
     default:
       return undefined;
   }
@@ -288,7 +298,7 @@ async function postBifrostFile(
 }
 
 async function readBifrostFileError(response: Response): Promise<string> {
-  const fallback = `Request failed with status ${response.status}`;
+  const fallback = t('shared.request.failedWithStatus', { status: response.status });
   const contentType = response.headers.get('Content-Type') || '';
   try {
     if (contentType.includes('application/json')) {

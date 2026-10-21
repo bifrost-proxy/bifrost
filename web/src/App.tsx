@@ -58,6 +58,8 @@ import {
   setDesktopProxyPort,
 } from "./runtime";
 import { isConnectionIssueError } from "./api/client";
+import { useAntdLocale } from "./i18n/antd";
+import { useI18n } from "./i18n";
 
 const CLI_DOCS_URL = "https://bifrost-proxy.github.io/getting-started/desktop";
 
@@ -78,6 +80,8 @@ export default function App() {
 
 function AppShell({ desktopPlatform }: { desktopPlatform: ReturnType<typeof getDesktopPlatform> }) {
   const resolvedTheme = useThemeStore((state) => state.resolvedTheme);
+  const antdLocale = useAntdLocale();
+  const { t } = useI18n();
   const forceRefreshVisible = useForceRefreshStore((s) => s.visible);
   const forceRefreshReason = useForceRefreshStore((s) => s.reason);
   const desktopCoreVisible = useDesktopCoreStore((state) => state.visible);
@@ -94,6 +98,7 @@ function AppShell({ desktopPlatform }: { desktopPlatform: ReturnType<typeof getD
   const holderRender = useCallback(
     (children: React.ReactNode) => (
       <ConfigProvider
+        locale={antdLocale}
         theme={{
           algorithm:
             resolvedTheme === "dark"
@@ -108,7 +113,7 @@ function AppShell({ desktopPlatform }: { desktopPlatform: ReturnType<typeof getD
         <AntApp>{children}</AntApp>
       </ConfigProvider>
     ),
-    [resolvedTheme],
+    [resolvedTheme, antdLocale],
   );
 
   useEffect(() => {
@@ -178,6 +183,7 @@ function AppShell({ desktopPlatform }: { desktopPlatform: ReturnType<typeof getD
 
   return (
     <ConfigProvider
+      locale={antdLocale}
       theme={{
         algorithm:
           resolvedTheme === "dark"
@@ -201,15 +207,15 @@ function AppShell({ desktopPlatform }: { desktopPlatform: ReturnType<typeof getD
           open={desktopCoreVisible}
           title={
             desktopCorePhase === "error"
-              ? "Bifrost Core Error"
+              ? t("app.core.errorTitle")
               : desktopCorePhase === "booting"
-                ? "Connecting to Bifrost Core"
-                : "Switching Bifrost Port"
+                ? t("app.core.connectingTitle")
+                : t("app.core.switchingPortTitle")
           }
           closable={desktopCorePhase === "error"}
           maskClosable={desktopCorePhase === "error"}
           keyboard={desktopCorePhase === "error"}
-          okText={desktopCorePhase === "error" ? "Close" : undefined}
+          okText={desktopCorePhase === "error" ? t("common.close") : undefined}
           cancelButtonProps={{ style: { display: "none" } }}
           onOk={hideDesktopCore}
           onCancel={hideDesktopCore}
@@ -224,10 +230,10 @@ function AppShell({ desktopPlatform }: { desktopPlatform: ReturnType<typeof getD
         >
           <Typography.Paragraph>
             {desktopCorePhase === "booting"
-              ? "The interface is waiting for the Bifrost core to become available."
+              ? t("app.core.waitingDescription")
               : desktopCoreTargetPort
-                ? `Bifrost is switching the local core to port ${desktopCoreTargetPort}.`
-                : "Bifrost is updating the local core listener and reconnecting the interface."}
+                ? t("app.core.switchingPortDescription", { port: desktopCoreTargetPort })
+                : t("app.core.updatingListenerDescription")}
           </Typography.Paragraph>
           <Steps
             size="small"
@@ -259,11 +265,11 @@ function AppShell({ desktopPlatform }: { desktopPlatform: ReturnType<typeof getD
               {
                 title:
                   desktopCorePhase === "booting"
-                    ? "Wait for Core"
-                    : "Save Config",
+                    ? t("app.core.stepWaitForCore")
+                    : t("app.core.stepSaveConfig"),
               },
-              { title: "Rebind Port" },
-              { title: "Reconnect UI" },
+              { title: t("app.core.stepRebindPort") },
+              { title: t("app.core.stepReconnectUi") },
             ]}
           />
           <Typography.Paragraph
@@ -275,26 +281,26 @@ function AppShell({ desktopPlatform }: { desktopPlatform: ReturnType<typeof getD
         </Modal>
         <Modal
           open={forceRefreshVisible}
-          title="Page Disconnected"
+          title={t("app.disconnected.title")}
           closable={false}
           maskClosable={false}
           keyboard={false}
-          okText="Refresh Page"
+          okText={t("app.disconnected.refreshPage")}
           cancelButtonProps={{ style: { display: "none" } }}
           onOk={() => {
             window.location.reload();
           }}
         >
           <Typography.Paragraph>
-            The connection has been closed by the server due to too many open pages.
+            {t("app.disconnected.description")}
           </Typography.Paragraph>
           {forceRefreshReason ? (
             <Typography.Paragraph type="secondary">
-              Reason: {forceRefreshReason}
+              {t("app.disconnected.reason", { reason: forceRefreshReason })}
             </Typography.Paragraph>
           ) : null}
           <Typography.Paragraph type="secondary">
-            Please refresh the page to continue.
+            {t("app.disconnected.refreshHint")}
           </Typography.Paragraph>
         </Modal>
         {isDesktopShell() ? (
@@ -388,6 +394,7 @@ function DesktopStartupGate({ resolvedTheme }: { resolvedTheme: "light" | "dark"
   const [cliStatus, setCliStatus] = useState<CliInstallStatus | null>(null);
   const [cliPhase, setCliPhase] = useState<CliGatePhase>("checking");
   const [cliError, setCliError] = useState<string | null>(null);
+  const { t } = useI18n();
 
   const refreshRuntime = useCallback(async () => {
     try {
@@ -399,11 +406,11 @@ function DesktopStartupGate({ resolvedTheme }: { resolvedTheme: "light" | "dark"
       }
       return next;
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Failed to read desktop runtime";
+      const message = error instanceof Error ? error.message : t("app.startup.readRuntimeFailed");
       setRuntimeError(message);
       return null;
     }
-  }, []);
+  }, [t]);
 
   const refreshCliStatus = useCallback(async () => {
     try {
@@ -412,10 +419,10 @@ function DesktopStartupGate({ resolvedTheme }: { resolvedTheme: "light" | "dark"
       setCliError(null);
       setCliPhase(status.installed ? "dismissed" : "missing");
     } catch (error) {
-      setCliError(error instanceof Error ? error.message : "Failed to check CLI install");
+      setCliError(error instanceof Error ? error.message : t("app.startup.checkCliFailed"));
       setCliPhase("error");
     }
-  }, []);
+  }, [t]);
 
   useEffect(() => {
     let cancelled = false;
@@ -446,17 +453,17 @@ function DesktopStartupGate({ resolvedTheme }: { resolvedTheme: "light" | "dark"
       setRuntimeError(null);
       setDesktopProxyPort(next.proxyPort);
       if (next.startupReady) {
-        message.success("Bifrost service started");
+        message.success(t("app.startup.serviceStarted"));
         if (cliPhase === "checking") {
           await refreshCliStatus();
         }
       }
     } catch (error) {
-      setRuntimeError(error instanceof Error ? error.message : "Failed to start Bifrost service");
+      setRuntimeError(error instanceof Error ? error.message : t("app.startup.startServiceFailed"));
     } finally {
       setStartingCore(false);
     }
-  }, [cliPhase, refreshCliStatus]);
+  }, [cliPhase, refreshCliStatus, t]);
 
   const handleInstallCli = useCallback(async () => {
     setCliPhase("installing");
@@ -466,13 +473,13 @@ function DesktopStartupGate({ resolvedTheme }: { resolvedTheme: "light" | "dark"
       setCliStatus(status);
       if (status.installed) {
         setCliPhase("installed");
-        message.success("CLI installed");
+        message.success(t("app.startup.cliInstalledMessage"));
       } else {
         setCliPhase("missing");
       }
     } catch (error) {
       if (isConnectionIssueError(error)) {
-        setCliError("Bifrost core restarted while installing CLI. Rechecking install status...");
+        setCliError(t("app.startup.coreRestartedDuringInstall"));
         setCliPhase("checking");
         const nextRuntime = await refreshRuntime();
         if (nextRuntime?.startupReady) {
@@ -480,10 +487,10 @@ function DesktopStartupGate({ resolvedTheme }: { resolvedTheme: "light" | "dark"
         }
         return;
       }
-      setCliError(error instanceof Error ? error.message : "Failed to install CLI");
+      setCliError(error instanceof Error ? error.message : t("app.startup.installCliFailed"));
       setCliPhase("error");
     }
-  }, [refreshCliStatus, refreshRuntime]);
+  }, [refreshCliStatus, refreshRuntime, t]);
 
   const openCliDocs = useCallback(() => {
     window.open(CLI_DOCS_URL, "_blank", "noopener,noreferrer");
@@ -494,12 +501,12 @@ function DesktopStartupGate({ resolvedTheme }: { resolvedTheme: "light" | "dark"
     return (
       <DesktopBlockingOverlay
         resolvedTheme={resolvedTheme}
-        title="Start Bifrost Service"
-        description="Bifrost Desktop needs the local core service before the interface can connect."
-        detail={runtime?.startupError || runtimeError || "The service is not running."}
+        title={t("app.startup.startServiceTitle")}
+        description={t("app.startup.startServiceDescription")}
+        detail={runtime?.startupError || runtimeError || t("app.startup.serviceNotRunning")}
         actions={
           <Button type="primary" size="large" loading={startingCore} onClick={handleStartCore}>
-            Start Bifrost Service
+            {t("app.startup.startServiceTitle")}
           </Button>
         }
       />
@@ -510,33 +517,33 @@ function DesktopStartupGate({ resolvedTheme }: { resolvedTheme: "light" | "dark"
     return (
       <DesktopBlockingOverlay
         resolvedTheme={resolvedTheme}
-        title={cliPhase === "installed" ? "CLI Installed" : "Install Bifrost CLI"}
+        title={cliPhase === "installed" ? t("app.startup.cliInstalledTitle") : t("app.startup.installCliTitle")}
         description={
           cliPhase === "installed"
-            ? "Bifrost CLI is ready for Terminal and AI coding tools."
-            : "Install the CLI so Terminal, Codex, Claude Code, Trae, and Cursor can call Bifrost."
+            ? t("app.startup.cliReadyDescription")
+            : t("app.startup.installCliDescription")
         }
         detail={
           cliPhase === "error"
-            ? cliError || "CLI install failed"
+            ? cliError || t("app.startup.cliInstallFailed")
             : cliPhase === "installed"
-              ? cliStatus?.skills_message || "Installation completed successfully."
-              : cliStatus?.path_hint || "The CLI is not installed in your user command path yet."
+              ? cliStatus?.skills_message || t("app.startup.installCompleted")
+              : cliStatus?.path_hint || t("app.startup.cliNotInPath")
         }
         actions={
           cliPhase === "installed" ? (
             <Space>
               <Button size="large" onClick={openCliDocs}>
-                Open Docs
+                {t("app.startup.openDocs")}
               </Button>
               <Button type="primary" size="large" onClick={() => setCliPhase("dismissed")}>
-                Done
+                {t("common.done")}
               </Button>
             </Space>
           ) : (
             <Space>
               <Button size="large" onClick={() => setCliPhase("dismissed")}>
-                Later
+                {t("app.startup.later")}
               </Button>
               <Button
                 type="primary"
@@ -544,7 +551,7 @@ function DesktopStartupGate({ resolvedTheme }: { resolvedTheme: "light" | "dark"
                 loading={cliPhase === "installing"}
                 onClick={handleInstallCli}
               >
-                Install CLI
+                {t("app.startup.installCli")}
               </Button>
             </Space>
           )

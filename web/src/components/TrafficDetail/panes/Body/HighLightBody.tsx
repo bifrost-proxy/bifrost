@@ -19,6 +19,7 @@ import {
 } from '../../helper/contentType';
 import { copyToClipboard } from '../../../../utils/clipboard';
 import { useThemeStore } from '../../../../stores/useThemeStore';
+import { useI18n } from '../../../../i18n';
 
 hljs.registerLanguage('json', json);
 hljs.registerLanguage('xml', xml);
@@ -116,6 +117,7 @@ export const HighLightBody = ({
   editable = false,
   onBodyChange,
 }: HighLightBodyProps) => {
+  const { t } = useI18n();
   const { token } = theme.useToken();
   const resolvedTheme = useThemeStore((state) => state.resolvedTheme);
 
@@ -168,12 +170,12 @@ export const HighLightBody = ({
     if (processedData) {
       const success = await copyToClipboard(processedData);
       if (success) {
-        message.success('Copied to clipboard');
+        message.success(t('trafficDetail.body.copiedToClipboard'));
       } else {
-        message.error('Failed to copy');
+        message.error(t('trafficDetail.body.copyFailed'));
       }
     }
-  }, [processedData]);
+  }, [processedData, t]);
 
   const toggleFormat = useCallback(() => {
     setIsFormatted((prev) => !prev);
@@ -223,7 +225,7 @@ export const HighLightBody = ({
             gap: 4,
           }}
         >
-          <Tooltip title="Copy">
+          <Tooltip title={t('common.copy')}>
             <Button
               type="text"
               size="small"
@@ -287,7 +289,13 @@ export const HighLightBody = ({
         }}
       >
         {isJsonType && !disableJsonStructuredView && (
-          <Tooltip title={isFormatted ? 'Raw' : 'Format'}>
+          <Tooltip
+            title={
+              isFormatted
+                ? t('trafficDetail.body.raw')
+                : t('trafficDetail.body.format')
+            }
+          >
             <Button
               type="text"
               size="small"
@@ -300,7 +308,7 @@ export const HighLightBody = ({
             />
           </Tooltip>
         )}
-        <Tooltip title="Copy">
+        <Tooltip title={t('common.copy')}>
           <Button
             type="text"
             size="small"
@@ -342,7 +350,9 @@ export const HighLightBody = ({
             background: token.colorBgContainer,
           }}
         >
-          Show All ({Math.round((processedData.length - DEFAULT_SHOW_MAX_SIZE) / 1024)}KB more)
+          {t('trafficDetail.body.showAll', {
+            size: Math.round((processedData.length - DEFAULT_SHOW_MAX_SIZE) / 1024),
+          })}
         </Button>
       )}
     </div>
