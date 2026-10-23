@@ -100,6 +100,7 @@
 | [file-access-webui.md](./file-access-webui.md) | File Access WebUI 策略配置 | 17 | Grants 行级 File Access 入口、禁止手动录入不存在 grant、只读/读写与指定/所有目录策略、SSH Key grant 继承默认 All Directories 策略、grant 删除自动清理策略、重新连接后重新配置、deny patterns、字节限制、API 验证 |
 | [webui-groups.md](./webui-groups.md) | Web UI Groups 页面 | 13 | Group 列表、详情、规则管理、搜索 |
 | [webui-search.md](./webui-search.md) | Web UI 搜索模式 | 12 | 搜索模式进入/退出、关键词搜索、过滤器、结果高亮、状态持久化 |
+| [webui-search-url.md](./webui-search-url.md) | 搜索链接自动执行 | 3 | 首次打开、刷新、亮暗主题和手动提交回归 |
 | [webui-notifications.md](./webui-notifications.md) | Web UI Notifications 页面 | 6 | 三个通知表顶部状态筛选、默认未读展示、固定分页无 page size 选择器、通知数据库只保留最新 200 条记录，以及可用性检查通知气泡下移、动画提示、拖拽和拖拽后展开 |
 | [webui-layout-navigation.md](./webui-layout-navigation.md) | Web UI 布局与导航 | 20 | 侧边栏导航、Safari/Tauri WebKit 标签完整显示、Chromium 对照回归、侧边栏小窗口滚动、分割面板、状态栏、状态栏 Sync 快速跳转 Settings Sync、Toolbar、主题切换、版本检查、升级命令复制、拖拽导入 |
 | [tls-interception-status-indicators.md](./tls-interception-status-indicators.md) | HTTPS Interception 状态提示 | 5 | 全局 HTTPS Interception 启用后，Web UI 底部状态栏显示 `TLS: Full On` 动画警示、亮色/暗色主题可读，tray 顶部不展示 TLS 角标，tray 在 System Proxy 下方独立展示 TLS 状态并可直接操作 |

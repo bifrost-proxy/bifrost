@@ -33,12 +33,9 @@ import {
   useTrafficStore,
 } from "../../stores/useTrafficStore";
 import { useFilterPanelStore } from "../../stores/useFilterPanelStore";
-import type {
-  SearchFilters,
-  SearchResultItem,
-  TrafficSummary,
-} from "../../types";
+import type { SearchResultItem, TrafficSummary } from "../../types";
 import SearchResultsList from "./SearchResultsList";
+import { buildSearchFilters } from "./searchFilters";
 import { useI18n } from "../../i18n";
 
 const { Text } = Typography;
@@ -96,38 +93,7 @@ export default function SearchMode({
   );
   const selectedDomains = useFilterPanelStore((state) => state.selectedDomains);
 
-  const buildFilters = useCallback((): SearchFilters => {
-    const importedApps =
-      toolbarFilters.imported.length > 0 ? ["Bifrost Import"] : [];
-    const allClientApps = [
-      ...new Set([...selectedClientApps, ...importedApps]),
-    ];
-
-    return {
-      protocols: toolbarFilters.protocol,
-      status_ranges: toolbarFilters.status,
-      content_types: toolbarFilters.type,
-      has_rule_hit: toolbarFilters.rule.length > 0 ? true : undefined,
-      conditions: filterConditions
-        .filter(isFilterConditionApplicable)
-        .map(({ field, operator, value }) => ({
-          field,
-          operator,
-          value,
-        })),
-      client_ips: selectedClientIps,
-      client_apps: allClientApps,
-      account_names: selectedAccountNames,
-      domains: selectedDomains,
-    };
-  }, [
-    filterConditions,
-    toolbarFilters,
-    selectedClientIps,
-    selectedClientApps,
-    selectedAccountNames,
-    selectedDomains,
-  ]);
+  const buildFilters = buildSearchFilters;
 
   const appliedMutationVersionRef = useRef(recordsMutation.version);
   const liveRefreshTimerRef = useRef<number | null>(null);
