@@ -38,6 +38,7 @@ import FilterBar from "../../components/FilterBar";
 import ThreeSplitPane from "../../components/ThreeSplitPane";
 import FilterPanel from "../../components/FilterPanel";
 import SearchMode from "../../components/SearchMode";
+import { buildSearchFilters } from "../../components/SearchMode/searchFilters";
 import {
   decodeJsonFromQueryParam,
   encodeJsonForQueryParam,
@@ -337,6 +338,7 @@ export default function Traffic() {
   const setSearchScope = useSearchStore((state) => state.setScope);
 
   const pendingUrlUpdateRef = useRef<Record<string, string>>({});
+  const restoredSearchUrlRef = useRef<string | null>(null);
 
   const isDefaultSearchScope = useCallback((scope: SearchScope) => {
     return (
@@ -451,6 +453,7 @@ export default function Traffic() {
       pendingKeys.every((k) => (searchParams.get(k) || "") === pending[k])
     ) {
       pendingUrlUpdateRef.current = {};
+      restoredSearchUrlRef.current = searchParams.toString();
       return;
     }
 
@@ -461,6 +464,7 @@ export default function Traffic() {
       SEARCH_PARAM,
     ].some((k) => searchParams.has(k));
     if (!hasAnyStateParam) {
+      restoredSearchUrlRef.current = null;
       return;
     }
 
@@ -468,6 +472,9 @@ export default function Traffic() {
     const toolbarParam = searchParams.get(TOOLBAR_PARAM) || "";
     const panelParam = searchParams.get(PANEL_PARAM) || "";
     const searchParam = searchParams.get(SEARCH_PARAM) || "";
+    const restoredSearchUrl = searchParams.toString();
+    if (restoredSearchUrlRef.current === restoredSearchUrl) return;
+    restoredSearchUrlRef.current = restoredSearchUrl;
 
     const filtersFromUrl = deserializeFilters(filterParam);
     const toolbarFromUrl = deserializeToolbar(toolbarParam);
@@ -490,15 +497,14 @@ export default function Traffic() {
 
     setSearchMode(searchFromUrl.mode);
     setSearchKeyword(searchFromUrl.keyword);
-    if (!searchFromUrl.scope) {
-      setSearchScope({ all: true });
-      return;
+    setSearchScope(
+      !searchFromUrl.scope || searchFromUrl.scope.all === true
+        ? { all: true }
+        : searchFromUrl.scope,
+    );
+    if (searchFromUrl.mode === "search") {
+      void useSearchStore.getState().search(buildSearchFilters());
     }
-    if (searchFromUrl.scope.all === true) {
-      setSearchScope({ all: true });
-      return;
-    }
-    setSearchScope(searchFromUrl.scope);
   }, [
     deserializePanel,
     deserializeSearch,
