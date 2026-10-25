@@ -7,90 +7,38 @@ description: "使用 bifrost 命令行工具管理代理生命周期、规则、
 
 该技能用于指导 Agent 直接使用 `bifrost` CLI 完成代理启动、配置修改、规则调试、Group 规则管理、脚本管理和流量排查，而不是绕过 CLI 直接改底层数据文件。
 
-## 启动时必须执行的自检流程
+## 启动检查：先读状态，不默认改变环境
 
-每次技能被触发后，Agent 在正式执行任何 `bifrost` 命令前，都必须先完成下面的启动检查：
-
-1. 检查 `bifrost` 是否存在
-2. 如果不存在，自动安装最新版本
-3. 如果存在，检查是否可执行
-4. 如果可执行，优先升级到最新版本，再继续后续任务
-5. 安装或升级完成后，再次验证 `bifrost --version`
-6. 执行 bifrost install-skill -y 进行更新 skill 描述
-
-除非用户明确禁止联网或禁止改动本机环境，否则不要跳过这个流程。
-
-## 1. 检查 bifrost 是否存在
-
-优先检查当前环境是否已经安装并可执行：
+每次使用先核对实际命令路径、版本、服务状态及本次所需能力：
 
 ```bash
 command -v bifrost
 bifrost --version
+bifrost status
+bifrost <本次子命令> --help
 ```
 
-- `command -v bifrost` 有输出路径，说明二进制已在 `PATH` 中
-- `bifrost --version` 成功返回，说明 CLI 可以直接使用
-- 如果仓库源码在本地但 `bifrost` 尚未加入 `PATH`，可退回源码方式检查：
+- 已安装且能力可用时，直接继续任务；只读查询不要求升级、重新安装 Skill、启动服务或修改证书/系统代理。
+- 记录实际可执行路径和版本；同机存在多个版本时不要仅凭 PATH 顺序或“最新”判断。使用当前任务已确认的二进制，不替换运行中会话固定的版本。
+- 共享代理只操作本任务所属监听端口与规则。状态检查不授权重启主服务、覆盖共享规则或影响其他会话。
+- 命令缺失或版本不支持时，先判断是否有同身份、同目标、同权限范围的现有等价能力；正确目标的权限拒绝不能通过换身份或入口绕过。
+
+## 安装、升级与服务启动
+
+安装或升级仅在用户已要求，或所需能力确实缺失且操作及影响范围已获授权时执行；已有同范围授权不重复询问。仅因为版本较旧不构成升级理由。
+
+官方安装脚本可能安装/信任 CA、安装 Skills、启动代理及桌面组件；这些副作用不能作为只读查询的默认前置。执行前阅读当前安装参数，限定所需组件和影响范围。
 
 ```bash
-cargo run -p bifrost -- --version
-```
-
-## 2. 如果 bifrost 不存在，自动安装最新版本
-
-优先使用官方安装脚本直接安装最新版本：
-
-```bash
+# 仅在安装范围已确认后使用；不是只读检查步骤。
 curl -fsSL https://raw.githubusercontent.com/bifrost-proxy/bifrost/main/install-binary.sh | bash
 ```
 
-该脚本默认会自动安装并信任 CA、安装所有 Bifrost skills，并启动后台服务。
+`bifrost upgrade` 可能自动重启正在运行的代理。共享代理存在其他任务时，先确认影响与维护时机；不可为本任务查流量而重启全部会话。升级失败保留原服务并报告原因，不自动用安装脚本覆盖现有环境。
 
-安装完成后，必须重新执行：
+需要更新本地 Skill 时，在明确的安装维护任务中执行 `bifrost install-skill -y`；它可能覆盖本地说明，不是每次使用的必做步骤。完成已授权安装/升级后回读命令路径、版本和服务状态。
 
-```bash
-command -v bifrost
-bifrost --version
-```
-
-如果安装脚本失败，再按环境降级处理：
-
-```bash
-# macOS / Homebrew
-brew tap bifrost-proxy/bifrost
-brew install bifrost
-```
-
-如果用户不希望安装系统级二进制，才退回源码构建；注意这里应从官方仓库拉取源码，而不是假设当前工作区就是 Bifrost 仓库：
-
-```bash
-git clone https://github.com/bifrost-proxy/bifrost.git bifrost
-cd bifrost
-cd web && pnpm install && pnpm build && cd ..
-cargo build --release -p bifrost
-./target/release/bifrost --version
-```
-
-## 3. 如果 bifrost 已存在，自动升级到最新版本
-
-只要用户没有明确要求"固定当前版本"或"禁止升级"，都应在首次检查通过后继续执行：
-
-```bash
-bifrost upgrade
-bifrost --version
-bifrost install-skill -y 
-```
-
-- `bifrost upgrade` 默认无交互执行升级；如果检测到正在运行的代理，升级成功后会自动重启代理以加载新二进制
-- 若升级失败，再回退到官方安装脚本重新安装最新版本
-- 如果用户只允许最小改动，至少要告知"当前跳过升级，后续行为基于现有版本"
-
-## 4. 完成自检后再进入正式任务
-
-1. 先确认目标是"运行代理"还是"管理已有代理"。
-2. 先用 `bifrost --help` 或 `bifrost <command> --help` 补充具体参数，再执行高影响命令。
-3. 会改本机网络环境的命令必须谨慎：`system-proxy enable/disable`、`start --system-proxy`、`start --cli-proxy`。
+只有确实需要服务且状态显示未运行、启动范围已经允许时才启动。`system-proxy enable/disable`、证书信任和 shell profile 修改分别按当前授权处理。命令参数以已安装版本的 help 为准。
 
 ## 关键约束
 
