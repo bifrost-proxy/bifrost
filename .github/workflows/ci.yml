@@ -45,6 +45,23 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  cargo-lockfiles:
+    name: Cargo Lockfile Consistency
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      # Run before any command can silently regenerate a stale lockfile.
+      - name: Check committed root and desktop lockfiles
+        run: bash scripts/ci/sync-cargo-lockfiles.sh --check
+      - name: Exercise real version-bump and dependency-retention regression
+        run: python3 -m unittest discover -s scripts/ci/tests -p test_cargo_lockfile_sync.py
+
   moss-runtime-changes:
     name: Detect MOSS runtime build changes
     if: github.event_name == 'pull_request'
