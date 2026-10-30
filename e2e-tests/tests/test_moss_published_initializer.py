@@ -111,7 +111,9 @@ def main():
             assert filename.lstrip("*") == asset
             assert hashlib.sha256(archive.read_bytes()).hexdigest() == checksum
             with zipfile.ZipFile(archive) as packaged:
-                assert "2026.6.17" in packaged.read("moss-joint-runtime/runtime/site-packages/certifi/__init__.py").decode()
+                old_certifi = packaged.read("moss-joint-runtime/runtime/site-packages/certifi/__init__.py").decode()
+                old_version = re.search(r'__version__ = "([0-9.]+)"', old_certifi)
+                assert old_version and tuple(map(int, old_version.group(1).split("."))) == (2026, 6, 17)
             subprocess.run(["ditto", "-x", "-k", str(archive), str(work / "old")], check=True)
             shutil.rmtree(root / "runtime")
             shutil.move(str(work / "old/moss-joint-runtime/runtime"), str(root / "runtime"))
