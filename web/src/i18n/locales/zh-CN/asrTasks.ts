@@ -66,6 +66,9 @@ const zhCN: Record<keyof typeof en, string> = {
   "transcript.speakerCandidate": " 候选 {name} {percent}%",
 
   // DailyAgentTab: messages
+  "dailyAgent.retiredProjectMigration":
+    "ChatGPT Web 项目设置已停止支持。请先清除所有 Daily Agent 的废弃项目设置再编辑。Runner 选择、报告和历史保持不变；请显式选择受支持的 Runner。",
+  "dailyAgent.removeRetiredProjectUrls": "清除废弃项目设置",
   "dailyAgent.loadConfigFailed": "加载每日 Agent 配置失败：{error}",
   "dailyAgent.configSaved": "配置已保存",
   "dailyAgent.saveFailed": "保存失败：{error}",
@@ -109,7 +112,6 @@ const zhCN: Record<keyof typeof en, string> = {
   "dailyAgent.dependencyFailure.continue": "继续",
   "dailyAgent.independentResearch": "独立调研",
   "dailyAgent.maxQuestions": "最大问题数",
-  "dailyAgent.chatgptProjectUrl": "ChatGPT 项目 URL",
   "dailyAgent.allowedResearchRunners": "允许的调研运行器",
   "dailyAgent.runtimeDataFallbacks": "运行时数据兜底",
   "dailyAgent.fallbackRunnerAria": "{profile} 兜底运行器",
@@ -128,7 +130,7 @@ const zhCN: Record<keyof typeof en, string> = {
   "dailyAgent.instructionsSource": "指令来源",
   "dailyAgent.researchAlertTitle": "每个调研问题都在独立的对话中运行",
   "dailyAgent.researchAlertDescription":
-    "上游调度器必须输出调研清单。ChatGPT Web 调研在发送问题前会被强制切换为 Chat 模式和 Pro 模型。配置项目 URL 后，每个新的调研对话都会在该 ChatGPT 项目中创建。",
+    "上游调度器必须输出调研清单。仅使用明确配置的 Runner 及其已授权的工具执行问题。",
   "dailyAgent.imDelivery": "IM 推送",
   "dailyAgent.channel": "渠道",
   "dailyAgent.selectChannel": "选择渠道...",

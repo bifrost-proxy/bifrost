@@ -65,6 +65,9 @@ const en = {
   "transcript.speakerCandidate": " candidate {name} {percent}%",
 
   // DailyAgentTab: messages
+  "dailyAgent.retiredProjectMigration":
+    "ChatGPT Web project settings are no longer supported. Remove these obsolete settings from all Daily Agents before editing. Runner selections, reports and history are preserved; choose another supported Runner explicitly.",
+  "dailyAgent.removeRetiredProjectUrls": "Remove obsolete project settings",
   "dailyAgent.loadConfigFailed": "Failed to load Daily Agent config: {error}",
   "dailyAgent.configSaved": "Configuration saved",
   "dailyAgent.saveFailed": "Failed to save: {error}",
@@ -107,7 +110,6 @@ const en = {
   "dailyAgent.dependencyFailure.continue": "Continue",
   "dailyAgent.independentResearch": "Independent Research",
   "dailyAgent.maxQuestions": "Max Questions",
-  "dailyAgent.chatgptProjectUrl": "ChatGPT Project URL",
   "dailyAgent.allowedResearchRunners": "Allowed Research Runners",
   "dailyAgent.runtimeDataFallbacks": "Runtime Data Fallbacks",
   "dailyAgent.fallbackRunnerAria": "{profile} fallback runner",
@@ -128,7 +130,7 @@ const en = {
   "dailyAgent.researchAlertTitle":
     "Each research question runs in its own conversation",
   "dailyAgent.researchAlertDescription":
-    "The upstream dispatcher must output a research manifest. ChatGPT Web research runs are forced to Chat mode with the Pro model before a question is sent. When a Project URL is configured, every new research conversation is created inside that ChatGPT Project.",
+    "The upstream dispatcher must output a research manifest. Questions run only on explicitly configured Runners with their authorized tools.",
   "dailyAgent.imDelivery": "IM Delivery",
   "dailyAgent.channel": "Channel",
   "dailyAgent.selectChannel": "Select channel...",

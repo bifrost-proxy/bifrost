@@ -146,9 +146,9 @@ export default function AgentTab() {
   };
 
   const runnerOptions = useMemo(() => {
-    const runnerIds = Object.keys(runnerConfig?.runners || {}).sort();
+    const runnerIds = imGatewayApi.selectableRunnerIds(runnerConfig);
     return runnerIds.map((id) => ({ label: id, value: id }));
-  }, [runnerConfig?.runners]);
+  }, [runnerConfig]);
 
   const selectedRunnerValue =
     config?.runner || runnerConfig?.defaultRunnerId || runnerOptions[0]?.value;

@@ -2,7 +2,7 @@
 
 ## 背景
 
-Bifrost 的 Agent Runner 已经把 Codex、ChatGPT Web、custom CLI 收敛到同一套 runner/adapter 模型。Trae CLI (`traecli` / `traex`) 与 Codex CLI 类似,都可以通过命令行以 JSONL 形式输出执行过程和最终结果,因此应作为新的内置 external CLI adapter 接入,而不是为 Web Chat 或飞书 IM 增加专用分支。
+Bifrost 的 Agent Runner 已经把 Codex、custom CLI 收敛到同一套 runner/adapter 模型。Trae CLI (`traecli` / `traex`) 与 Codex CLI 类似,都可以通过命令行以 JSONL 形式输出执行过程和最终结果,因此应作为新的内置 external CLI adapter 接入,而不是为 Web Chat 或飞书 IM 增加专用分支。
 
 本次目标不是只让 Trae 跑完并返回最终答案,而是让 Trae 的执行过程进入 Bifrost 既有 timeline: Web Chat 中应有同样的运行态、过程块、工具/状态步骤和最终消息;飞书 IM 通道应继续复用 progress card 展示运行过程和最终结果。
 
@@ -18,11 +18,11 @@ Bifrost 的 Agent Runner 已经把 Codex、ChatGPT Web、custom CLI 收敛到同
 - Web Chat `/chat/stream` 与 slash runner-call stream 必须把 Trae progress event 实时写入同一份 conversation timeline。
 - IM event loop 必须把 Trae progress event 同时推给 progress card 和 conversation timeline。
 - WebUI Runners 配置面支持选择 Trae CLI,并在最终消息中默认展开已完成的过程块。
-- WebUI Runners 配置面只展示当前可用的 Codex CLI、Trae CLI、ChatGPT Web 三类 Adapter;`custom`/`mock` 作为内部兼容和未来扩展能力保留在协议层,不暴露给用户选择。
+- WebUI Runners 配置面只展示当前可用的 Codex CLI、Trae CLI 三类 Adapter;`custom`/`mock` 作为内部兼容和未来扩展能力保留在协议层,不暴露给用户选择。
 
 ### 必须不破坏
 
-- 不改变 Codex、ChatGPT Web、custom CLI 的 runner 选择语义、work_dir 继承和持久化会话恢复。
+- 不改变 Codex、custom CLI 的 runner 选择语义、work_dir 继承和持久化会话恢复。
 - Codex/Trae 默认作为无人值守 external runner 启动,必须默认 full access,避免 CLI 在 IM/Web 长任务中等待二次授权;用户显式配置 sandbox/permission/approval 时才按显式配置收窄。
 - 不把外层 `traex` wrapper 调用作为用户可见工具步骤写进 timeline;用户应该看到 Trae 自己输出的状态、工具和最终回答。
 - 不伪造 Trae 没有输出的细粒度工具事件。若 Trae 本次 JSONL 只提供状态和最终消息,Bifrost 只展示真实状态和最终消息;若 Trae 输出 tool started/finished,Bifrost 再展示工具步骤。
@@ -45,7 +45,6 @@ Bifrost 的 Agent Runner 已经把 Codex、ChatGPT Web、custom CLI 收敛到同
 
 Trae 与 Codex 都是 "single-shot exec 模式的外部 coding agent",Bifrost 将其收敛为一个内置 adapter 家族:
 
-- Adapter kind 层: `AdapterKind::Traex` / `AdapterKind::Codex` / `AdapterKind::ChatGptWeb`。
 - Command spec 层: 根据 kind 决定 executable、subcommand、参数拼装顺序。
 - Runtime 层: 复用 `ExternalCliRuntime`,统一 stdout/stderr 逐行解析,解析结果通过 channel/worker event 推给上层。
 - Timeline 层: 复用 `record_external_cli_progress_event_to_timeline`,把 JSONL 事件规范成 conversation timeline 记录。
@@ -103,10 +102,8 @@ Web timeline 会按 `call_id` 合并工具 start/result,并跳过重复 start。
 
 运行中的 Web Chat 不使用前端定时轮询作为状态源。后端每次向 conversation timeline 写入外部 runner 事件后,通过已有 `sessions/events` SSE 推送轻量 `timeline_changed`,payload 只包含 `sessionKey`、`historyPath` 和可用的 `endIndex`。前端只接受当前打开的 `historyPath/sessionKey` 对应事件,多个线程同时运行时不会互相写入消息区;收到事件后按本地 `endIndex` 调用 history `since` 增量接口补齐。EventSource 连接不跟随普通 thread summary 刷新重建,而是通过 ref 读取当前线程和运行状态,避免多线程同时推送时发生连接抖动或旧响应覆盖。只有 SSE lagged、重连或返回的 `start_index` 与本地 `endIndex` 不连续时,才触发一次 tail/history 或 sessions/all 校准,避免运行页把 `/sessions/all` 变成高频心跳并拖高主进程 CPU。
 
-外部 runner (Codex/Trae) 使用 app-server transport 时支持 `turn/steer`: Web Chat 展示 Guide/Queue 且默认选中 Guide；IM 普通 busy 文本默认直接进入 `SessionQueueManager`，只有显式 `/g` 才请求 Guide。不支持 live guide、runner 拒绝或控制通道失败时，显式 Guide 必须明确降级排队并保留原消息；普通文本和图片按默认队列保留完整消息/附件。成功 steer 的消息不得重复排队。`/stop` 仍作为单独控制命令立即尝试停止当前外部进程。当前 run 结束后，IM/Web Chat runner loop 弹出排队消息启动下一轮，Codex 和 Trae 都复用上一轮保存的 `threadId` 续接 runner 原生会话上下文。ChatGPT Web 保持只支持 Queue。
 
-
-Runners 配置页的 Adapter 下拉只展示产品化入口: Codex CLI、Trae CLI、ChatGPT Web。后端仍接受历史或测试用途的 `custom`/`mock` adapter,保证已有配置和自动化测试不被破坏,但新建/编辑弹窗不再把这些未来扩展项暴露给普通用户。
+Runners 配置页的 Adapter 下拉只展示产品化入口: Codex CLI、Trae CLI。后端仍接受历史或测试用途的 `custom`/`mock` adapter,保证已有配置和自动化测试不被破坏,但新建/编辑弹窗不再把这些未来扩展项暴露给普通用户。
 
 ### Codex/Traex Slash Model 命令
 
@@ -161,7 +158,7 @@ Agent Chat 底部 token HUD 需要从 session detail、history summary 和外部
 
 ## Phase 4: WebUI 与真实场景
 
-- Runners 配置 Adapter 下拉仅暴露 Codex/Traex/ChatGPT。
+- Runners 配置 Adapter 下拉仅暴露 Codex/Traex/Claude Code。
 - Agent Chat 过程块默认展开/折叠、Threads 折叠状态 localStorage、fallback runner mark。
 - 更新 human_tests、design 文档。
 
@@ -210,7 +207,7 @@ Agent Chat 底部 token HUD 需要从 session detail、history summary 和外部
 - `e2e-tests/tests/test_im_gateway_external_runner_image_input.sh`: 覆盖图像输入的 progress 语义。
 - 使用临时 `BIFROST_DATA_DIR`、非 9900 端口,启动服务后调用 `/chat/stream`,断言 NDJSON 中包含 Trae progress event、最终 `run_finished`、run detail artifacts 和 timeline。
 - Playwright 断言 external runner 运行中输入只显示 Queue 并发送 `/q ...`;断言 Threads 折叠状态写入 localStorage,刷新后仍保持;断言 Trae fallback thread mark 不显示为 `Bf`;断言运行中 history 由 `timeline_changed` SSE 触发增量更新,其他线程的 timeline 事件不会污染当前消息区,且不会高频请求 `/sessions/all`。
-- Playwright 打开 Agent Runners 的 Add Runner 弹窗,断言 Adapter 下拉包含 Codex CLI、Trae CLI、ChatGPT Web,且不包含 Custom、Mock。
+- Playwright 打开 Agent Runners 的 Add Runner 弹窗,断言 Adapter 下拉包含 Codex CLI、Trae CLI,且不包含 Custom、Mock。
 - 使用 mock `codex` 和 mock `traecli` 启动真实 Bifrost,调用 `/chat/stream` 发送 `/models`、`/model Doubao-Unit` 和普通消息,断言模型列表不泄露 raw 字段,非法模型被拒绝且不写入 override,后续 run snapshot 带目标 `--model`,session state 写入 override。
 
 ### 真实场景测试
@@ -231,7 +228,7 @@ Agent Chat 底部 token HUD 需要从 session detail、history summary 和外部
 
 ### 第 2 轮
 
-- 复查第 1 轮修复后的 diff,重点检查是否仍有 wrapper tool 噪音、final assistant 重复、Trae permission mode 错误、ChatGPT Web/Codex 回归。
+- 复查第 1 轮修复后的 diff,重点检查是否仍有 wrapper tool 噪音、final assistant 重复、Trae permission mode 错误/Codex 回归。
 - 复测命令: focused Rust 单测、`cargo test --workspace --all-features`、clippy/fmt、必要时 local-ci。
 
 ## 校验要求

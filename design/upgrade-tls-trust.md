@@ -145,7 +145,6 @@ pub fn outbound_blocking_reqwest_client_builder() -> reqwest::blocking::ClientBu
 - `install_skill.rs` 拉 GitHub raw skill。
 - `bifrost-sync/client.rs` Sync/登录/云端接口。
 - `agent/client.rs` provider 请求、Responses API;`agent/mcp/oauth.rs` OAuth discovery/register/token/refresh。
-- `bifrost-admin` ASR (`handlers/asr.rs`)、`handlers/voice/wake.rs`、`im_gateway/{feishu,weixin,chatgpt_web/*,agent_reply,providers}`、`handlers/replay.rs`、`replay.rs`。
 - `bifrost-cli/asr.rs` diarization / 语音模型下载。
 - `bifrost-script` remote parser download 与 sandbox `net.fetch`。
 - `bifrost-core` 规则 value 的远程 URL 来源;同步规则解析路径通过独立线程执行 reqwest blocking 拉取,避免 nested runtime drop panic;不可达 URL 字面量按既有语义 fallback。

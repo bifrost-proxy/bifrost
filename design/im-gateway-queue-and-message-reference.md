@@ -2,7 +2,7 @@
 
 ## 功能模块详细描述
 
-IM Gateway 在会话已有任务运行时，对普通后续消息采用 FIFO 排队；只有用户显式发送 `/g <引导内容>` 时，才尝试把内容注入当前 Runner turn。该规则对内置 Bifrost Agent、Codex、Trae、Claude Code、ChatGPT Web 和其他自定义 Runner 一致，避免后一条普通消息覆盖前一条尚未完成的请求。
+IM Gateway 在会话已有任务运行时，对普通后续消息采用 FIFO 排队；只有用户显式发送 `/g <引导内容>` 时，才尝试把内容注入当前 Runner turn。该规则对内置 Bifrost Agent、Codex、Trae、Claude Code 和其他自定义 Runner 一致，避免后一条普通消息覆盖前一条尚未完成的请求。
 
 Weixin 入站消息支持 `item_list[].ref_msg.message_item`。引用消息需要保留服务端消息 ID、创建时间和可能内联返回的文本，并在进入 Agent 前解析成明确的“引用消息 + 当前消息”上下文。引用内容只是用户消息上下文，不获得系统指令优先级。
 

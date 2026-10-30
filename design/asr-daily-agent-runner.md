@@ -4,7 +4,6 @@
 
 ASR 定时任务(`AsrDirectoryTask`)按目录批量转写音频后,会在 `<BIFROST_DATA_DIR>/asr/data/text/<task_id>/.daily/YYYY-MM-DD.md` 生成每日转写汇总 Markdown。这些原始 daily markdown 只是转写产物,不承担业务表达:用户实际想要的是"日报"、"明日 To Do"、"复盘"、"重点摘录"等二次整理。旧方案只把 daily markdown 存盘,用户需要手动喂给外部工具生成日报,链路断裂。
 
-Daily Agent Runner 是 ASR 定时任务的后处理阶段:ASR 音频转写成功、daily markdown 有增量后,自动为该 task 排队一个 Daily Agent 队列,按稳定依赖拓扑把每个 enabled Agent 交给对应外部 Runner(ChatGPT Web / Codex / Claude Code / Trae X / 自定义)执行,输出 report 到 `.daily/agents/<agent_id>/output/<output_dir>/YYYY-MM-DD-report.md`,可选把同日上游产物注入下游 Agent,可选 IM 通道发送 summary 或 full report,可选把 report 复制到用户指定的外部目录(iCloud、企业网盘)。配置 `report_sync_dir` 后,Agent report 按 Agent 子目录复制,原始 daily markdown 统一复制到目标根目录的 `original_text/` 子目录。没有依赖配置时继续保留原数组顺序。
 
 本方案不改动 ASR 音频转写主链路(chunk retry、diarization、daily markdown 生成不变);只在 ASR run terminal 后接一个后处理队列,并在 WebUI/CLI 上提供管理入口。
 
@@ -17,11 +16,6 @@ Daily Agent Runner 是 ASR 定时任务的后处理阶段:ASR 音频转写成功
 - Agent 标识约束:`id`/`name`/`output_dir` 仅允许 `[A-Za-z0-9_-]`;不同 Agent 有独立 processed key `<agent_id>:<date>`,避免跨 Agent 覆盖。
 - ASR worker 在 run terminal 时只返回本轮完成的 `daily_agent_dates`;长生命周期 Admin 主进程收到 worker result 后调用 `maybe_enqueue_daily_agent_after_asr_run`,避免五分钟空闲回收 ASR worker 时连带关闭仍在生成报告的浏览器。仅当 daily markdown 有增量(new_file/appended/rewritten)或存在持久 pending 日期时排队;`unchanged` 跳过。
 - 自动触发选中的日期按 Agent 写入 `daily_agent_processed.json.pending_dates`;只有对应 Agent 的 report 成功落盘后才移除。失败、进程退出或服务重启后的日期继续保留,并在下次 ASR 完成时按日期串行补偿。
-- 并发控制:全局 `DAILY_AGENT_TASK_LOCKS`(per-task) + `DAILY_AGENT_RUNNING_TASKS`(去重) + `DAILY_AGENT_TASK_CONFIG_LOCK`(配置写);同 task 内多 Agent 串行,不并发抢 ChatGPT Web runner。
-- Agent 依赖:`dependencies[{agent_id,include_output}]` 建立稳定 DAG;未知/自/重复/循环依赖保存失败;`dependency_failure_policy=skip|continue` 控制上游失败传播。`include_output=true` 时同日产物挂载到 `input/upstream/<agent_id>/<date>-report.md`,ChatGPT Web 每次消息直接注入正文。
-- ChatGPT Web 大输入必须走剪贴板 + `Meta+V/Ctrl+V` 原生粘贴路径,不再按字符数分片;composer 大文本后 ChatGPT 可能上传为文件,输入框无正文属于正常状态;adapter 只轮询发送按钮可用状态。
-- ChatGPT Web 契约输出:`daily_report` 必须含 `# YYYY-MM-DD 日报` / `## 今日概览` / `## 证据与不确定性`;`tomorrow_todo` 必须含 `# 明日 To Do List - YYYY-MM-DD` / `## 明天必须完成` / `## 可选推进` / `## 需要确认`;重试续写按 Agent 契约分流。
-- ChatGPT Web browser 恢复只恢复与当前 `execution_mode` 一致的 orphan;headed 不复用 headless,反之亦然。
 - Admin API 与 CLI 提供列表、增改、run、send、sync、reports 详情等入口;WebUI 提供 Daily Agent 管理列表页 + 单 Agent 详情页 + Daily Docs 行级 Run(All / 单 Agent) + report 全屏详情。
 - Daily Docs 行级 Run 是用户显式重跑语义:请求固定携带 `date` 与 `force=1`;选择单个 Agent 时额外携带 `agent_id`。只要该 task 当前没有 Daily Agent 运行,无论目标日期历史上成功、失败或 processed hash 未变化,都必须创建新的 run。task 已占用时保持 task-level 串行并返回 `already_running`,WebUI 必须显示 warning,不得误报 queued/success。
 - `report_sync_dir` 自动同步:Runner 成功生成 report 后复制到 Agent 子目录;ASR daily markdown 刷新后复制到目标根目录的 `original_text/`;`last_report_sync` 与 `last_original_sync` 分别记录 copied/skipped/failed;外部目录超时不影响 ASR 或 report 成功状态。
@@ -35,7 +29,6 @@ Daily Agent Runner 是 ASR 定时任务的后处理阶段:ASR 音频转写成功
 - 全局 `ASR_JOB_RUN_LOCK`(GPU 单例) 不被 Daily Agent 占用;Daily Agent 只用自身 per-task 锁。
 - 首次启用或新 Agent 的无作用域自动运行仍只处理最新日期,不得因持久 pending 补偿绕过 watermark 并扫过全部历史。
 - 已有 AGENTS.md 与 conversation state 不被覆盖;git 不可用时不阻塞任务创建与 report 生成。
-- Codex / ChatGPT Web / 其他外部 runner 的现有配置(session_key、adapter_config、allow_work_dirs)保留原语义。
 - 旧单 Agent 配置(`agent_id`/`name`/`runner`/`output_dir`/`instructions`)保留为兼容镜像;加载时补齐默认 `tomorrow_todo`。
 
 ### 必须真实验证
@@ -43,11 +36,9 @@ Daily Agent Runner 是 ASR 定时任务的后处理阶段:ASR 音频转写成功
 - ASR task 创建时 daily workspace 自动初始化:`.daily/.gitignore`、`agents/<agent_id>/AGENTS.md` 都存在;git 不可用时 `git_available=false` 但不阻塞。
 - ASR 音频处理完成后自动触发 Daily Agent 生成 report;git commit best-effort 出现。
 - Daily Docs 行级 `Run All Agents` 按行 date 强制串行重跑所有 enabled Agent;单 Agent 下拉强制重跑指定 agent_id;历史成功、失败和 unchanged 均不能阻止显式重跑。
-- 多 Agent 共用同一 ChatGPT Web runner 时按 task-level 锁串行;单 Agent 失败只写自身 `last_status/last_error/last_run_id`,不阻断队列。
 - 手动 Run Now + IM 绑定通道 → 成功发送 summary 或 full_report;超长 full_report 分多条。
 - `report_sync_dir` 设置后 report 复制到 Agent 子目录,原始 daily markdown 复制到 `original_text/`;iCloud 卡住时同步失败但 ASR 与 report 生成成功。
 - Daily Agent Records 与 report 详情 `/daily-agent/reports/{date}` 数据一致,列表可见的 report 详情必须能打开(不能列表存在、详情 404)。
-- 服务重启后 orphan browser 仅恢复与当前 execution_mode 匹配的实例。
 
 ## 产品语义
 
@@ -66,19 +57,9 @@ Daily Agent 不注册独立 cron;触发点固定为 ASR run terminal + daily mar
 - 独立 `AGENTS.md`(runner cwd 指向该目录)。
 - 独立 `input/YYYY-MM-DD.md`(daily markdown 副本,避免 Agent 误改原文件)。
 - 独立 `output/<output_dir>/YYYY-MM-DD-report.md`。
-- 独立 `session_key`(默认包含 `task_id + agent_id`),ChatGPT Web conversation 不跨 Agent 复用。
 - 独立 processed key `<agent_id>:<date>`,Records 不互相覆盖。
 
 这样"日报 Agent"与"明日 To Do Agent"可以有完全不同的 prompt 契约、runner、IM 通道、失败恢复,不会因共享资源污染彼此。
-
-### ChatGPT Web 契约输出与恢复策略
-
-不同 Agent 输出 heading 契约不同,续写/纠偏必须按契约分流:
-
-- `daily_report`:`# YYYY-MM-DD 日报` / `## 今日概览` / `## 证据与不确定性`。
-- `tomorrow_todo`:`# 明日 To Do List - YYYY-MM-DD` / `## 明天必须完成` / `## 可选推进` / `## 需要确认`。
-
-adapter 不允许把 `tomorrow_todo` 输出误导为日报格式。ChatGPT Web browser 重启后仅恢复与当前 `execution_mode` 一致的 orphan;headless/headed 严格隔离,防止在错误进程里粘贴大文本导致 CDP 卡死或跨模式污染。
 
 ### `report_sync_dir` 与 IM 是两条独立分发通道
 
@@ -95,7 +76,6 @@ adapter 不允许把 `tomorrow_todo` 输出误导为日报格式。ChatGPT Web b
 - `crates/bifrost-admin/src/handlers/asr_jobs/daily_agent_config.rs`:`AsrDailyAgentConfig`、`AsrDailyAgentItem`、`AsrDailyAgentImDeliveryConfig`、枚举 `AsrDailyAgentTriggerPolicy` / `AsrDailyAgentInstructionsSource`、`AsrDailyAgentReportSyncResult`。
 - `crates/bifrost-admin/src/handlers/asr_jobs/daily_agent_workspace.rs`:`ensure_asr_daily_workspace`、`text_output_dir` 拓展、AGENTS.md 分发、git init(best-effort)。
 - `crates/bifrost-admin/src/handlers/asr_jobs/daily_agent.rs`:队列 loop、`maybe_enqueue_daily_agent_after_asr_run`、ChangePlanner(`new_file` / `appended` / `rewritten` / `unchanged`)、Runner 执行、per-Agent 结果聚合、IM 发送、report_sync 复制。
-- `crates/bifrost-admin/src/handlers/asr_jobs/daily_agent_prompt.rs`:按 Agent 契约生成 system + user prompt;ChatGPT Web 走大输入路径。
 - `crates/bifrost-admin/src/handlers/asr_jobs/daily_agent_api.rs`:HTTP handlers。
 - `crates/bifrost-admin/src/handlers/asr_jobs/daily_agent_records.rs`:合并 processed json + 磁盘扫描的兜底发现;兼容旧路径。
 - `crates/bifrost-admin/src/handlers/asr_jobs/runner.rs` / `retry.rs`:`update_task_after_run` 之后调用 hook。
@@ -138,7 +118,6 @@ Runner `work_dir = <task>/.daily/agents/<agent_id>`;`allow_work_dirs = [<daily_d
 - `rewritten`:hash 变化且非 append,发送全文并标记覆盖。
 - `unchanged`:hash 相同,skip。
 
-ChatGPT Web plan 不包含 `unchanged`;文件型外部 runner 的 plan 不塞 daily markdown 全文(只传路径/摘要,减少 token)。
 
 ### Runner 触发
 
@@ -150,36 +129,6 @@ ASR worker 与 Admin 主进程的触发链路:
 4. 若 `DAILY_AGENT_RUNNING_TASKS` 已存在则不再启动第二个队列;已持久化的新增日期由当前 loop 动态读取。
 5. task-level loop 每次读取最早的未尝试 pending 日期,持 `DAILY_AGENT_TASK_LOCKS[task_id]`,串行执行所有相关 Agent。一次 loop 内失败日期不无限重试。
 6. 每个 Agent report 校验并成功落盘后,在同一个 processed-state 临界区写入文档/制品/watermark 并移除该 Agent 的 pending 日期;失败日期保留给后续 ASR completion 补偿。
-
-### Runner 消息组织
-
-统一走 `ExternalCliRunRequest`（runner 为 Codex、Trae、Claude Code、ChatGPT Web 或自定义 external runner）：
-
-- `session_key`:默认 `daily-agent:<task_id>:<agent_id>`。
-- `work_dir`:`.daily/agents/<agent_id>`。
-- `allow_work_dirs`:`[daily_dir]`。
-- `input`:按 ChatGPT Web / 文件型外部 runner 组织;ChatGPT Web 走剪贴板大输入路径。
-- `adapter_config`:透传 conversation ref、execution_mode。
-- ChatGPT Web browser auxiliary worker 的父进程等待上限取
-  `max(30 分钟, adapter_config.timeoutSecs + 5 秒)`。未显式配置时保持 30 分钟默认值;
-  Daily Agent 传入 7170 秒等长超时时,worker 不得在 1800 秒提前取消仍在生成或因 429
-  等待恢复的浏览器请求。
-- 后端已经返回 finished assistant candidate 后若间歇出现 429/5xx,保留 candidate 和
-  settle timer;只有后端明确返回未完成状态或 current branch/内容签名变化时才重置。后续
-  成功读取同一 candidate 即可完成确认,避免持续限流要求两次无间断成功读取。
-- 页面仍显示 Stop 但后端明确确认当前分支已经 finished 时,允许点击一次 stale Stop 清理
-  前端残留状态;没有后端 finished 证据时不得停止仍在生成的回复。如果点击失败或 Stop
-  持续残留,busy gate 仍必须受原等待上限约束并返回 `conversation_busy`,不得无限循环。
-- 大输入已提交、页面进入 `/c/WEB:<uuid>` 且出现生成状态,但 CDP 没有捕获
-  `f/conversation` POST 时,把 `WEB:*` 视为 provisional conversation 并等待它提交为真实
-  conversation id,不得按 `conversation_busy` 立即失败或重复发送 prompt。
-- Daily Agent 首轮输出不满足标题/章节契约时,纠偏 prompt 必须包含本轮完整原始 prompt。
-  即使原 conversation 丢失并在新对话中重放,新对话仍拥有源 Markdown、Agent 指令和输出
-  契约,而不是只收到一段脱离上下文的纠偏语。
-- ChatGPT Web prompt 必须在用户可编辑的 AGENTS.md、已有输出和源文件正文之后，把本次运行的动态输出契约追加到整个 prompt 末尾。
-  运行日期是权威值；如果 AGENTS.md 或已有输出仍包含历史固定日期，模型必须替换旧日期，
-  不得因遵循旧标题而反复触发纠偏。`daily_report` 使用源转录日期，`tomorrow_todo` 使用
-  源转录日期的下一天。
 
 ### IM 发送
 
@@ -233,7 +182,6 @@ ASR worker 与 Admin 主进程的触发链路:
 ### Phase 2:Runner 集成 + ChangePlanner + processed state
 
 - ChangePlanner 四态判定;processed key `<agent_id>:<date>`。
-- `ExternalCliRunRequest` 组装;ChatGPT Web 大输入剪贴板路径;Codex 等文件型外部 runner 直调。
 - ASR terminal hook `maybe_enqueue_daily_agent_after_asr_run` 接入 `runner.rs` + `retry.rs`。
 
 ### Phase 3:IM + report_sync + API + CLI
@@ -246,7 +194,6 @@ ASR worker 与 Admin 主进程的触发链路:
 
 - Daily Agent tab 列表 + 详情页;Daily Docs 行级 Run;Report 全屏详情;URL 参数恢复;窄窗口布局。
 - Records 合并 processed + 磁盘 fallback;兼容旧路径。
-- ChatGPT Web orphan browser 按 execution_mode 隔离恢复。
 - `human_tests/asr-daily-agent-runner.md` + `webui-asr-daily-agent-*.md` 全部执行。
 
 ## 测试方案
@@ -261,7 +208,6 @@ ASR worker 与 Admin 主进程的触发链路:
 - `maybe_enqueue_daily_agent_after_asr_run` 只在 ASR terminal + daily 刷新后排队。
 - ChangePlanner 四态(new_file / appended / rewritten / unchanged) + byte range 正确。
 - Runner 成功 → 更新 processed state;失败 → 不更新;同日多 Agent processed key 不覆盖。
-- ChatGPT Web plan 不含 unchanged;文件型外部 runner 的 plan 不塞 daily markdown 全文。
 - Active run 不重复启动;work_dir 只允许 daily_dir。
 - IM channel 解析 `owner:xxx` / `target:xxx`;full_report 超长拆多条。
 
@@ -272,7 +218,6 @@ ASR worker 与 Admin 主进程的触发链路:
 - 创建 ASR task → daily workspace 自动存在。
 - 启用 Daily Agent → WebUI 单字段 Runner 下拉保存 `runner/trigger_policy/timeout`。
 - ASR run 完成 → 音频处理完再看到 Daily Agent queued;仍在 processing 时不启动。
-- daily markdown unchanged → skipped;追加内容后 ChatGPT Web 只收新增 tail。
 - 手动 Run Now → `report/` 生成文件。
 - Daily Docs 行级 `Run All Agents` → 请求带 `date&force=1`,后端串行强制重跑全部 enabled Agent;单 Agent 下拉 → 额外带 `agent_id` 只强制重跑指定 Agent;mock `already_running` 时页面显示 warning 且不宣称已入队。
 - `report_sync_dir` 自动同步 + 手动同步;`original_text/` 只接收合法的 `YYYY-MM-DD.md`;iCloud 卡住时同步失败但 ASR 与 report 成功;`last_report_sync` 和 `last_original_sync` 记录 copied/skipped/failed。
@@ -301,9 +246,7 @@ Playwright / 真实浏览器覆盖:创建页 Runner 单字段下拉、IM Channel
 | TC-ADA-07 | Daily Agent 管理列表与 Agent 详情页分离 |
 | TC-ADA-08 | ASR 顶层 tab 英文文案与窄窗口列表布局 |
 | TC-ADA-09 | Daily Docs 行级 Run Daily Agent 可选择全部或单个 Agent |
-| TC-ADA-10 | 多 Agent 共用 ChatGPT Web Runner 的串行运行与失败隔离 |
 | TC-ADA-11 | 每个 Agent 工作目录包含 input 副本并按 Runner 独立落档 |
-| TC-ADA-15 | ChatGPT Web Daily Agent 失败先由 adapter 收敛并持久化诊断产物 |
 | TC-DAR-01 | Daily Agent Records 从已有 Report 目录兜底发现历史报告 |
 | TC-DAR-09 | Daily Agent Records 支持按 Agent、Date、Runner 筛选 |
 | TC-DAR-10 | Daily Agent Records 窄窗口表格横向滚动不撑宽 tab |
@@ -328,22 +271,19 @@ Playwright / 真实浏览器覆盖:创建页 Runner 单字段下拉、IM Channel
 
 ### 第 1 轮
 
-- 复核用户目标:workspace 布局、per-Agent 隔离、ChangePlanner 四态、并发锁矩阵、ChatGPT Web 大输入路径与 orphan 恢复、IM 单字段 channel。
+- 复核用户目标:workspace 布局、per-Agent 隔离、ChangePlanner 四态、并发锁矩阵 大输入路径与 orphan 恢复、IM 单字段 channel。
 - 复核 diff:`git status --short` / `git diff` 覆盖 `asr_jobs/daily_agent*`、`runner.rs`/`retry.rs` hook、CLI `daily.rs`、WebUI Daily Agent 页面、human_tests。
 - 重点 review:agent_id 字符集校验;`allow_work_dirs` 只含 daily_dir;`session_key` 含 `task_id + agent_id`;Records 数据源与 report 详情读同一路径。
 - 复测:定向单测 + 全量 API E2E + Playwright UI。
 
 ### 第 2 轮
 
-- 复查第 1 轮修复:多 Agent 串行时锁未泄漏;ChatGPT Web headed/headless 恢复严格隔离;report_sync 异步失败不阻塞 report 成功。
 - 再次 `git status --short` / `git diff`,确认没有遗漏 WebUI 布局或 URL 参数恢复分支。
 - 复跑受影响单测、E2E、human_tests;新问题追加轮次。
 
 ## 风险与决策点
 
-- ChatGPT Web 大输入必须走剪贴板 + `Meta+V/Ctrl+V`,不再按字符数分片;composer 上传为文件后输入框无正文属正常状态,adapter 只轮询发送按钮可用,不做 head/tail/长度采样。
 - `ASR_JOB_RUN_LOCK` 是 GPU 单例,Daily Agent 不占用;新增 `DAILY_AGENT_*` 独立锁,避免拖慢 ASR 音频处理。
-- 多 Agent 共用同一 ChatGPT Web runner 时按 task 级串行,牺牲吞吐换 conversation 隔离;跨 task 仍可并行。
 - `report_sync_dir` 指向 iCloud/外部目录时可能卡住;必须超时后只写 sync 错误,不影响 report 成功状态和其他 API 响应。
 - Records 数据源双通道(processed json + 磁盘 fallback):必须保证列表可见的 report 详情能打开;禁止列表存在、详情 404 的不一致。
 - Agent 标识字符集限制 `[A-Za-z0-9_-]`:避免跨平台路径与 URL 参数歧义;历史 task 若含非法字符需在加载时清洗并写日志。

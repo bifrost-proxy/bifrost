@@ -37,7 +37,7 @@
 
 ## 1. 执行摘要
 
-Bifrost 当前已经不只是流量代理，还承载了 External CLI Agent、ASR、ChatGPT Web 浏览器自动化、IM Gateway、Remote Invoke 等能力。这些能力的共同特征是：
+Bifrost 当前已经不只是流量代理，还承载了 External CLI Agent、ASR 浏览器自动化、IM Gateway、Remote Invoke 等能力。这些能力的共同特征是：
 
 - 会启动外部进程；
 - 会持有长期连接或 scheduler；
@@ -141,8 +141,6 @@ Bifrost 当前已经不只是流量代理，还承载了 External CLI Agent、AS
 
 相关代码：
 
-- `crates/bifrost-admin/src/im_gateway/chatgpt_web/browser.rs`
-- `crates/bifrost-admin/src/im_gateway/chatgpt_web.rs`
 - `crates/bifrost-admin/src/handlers/im_gateway/service.rs`
 
 当前存在进程级静态状态：
@@ -153,7 +151,6 @@ Bifrost 当前已经不只是流量代理，还承载了 External CLI Agent、AS
 - conversation tab pool；
 - CDP 连接和 target 映射。
 
-短生命周期 External CLI worker 可以触发一个长期存活的 Chromium，但 External CLI worker 退出后，浏览器仍可能继续存在。当前启动流程还会执行 ChatGPT Web startup auth check，导致浏览器能力参与主服务启动。
 
 Browser 是最适合独立为 Lazy 常驻 worker 的模块。
 
@@ -772,14 +769,6 @@ stop_grace = 5s
 - 用户显式“替换当前任务”时先 stop，再启动；
 - stop/guide 控制消息不进入普通 job queue。
 
-### 10.7 ChatGPT Web 分流
-
-`adapter == chatgpt_web` 时，不再进入 External CLI worker 内部执行浏览器逻辑，而由 TaskBroker 路由到 Browser Worker。
-
-过渡期可保持现有 runner 配置和 adapter 名称，避免 UI/配置迁移，但执行后端必须分开。
-
----
-
 ## 11. Browser Worker
 
 ### 11.1 Worker 唯一拥有的状态
@@ -804,13 +793,9 @@ Browser Worker 内迁移：
 
 必须移除启动阶段的：
 
-```text
-spawn_chatgpt_web_startup_auth_check()
-```
 
 以下操作才启动 Browser Worker：
 
-- ChatGPT Web `send/create/wait`；
 - 用户点击“登录”；
 - 用户显式“检查登录状态”；
 - Admin 显式启动 worker。
@@ -1433,7 +1418,6 @@ GET  /api/worker-jobs/{job_id}/artifacts/{artifact_id}?offset=&limit=
 
 1. WorkerSupervisor 初始化不得阻塞 listener ready；
 2. Browser/ASR/External CLI 不在启动时拉起；
-3. 移除 ChatGPT Web startup auth check；
 4. IM/Remote 在 listener ready 后异步评估是否需要启动；
 5. worker 启动失败只记录能力 degraded；
 6. 不因 worker 状态改变系统代理启停决策。
@@ -1598,7 +1582,6 @@ API 收到任务
 8. 全局重任务并发；
 9. restart/backoff/circuit；
 10. process/RSS/CPU/FD metrics；
-11. 移除 ChatGPT Web startup auth check；
 12. 明确 Browser/ASR/External CLI lazy；
 13. IM/Remote 仅在配置启用时启动；
 14. 建立代理外部压测基线；
@@ -1631,7 +1614,6 @@ API 收到任务
 1. 新增 Browser Worker hidden subcommand；
 2. 迁移 PID/port/launch lock/tab pool；
 3. Chromium 由 worker 唯一管理；
-4. ChatGPT Web adapter 路由到 Browser Worker；
 5. lazy startup；
 6. explicit login；
 7. idle shutdown；
@@ -1644,7 +1626,6 @@ API 收到任务
 - External CLI kill 后无子进程残留；
 - Browser worker crash 不退出主进程；
 - `bifrost start` 不启动 Chromium；
-- 原 Agent/ChatGPT Web API 兼容。
 
 ## Phase 3：ASR 完整任务进程化
 
@@ -2121,7 +2102,6 @@ IM 和 Remote 具有双向流、长期状态和配置热更新，不能简单包
 |---|---|
 | External CLI 已有 stdio worker | `crates/bifrost-admin/src/im_gateway/external_cli/mod.rs` |
 | CLI 暴露 ExternalRunnerWorker hidden command | `crates/bifrost-cli/src/commands/agent.rs` |
-| Browser PID/port/tab 为进程静态状态 | `crates/bifrost-admin/src/im_gateway/chatgpt_web/browser.rs` |
 | Browser startup auth check | `crates/bifrost-admin/src/handlers/im_gateway/service.rs` |
 | ASR 重任务集中在 Admin handlers | `crates/bifrost-admin/src/handlers/asr_jobs/*` |
 | ffmpeg/ffprobe/音频处理 | `crates/bifrost-admin/src/handlers/asr_jobs/audio_processing.rs` |

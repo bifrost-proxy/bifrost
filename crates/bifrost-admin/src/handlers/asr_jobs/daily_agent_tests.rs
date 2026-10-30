@@ -230,19 +230,10 @@ fn daily_agent_research_fanout_validation_rejects_invalid_fields() {
     item.research_fanout
         .as_mut()
         .unwrap()
-        .chatgpt_model = "auto".to_string();
-    assert!(validate_daily_agent_item(&item)
-        .unwrap_err()
-        .contains("requires ChatGPT interface_mode='chat' and model='pro'"));
-
-    let mut item = valid_item();
-    item.research_fanout
-        .as_mut()
-        .unwrap()
         .chatgpt_project_url = Some("https://example.com/project".to_string());
     assert!(validate_daily_agent_item(&item)
         .unwrap_err()
-        .contains("chatgpt_project_url is invalid"));
+        .contains("ChatGPT Web project URLs are no longer supported"));
 
     let mut item = valid_item();
     item.research_fanout
@@ -943,30 +934,7 @@ fn daily_agent_prompt_uses_file_list_for_file_capable_runners() {
     assert!(!codex_prompt.contains("AGENTS.md 内容"));
     assert!(!codex_prompt.contains("变更文件内容"));
 
-    let chatgpt_first = build_daily_agent_prompt(&task, &plan, "chatgpt_web", true).unwrap();
-    assert!(chatgpt_first.starts_with("## 专有名词配置（每次运行动态注入）"));
-    assert!(chatgpt_first.contains("Jennie = 内部项目代号"));
-    assert!(chatgpt_first.contains("AGENTS.md 内容"));
-    assert!(chatgpt_first.contains("今日新增转写内容"));
 
-    let chatgpt_next = build_daily_agent_prompt(&task, &plan, "chatgpt_web", false).unwrap();
-    assert!(chatgpt_next.starts_with("## 专有名词配置（每次运行动态注入）"));
-    assert!(chatgpt_next.contains("Jennie = 内部项目代号"));
-    // 每一轮都完整附带 AGENTS.md、已有日报与变更文件原文
-    assert!(chatgpt_next.contains("AGENTS.md 内容"));
-    assert!(chatgpt_next.contains("本条消息已附带 AGENTS.md 指令"));
-    assert!(chatgpt_next.contains("今日新增转写内容"));
-    assert!(chatgpt_next.contains("本次运行输出契约（系统动态生成，优先级高于 AGENTS.md 和已有输出）"));
-    assert!(chatgpt_next.contains("最终输出第一行必须严格为 `# 2026-05-19 日报`"));
-    assert!(chatgpt_next.contains("第一行必须严格为 `# 2026-05-01 日报`"));
-    assert!(
-        chatgpt_next
-            .find("第一行必须严格为 `# 2026-05-01 日报`")
-            .unwrap()
-            < chatgpt_next
-                .find("最终输出第一行必须严格为 `# 2026-05-19 日报`")
-                .unwrap()
-    );
 }
 
 #[test]
@@ -1051,19 +1019,13 @@ fn daily_agent_prompt_injects_same_date_dependency_output_by_runner_capability()
     ));
     assert!(!codex_prompt.contains("微软正在成为企业数字基础设施"));
 
-    let chatgpt_prompt =
-        build_daily_agent_prompt(&task, &plan, "chatgpt_web", false).unwrap();
-    assert!(chatgpt_prompt.contains("上游 Agent 产物"));
-    assert!(chatgpt_prompt.contains("agent=daily_report, date=2026-07-09"));
-    assert!(chatgpt_prompt.contains("微软正在成为企业数字基础设施"));
-
     processed
         .documents
         .get_mut(&format!("{DEFAULT_DAILY_AGENT_ID}:2026-07-09"))
         .unwrap()
         .source_sha256 = "stale-source-hash".to_string();
     save_daily_agent_processed_state(&task.id, &processed).unwrap();
-    let stale_prompt = build_daily_agent_prompt(&task, &plan, "chatgpt_web", false).unwrap();
+    let stale_prompt = build_daily_agent_prompt(&task, &plan, "codex", false).unwrap();
     assert!(!stale_prompt.contains("微软正在成为企业数字基础设施"));
 
     processed
@@ -1073,7 +1035,7 @@ fn daily_agent_prompt_injects_same_date_dependency_output_by_runner_capability()
         .source_sha256 = compute_sha256(&source_path).unwrap();
     save_daily_agent_processed_state(&task.id, &processed).unwrap();
     std::fs::remove_file(upstream_dir.join("2026-07-09-report.md")).unwrap();
-    let missing_prompt = build_daily_agent_prompt(&task, &plan, "chatgpt_web", false).unwrap();
+    let missing_prompt = build_daily_agent_prompt(&task, &plan, "codex", false).unwrap();
     assert!(!missing_prompt.contains("微软正在成为企业数字基础设施"));
 }
 
@@ -1168,322 +1130,25 @@ fn daily_agent_dependency_output_must_match_current_source_hash() {
     assert_eq!(unknown, vec!["unknown_upstream=not_configured"]);
 }
 
-#[test]
-fn daily_agent_chatgpt_web_tomorrow_todo_prompt_overrides_existing_source_date_heading() {
-    let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let temp = TempDir::new().unwrap();
-    let _guard = EnvGuard::set_data_dir(temp.path());
-    let audio_dir = temp.path().join("audio");
-    std::fs::create_dir_all(&audio_dir).unwrap();
-    let task = AsrDirectoryTask {
-        transcription_mode: AsrTranscriptionMode::Standard,
-        transcription_prompt: String::new(),
-        id: "daily-agent-tomorrow-prompt-task".to_string(),
-        name: "Daily Agent Tomorrow Prompt Task".to_string(),
-        audio_dir,
-        recursive: true,
-        enabled: true,
-        paused: false,
-        paused_at_ms: None,
-        schedule: AsrTaskSchedule::Hourly { minute: 0 },
-        language: "chinese".to_string(),
-        model: "Qwen3-ASR-1.7B".to_string(),
-        runtime_strategy: AsrRuntimeStrategy::ReusePerFile,
-        max_concurrent_files: default_max_concurrent_files(),
-        diarization: AsrDiarizationConfig::default(),
-        created_at_ms: 1,
-        updated_at_ms: 1,
-        last_run_at_ms: None,
-        next_run_at_ms: Some(1),
-        last_error: None,
-        daily_agent: AsrDailyAgentConfig {
-            agent_id: DEFAULT_TOMORROW_TODO_AGENT_ID.to_string(),
-            name: DEFAULT_TOMORROW_TODO_AGENT_NAME.to_string(),
-            output_dir: DEFAULT_TOMORROW_TODO_OUTPUT_DIR.to_string(),
-            ..AsrDailyAgentConfig::default()
-        },
-        external_devices: Vec::new(),
-        import_policy: AsrExternalImportPolicy::default(),
-    };
-    ensure_asr_daily_workspace(&task).unwrap();
-    let daily_dir = daily_dir_for_task(&task.id);
-    std::fs::write(daily_dir.join("2026-06-15.md"), "今日转写里有明天事项").unwrap();
-    let stale_report = daily_agent_output_dir(&task).join("2026-06-15-report.md");
-    std::fs::create_dir_all(stale_report.parent().unwrap()).unwrap();
-    std::fs::write(
-        &stale_report,
-        "# 明日 To Do List - 2026-06-15\n\n## 明天必须完成\n\n- 旧内容\n",
-    )
-    .unwrap();
 
-    let plan = build_daily_agent_change_plan(&task, "test", None, true).unwrap();
-    let prompt = build_daily_agent_prompt(&task, &plan, "chatgpt_web", false).unwrap();
 
-    assert!(prompt.contains("本次运行输出契约（系统动态生成，优先级高于 AGENTS.md 和已有输出）"));
-    assert!(prompt.contains("源转录日期 `2026-06-15` 的明日待办目标日期是 `2026-06-16`"));
-    assert!(prompt.contains("最终标题必须是 `# 明日 To Do List - 2026-06-16`"));
-    assert!(prompt.contains(
-        "如果 AGENTS.md 或已有输出标题仍是 `# 明日 To Do List - 2026-06-15`"
-    ));
-    assert!(prompt.contains("# 明日 To Do List - 2026-06-15"));
-    let existing_output_position = prompt.find("## 已有输出完整内容").unwrap();
-    let runtime_contract_position = prompt.find("## 本次运行输出契约").unwrap();
-    assert!(existing_output_position < runtime_contract_position);
-    assert!(prompt[..runtime_contract_position].contains("# 明日 To Do List - 2026-06-15"));
-    assert!(prompt
-        .trim_end()
-        .ends_with("不得沿用旧标题。"));
-}
 
-#[test]
-fn daily_agent_chatgpt_web_external_params_start_fresh_conversation() {
-    let state = AsrDailyAgentConversationState {
-        initialized: true,
-        conversation_id: Some("previous-conversation".to_string()),
-        thread_id: Some("previous-thread".to_string()),
-        ..Default::default()
-    };
 
-    assert_eq!(
-        daily_agent_external_runner_params("chatgpt_web", &state),
-        serde_json::Value::Null
-    );
-    assert_eq!(
-        daily_agent_external_runner_params("codex", &state),
-        serde_json::json!({ "threadId": "previous-thread" })
-    );
-}
 
-#[test]
-fn daily_agent_chatgpt_web_timeout_is_bounded_below_outer_timeout() {
-    let config = crate::im_gateway::external_cli::ExternalCliAdapterConfig {
-        timeout_secs: Some(720_000),
-        ..Default::default()
-    };
 
-    let bounded =
-        daily_agent_external_runner_adapter_config("chatgpt_web", &config, 3_600_000);
 
-    assert_eq!(bounded.timeout_secs, Some(3_570));
 
-    let already_short = crate::im_gateway::external_cli::ExternalCliAdapterConfig {
-        timeout_secs: Some(60),
-        ..Default::default()
-    };
 
-    let bounded =
-        daily_agent_external_runner_adapter_config("chatgpt_web", &already_short, 3_600_000);
 
-    assert_eq!(bounded.timeout_secs, Some(3_570));
 
-    let non_web =
-        daily_agent_external_runner_adapter_config("codex", &config, 3_600_000);
 
-    assert_eq!(non_web.timeout_secs, Some(720_000));
-}
 
-#[test]
-fn daily_agent_chatgpt_web_same_conversation_wait_uses_daily_timeout_with_headroom() {
-    assert_eq!(
-        daily_agent_chatgpt_web_same_conversation_wait_timeout_ms(3_600_000),
-        3_570_000
-    );
-    assert_eq!(
-        daily_agent_chatgpt_web_same_conversation_wait_timeout_ms(30_000),
-        30_000
-    );
-    assert_eq!(
-        daily_agent_chatgpt_web_same_conversation_wait_timeout_ms(1_000),
-        5_000
-    );
-}
 
-#[test]
-fn daily_agent_chatgpt_web_report_response_gate_rejects_placeholders() {
-    assert!(validate_chatgpt_web_daily_report_response(
-        "# 2026-06-15 日报\n\n## 今日概览\n\n完整正文足够长。\n\n## 证据与不确定性\n\n"
-            .repeat(20)
-            .as_str(),
-        "2026-06-15"
-    )
-    .is_ok());
-    assert!(validate_chatgpt_web_daily_report_response(
-        "ChatGPT 说：# 2026-06-15 日报\n\n## 今日概览\n\n完整正文足够长。\n\n## 证据与不确定性\n\n"
-            .repeat(20)
-            .as_str(),
-        "2026-06-15"
-    )
-    .is_ok());
-    assert!(validate_chatgpt_web_daily_report_response(
-        "ChatGPT 说：用户的消息为空，但上传的文件包含生成报告的完整说明。",
-        "2026-06-15"
-    )
-    .is_err());
-    assert!(validate_chatgpt_web_daily_report_response("ChatGPT 说：正在思考", "2026-06-15")
-        .is_err());
-    assert!(validate_chatgpt_web_daily_report_response(
-        &"我会直接生成完整日报正文，并包含 # 2026-06-15 日报、## 今日概览 和 ## 证据与不确定性。"
-            .repeat(20),
-        "2026-06-15"
-    )
-    .is_err());
-}
 
-#[test]
-fn daily_agent_chatgpt_web_tomorrow_todo_response_uses_todo_contract() {
-    let todo = "# 明日 To Do List - 2026-06-16\n\n## 明天必须完成\n\n- 整理上线 checklist，确认发布负责人和灰度窗口。\n\n## 可选推进\n\n- 梳理后续自动化回归项。\n\n## 需要确认\n\n- 是否需要同步给 Feishu owner channel。\n"
-        .repeat(8);
 
-    assert!(validate_chatgpt_web_daily_agent_response(
-        &todo,
-        "2026-06-15",
-        "tomorrow_todo",
-        "tomorrow_todo",
-    )
-    .is_ok());
 
-    let same_day_todo = "# 明日 To Do List - 2026-06-15\n\n## 明天必须完成\n\n- 旧标题。\n\n## 可选推进\n\n- 旧标题。\n\n## 需要确认\n\n- 旧标题。\n"
-        .repeat(8);
-    assert!(validate_chatgpt_web_daily_agent_response(
-        &same_day_todo,
-        "2026-06-15",
-        "tomorrow_todo",
-        "tomorrow_todo",
-    )
-    .is_err());
 
-    let daily_report = "# 2026-06-16 日报\n\n## 今日概览\n\n完整正文足够长。\n\n## 证据与不确定性\n\n"
-        .repeat(20);
-    assert!(validate_chatgpt_web_daily_agent_response(
-        &daily_report,
-        "2026-06-15",
-        "tomorrow_todo",
-        "tomorrow_todo",
-    )
-    .is_err());
 
-    let retry_prompt = chatgpt_web_daily_agent_retry_prompt(
-        "2026-06-15",
-        ChatGptWebDailyAgentContract::TomorrowTodo,
-    );
-    assert!(retry_prompt.contains("# 明日 To Do List - 2026-06-16"));
-    assert!(retry_prompt.contains("## 明天必须完成"));
-    assert!(!retry_prompt.contains("今日概览"));
-    assert!(!retry_prompt.contains("证据与不确定性"));
-    assert!(!retry_prompt.contains("日报正文"));
-}
-
-#[test]
-fn daily_agent_chatgpt_web_report_continuation_can_complete_truncated_response() {
-    let base = "# 2026-06-15 日报\n\n## 今日概览\n\n完整正文足够长。\n\n## 主要做了什么\n\n"
-        .repeat(20);
-    assert!(validate_chatgpt_web_daily_report_response(&base, "2026-06-15").is_err());
-
-    let continuation = "## 证据与不确定性\n\n已处理转写文件：`2026-06-15.md`。\n";
-    let merged =
-        merge_chatgpt_web_daily_report_continuation(&base, continuation, "2026-06-15");
-
-    assert!(validate_chatgpt_web_daily_report_response(&merged, "2026-06-15").is_ok());
-}
-
-#[test]
-fn daily_agent_chatgpt_web_report_continuation_prefers_complete_rewrite() {
-    let base = "# 2026-06-15 日报\n\n## 今日概览\n\n截断正文。\n";
-    let complete = "# 2026-06-15 日报\n\n## 今日概览\n\n完整正文足够长。\n\n## 证据与不确定性\n\n"
-        .repeat(20);
-
-    let merged = merge_chatgpt_web_daily_report_continuation(base, &complete, "2026-06-15");
-
-    assert_eq!(merged, complete.trim());
-    assert!(validate_chatgpt_web_daily_report_response(&merged, "2026-06-15").is_ok());
-}
-
-#[test]
-fn daily_agent_chatgpt_web_continuation_requires_a_valid_prefix_and_missing_tail() {
-    let truncated_daily =
-        "# 2026-06-15 日报\n\n## 今日概览\n\n正文已开始，但末尾章节尚未输出。".repeat(20);
-    assert!(chatgpt_web_daily_agent_response_needs_continuation(
-        &truncated_daily,
-        "2026-06-15",
-        ChatGptWebDailyAgentContract::DailyReport,
-    ));
-
-    let wrong_date_complete = "# 2026-08-03 日报\n\n## 今日概览\n\n正文完整。\n\n## 证据与不确定性\n\n无。".repeat(20);
-    assert!(!chatgpt_web_daily_agent_response_needs_continuation(
-        &wrong_date_complete,
-        "2026-06-15",
-        ChatGptWebDailyAgentContract::DailyReport,
-    ));
-    assert!(!chatgpt_web_daily_agent_response_needs_continuation(
-        "连接已中断。正在等待完整回复",
-        "2026-06-15",
-        ChatGptWebDailyAgentContract::DailyReport,
-    ));
-
-    let truncated_todo = "# 明日 To Do List - 2026-06-16\n\n## 明天必须完成\n\n- [ ] 完成发布。\n\n## 可选推进\n\n- [ ] 补充文档。";
-    assert!(chatgpt_web_daily_agent_response_needs_continuation(
-        truncated_todo,
-        "2026-06-15",
-        ChatGptWebDailyAgentContract::TomorrowTodo,
-    ));
-
-    assert!(!chatgpt_web_daily_agent_response_needs_continuation(
-        "# 任意 Markdown\n\n内容未知是否完整。",
-        "2026-06-15",
-        ChatGptWebDailyAgentContract::GenericMarkdown,
-    ));
-}
-
-#[test]
-fn daily_agent_chatgpt_web_unwraps_complete_writing_block_before_validation_and_save() {
-    let wrapped = r#":::writing{variant="document" id="58341"}
-# 明日 To Do List - 2026-07-31
-
-## 明天必须完成
-
-- [ ] 完成发布。
-
-## 可选推进
-
-- [ ] 补充文档。
-
-## 需要确认
-
-- [ ] 确认验收人。
-:::"#;
-
-    let validation = validate_chatgpt_web_tomorrow_todo_response(wrapped, "2026-07-30");
-    assert!(validation.is_ok(), "{validation:?}");
-    let normalized = chatgpt_web_normalized_response(wrapped);
-    assert_eq!(
-        normalized.lines().next(),
-        Some("# 明日 To Do List - 2026-07-31")
-    );
-    assert!(!normalized.contains(":::writing"));
-    assert!(!normalized.ends_with(":::"));
-    assert!(!chatgpt_web_daily_agent_response_needs_continuation(
-        wrapped,
-        "2026-07-30",
-        ChatGptWebDailyAgentContract::TomorrowTodo,
-    ));
-
-    let incomplete = r#":::writing{variant="document" id="58341"}
-# 明日 To Do List - 2026-07-31
-
-## 明天必须完成
-
-- [ ] 仍在生成。"#;
-    assert_eq!(chatgpt_web_normalized_response(incomplete), incomplete);
-    assert!(validate_chatgpt_web_tomorrow_todo_response(incomplete, "2026-07-30").is_err());
-
-    let prefixed = "ChatGPT 说：# 明日 To Do List - 2026-07-31\n\n## 明天必须完成\n\n- [ ] 完成发布。\n\n## 可选推进\n\n- [ ] 补充文档。\n\n## 需要确认\n\n- [ ] 确认验收人。";
-    assert_eq!(
-        chatgpt_web_normalized_response(prefixed)
-            .lines()
-            .next(),
-        Some("# 明日 To Do List - 2026-07-31")
-    );
-}
 
 #[test]
 fn daily_agent_change_plan_filters_to_requested_date() {
@@ -1924,84 +1589,7 @@ fn daily_agent_entry_failure_recorder_preserves_retry_target() {
     assert_eq!(failures[0].error, "assistant_message_not_committed");
 }
 
-#[tokio::test]
-#[allow(clippy::await_holding_lock)]
-async fn daily_agent_chatgpt_web_entry_failure_continues_and_keeps_failed_date_retryable() {
-    let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let temp = TempDir::new().unwrap();
-    let _guard = EnvGuard::set_data_dir(temp.path());
-    let _mock = EnvVarGuard::set("BIFROST_CHATGPT_WEB_E2E_MOCK", std::ffi::OsStr::new("1"));
-    let _e2e = EnvVarGuard::set("BIFROST_E2E", std::ffi::OsStr::new("1"));
-    let _fail_dates = EnvVarGuard::set(
-        "BIFROST_CHATGPT_WEB_E2E_FAIL_DATES",
-        std::ffi::OsStr::new("2026-06-24"),
-    );
 
-    let mut config = crate::im_gateway::external_cli::ExternalCliGatewayConfig::default();
-    config
-        .runners
-        .insert(
-            "daily-chatgpt-web".to_string(),
-            crate::im_gateway::external_cli::ExternalCliAgentSettings {
-                enabled: true,
-                adapter: crate::im_gateway::chatgpt_web::ADAPTER_ID.to_string(),
-                adapter_config: crate::im_gateway::external_cli::ExternalCliAdapterConfig {
-                    timeout_secs: Some(5),
-                    ..Default::default()
-                },
-                inject_bifrost_tools: false,
-                ..Default::default()
-            },
-        );
-    crate::im_gateway::external_cli::ExternalCliConfigStore::new(temp.path())
-        .save(config)
-        .unwrap();
-
-    let mut task = test_directory_task(
-        "daily-agent-chatgpt-web-isolate-task",
-        temp.path().join("audio"),
-    );
-    task.daily_agent.runner = "daily-chatgpt-web".to_string();
-    task.daily_agent.im_delivery.enabled = false;
-    ensure_asr_daily_workspace(&task).unwrap();
-    let daily_dir = daily_dir_for_task(&task.id);
-    std::fs::write(daily_dir.join("2026-06-24.md"), "# 2026-06-24 转写\n\n失败日期").unwrap();
-    std::fs::write(daily_dir.join("2026-06-25.md"), "# 2026-06-25 转写\n\n成功日期").unwrap();
-    let mut processed = AsrDailyAgentProcessedState::default();
-    processed
-        .date_watermarks
-        .insert(task.daily_agent.agent_id.clone(), "2026-06-23".to_string());
-    add_daily_agent_pending_dates(
-        &mut processed,
-        &task.daily_agent.agent_id,
-        ["2026-06-24".to_string(), "2026-06-25".to_string()],
-    );
-    save_daily_agent_processed_state(&task.id, &processed).unwrap();
-
-    let result = run_daily_agent_inner(&task, "manual", None, false, "run-partial")
-        .await
-        .unwrap();
-
-    assert_eq!(result.failed_entries.len(), 1);
-    assert_eq!(result.failed_entries[0].date, "2026-06-24");
-    assert_eq!(result.reports_generated.len(), 1);
-    assert!(result.reports_generated[0].contains("2026-06-25-report.md"));
-    assert!(std::fs::read_to_string(&result.reports_generated[0])
-        .unwrap()
-        .starts_with("# 2026-06-25 日报"));
-
-    let processed = load_daily_agent_processed_state(&task.id);
-    assert!(!processed
-        .documents
-        .contains_key(&daily_agent_processed_key(&task, "2026-06-24")));
-    assert!(processed
-        .documents
-        .contains_key(&daily_agent_processed_key(&task, "2026-06-25")));
-    assert_eq!(
-        daily_agent_pending_dates(&processed, &task.daily_agent.agent_id),
-        ["2026-06-24"]
-    );
-}
 
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
@@ -2020,346 +1608,15 @@ async fn daily_agent_inner_skips_when_no_daily_markdown_files_exist() {
     assert!(result.failed_entries.is_empty());
 }
 
-#[tokio::test]
-#[allow(clippy::await_holding_lock)]
-async fn daily_agent_locked_partial_success_persists_status_and_error_summary() {
-    let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let temp = TempDir::new().unwrap();
-    let _guard = EnvGuard::set_data_dir(temp.path());
-    let _mock = EnvVarGuard::set("BIFROST_CHATGPT_WEB_E2E_MOCK", std::ffi::OsStr::new("1"));
-    let _e2e = EnvVarGuard::set("BIFROST_E2E", std::ffi::OsStr::new("1"));
-    let _fail_dates = EnvVarGuard::set(
-        "BIFROST_CHATGPT_WEB_E2E_FAIL_DATES",
-        std::ffi::OsStr::new("2026-06-24"),
-    );
 
-    let mut config = crate::im_gateway::external_cli::ExternalCliGatewayConfig::default();
-    config.runners.insert(
-        "daily-chatgpt-web-partial".to_string(),
-        crate::im_gateway::external_cli::ExternalCliAgentSettings {
-            enabled: true,
-            adapter: crate::im_gateway::chatgpt_web::ADAPTER_ID.to_string(),
-            adapter_config: crate::im_gateway::external_cli::ExternalCliAdapterConfig {
-                timeout_secs: Some(5),
-                ..Default::default()
-            },
-            inject_bifrost_tools: false,
-            ..Default::default()
-        },
-    );
-    crate::im_gateway::external_cli::ExternalCliConfigStore::new(temp.path())
-        .save(config)
-        .unwrap();
 
-    let mut task = test_directory_task(
-        "daily-agent-locked-partial-task",
-        temp.path().join("audio"),
-    );
-    task.daily_agent.runner = "daily-chatgpt-web-partial".to_string();
-    task.daily_agent.im_delivery.enabled = false;
-    ensure_asr_daily_workspace(&task).unwrap();
-    let daily_dir = daily_dir_for_task(&task.id);
-    std::fs::write(daily_dir.join("2026-06-24.md"), "# 2026-06-24 转写\n\n失败日期").unwrap();
-    std::fs::write(daily_dir.join("2026-06-25.md"), "# 2026-06-25 转写\n\n成功日期").unwrap();
-    let mut processed = AsrDailyAgentProcessedState::default();
-    processed
-        .date_watermarks
-        .insert(task.daily_agent.agent_id.clone(), "2026-06-23".to_string());
-    save_daily_agent_processed_state(&task.id, &processed).unwrap();
-    save_tasks(&TaskStore {
-        version: TASK_STORE_VERSION,
-        tasks: vec![task.clone()],
-    })
-    .unwrap();
 
-    let run = run_daily_agent_locked(&task, "manual", None, false).await;
 
-    assert_eq!(run.status, "partial_success");
-    assert_eq!(run.reports_generated.len(), 1);
-    let error = run.error.as_deref().unwrap();
-    assert!(error.contains("1 daily agent entry failed"));
-    assert!(error.contains("2026-06-24"));
 
-    let stored = load_tasks()
-        .tasks
-        .into_iter()
-        .find(|stored| stored.id == task.id)
-        .unwrap();
-    assert_eq!(
-        stored.daily_agent.last_status.as_deref(),
-        Some("partial_success")
-    );
-    assert!(stored
-        .daily_agent
-        .last_error
-        .as_deref()
-        .is_some_and(|stored_error| stored_error.contains("2026-06-24")));
-}
 
-#[tokio::test]
-#[allow(clippy::await_holding_lock)]
-async fn daily_agent_locked_success_sends_im_for_success_with_report_policy() {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let temp = TempDir::new().unwrap();
-    let _guard = EnvGuard::set_data_dir(temp.path());
-    let _mock = EnvVarGuard::set("BIFROST_CHATGPT_WEB_E2E_MOCK", std::ffi::OsStr::new("1"));
-    let _e2e = EnvVarGuard::set("BIFROST_E2E", std::ffi::OsStr::new("1"));
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let _port_guard = EnvVarGuard::set(
-        "BIFROST_ADMIN_PORT",
-        std::ffi::OsString::from(port.to_string()).as_os_str(),
-    );
-    let server = tokio::spawn(async move {
-        let (mut stream, _) = listener.accept().await.unwrap();
-        let mut buf = vec![0_u8; 4096];
-        let n = stream.read(&mut buf).await.unwrap();
-        let request = String::from_utf8_lossy(&buf[..n]);
-        assert!(request.starts_with("POST /_bifrost/api/im-gateway/messages/send "));
-        assert!(request.contains("\"target_id\":\"owner\""));
-        assert!(request.contains("2026-06-25 日报"));
-        stream
-            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK")
-            .await
-            .unwrap();
-    });
 
-    let mut config = crate::im_gateway::external_cli::ExternalCliGatewayConfig::default();
-    config.runners.insert(
-        "daily-chatgpt-web-im".to_string(),
-        crate::im_gateway::external_cli::ExternalCliAgentSettings {
-            enabled: true,
-            adapter: crate::im_gateway::chatgpt_web::ADAPTER_ID.to_string(),
-            adapter_config: crate::im_gateway::external_cli::ExternalCliAdapterConfig {
-                timeout_secs: Some(5),
-                ..Default::default()
-            },
-            inject_bifrost_tools: false,
-            ..Default::default()
-        },
-    );
-    crate::im_gateway::external_cli::ExternalCliConfigStore::new(temp.path())
-        .save(config)
-        .unwrap();
-
-    let mut task = test_directory_task("daily-agent-locked-im-task", temp.path().join("audio"));
-    task.daily_agent.runner = "daily-chatgpt-web-im".to_string();
-    task.daily_agent.im_delivery.enabled = true;
-    task.daily_agent.im_delivery.channel = Some("owner:daily-agent-test".to_string());
-    task.daily_agent.im_delivery.send_policy = AsrDailyAgentImSendPolicy::OnSuccessWithReport;
-    ensure_asr_daily_workspace(&task).unwrap();
-    std::fs::write(
-        daily_dir_for_task(&task.id).join("2026-06-25.md"),
-        "# 2026-06-25 转写\n\n成功日期",
-    )
-    .unwrap();
-    save_tasks(&TaskStore {
-        version: TASK_STORE_VERSION,
-        tasks: vec![task.clone()],
-    })
-    .unwrap();
-
-    let run = run_daily_agent_locked(&task, "manual", None, false).await;
-    server.await.unwrap();
-
-    assert_eq!(run.status, "success");
-    assert_eq!(run.reports_generated.len(), 1);
-    let stored = load_tasks()
-        .tasks
-        .into_iter()
-        .find(|stored| stored.id == task.id)
-        .unwrap();
-    assert!(stored.daily_agent.im_delivery.last_sent_at_ms.is_some());
-    assert!(stored.daily_agent.im_delivery.last_send_error.is_none());
-}
-
-#[tokio::test]
-#[allow(clippy::await_holding_lock)]
-async fn daily_agent_locked_success_persists_success_status_without_error() {
-    let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let temp = TempDir::new().unwrap();
-    let _guard = EnvGuard::set_data_dir(temp.path());
-    let _mock = EnvVarGuard::set("BIFROST_CHATGPT_WEB_E2E_MOCK", std::ffi::OsStr::new("1"));
-    let _e2e = EnvVarGuard::set("BIFROST_E2E", std::ffi::OsStr::new("1"));
-
-    let mut config = crate::im_gateway::external_cli::ExternalCliGatewayConfig::default();
-    config.runners.insert(
-        "daily-chatgpt-web-success".to_string(),
-        crate::im_gateway::external_cli::ExternalCliAgentSettings {
-            enabled: true,
-            adapter: crate::im_gateway::chatgpt_web::ADAPTER_ID.to_string(),
-            adapter_config: crate::im_gateway::external_cli::ExternalCliAdapterConfig {
-                timeout_secs: Some(5),
-                ..Default::default()
-            },
-            inject_bifrost_tools: false,
-            ..Default::default()
-        },
-    );
-    crate::im_gateway::external_cli::ExternalCliConfigStore::new(temp.path())
-        .save(config)
-        .unwrap();
-
-    let mut task = test_directory_task(
-        "daily-agent-locked-success-task",
-        temp.path().join("audio"),
-    );
-    task.daily_agent.runner = "daily-chatgpt-web-success".to_string();
-    task.daily_agent.im_delivery.enabled = false;
-    ensure_asr_daily_workspace(&task).unwrap();
-    std::fs::write(
-        daily_dir_for_task(&task.id).join("2026-06-25.md"),
-        "# 2026-06-25 转写\n\n成功日期",
-    )
-    .unwrap();
-    save_tasks(&TaskStore {
-        version: TASK_STORE_VERSION,
-        tasks: vec![task.clone()],
-    })
-    .unwrap();
-
-    let run = run_daily_agent_locked(&task, "manual", None, false).await;
-
-    assert_eq!(run.status, "success");
-    assert_eq!(run.reports_generated.len(), 1);
-    assert!(run.error.is_none());
-
-    let stored = load_tasks()
-        .tasks
-        .into_iter()
-        .find(|stored| stored.id == task.id)
-        .unwrap();
-    assert_eq!(stored.daily_agent.last_status.as_deref(), Some("success"));
-    assert!(stored.daily_agent.last_error.is_none());
-}
-
-#[tokio::test]
-#[allow(clippy::await_holding_lock)]
-async fn daily_agent_chatgpt_web_report_write_failure_records_entry_failure() {
-    let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let temp = TempDir::new().unwrap();
-    let _guard = EnvGuard::set_data_dir(temp.path());
-    let _mock = EnvVarGuard::set("BIFROST_CHATGPT_WEB_E2E_MOCK", std::ffi::OsStr::new("1"));
-    let _e2e = EnvVarGuard::set("BIFROST_E2E", std::ffi::OsStr::new("1"));
-
-    let mut config = crate::im_gateway::external_cli::ExternalCliGatewayConfig::default();
-    config.runners.insert(
-        "daily-chatgpt-web-write-fail".to_string(),
-        crate::im_gateway::external_cli::ExternalCliAgentSettings {
-            enabled: true,
-            adapter: crate::im_gateway::chatgpt_web::ADAPTER_ID.to_string(),
-            adapter_config: crate::im_gateway::external_cli::ExternalCliAdapterConfig {
-                timeout_secs: Some(5),
-                ..Default::default()
-            },
-            inject_bifrost_tools: false,
-            ..Default::default()
-        },
-    );
-    crate::im_gateway::external_cli::ExternalCliConfigStore::new(temp.path())
-        .save(config)
-        .unwrap();
-
-    let mut task = test_directory_task(
-        "daily-agent-chatgpt-web-write-fail-task",
-        temp.path().join("audio"),
-    );
-    task.daily_agent.runner = "daily-chatgpt-web-write-fail".to_string();
-    task.daily_agent.im_delivery.enabled = false;
-    ensure_asr_daily_workspace(&task).unwrap();
-    std::fs::write(
-        daily_dir_for_task(&task.id).join("2026-06-25.md"),
-        "# 2026-06-25 转写\n\n成功日期",
-    )
-    .unwrap();
-    let report_path = daily_agent_output_dir(&task).join("2026-06-25-report.md");
-    std::fs::create_dir_all(&report_path).unwrap();
-
-    let result = run_daily_agent_inner(&task, "manual", None, false, "run-write-fail")
-        .await
-        .unwrap();
-
-    assert!(result.reports_generated.is_empty());
-    assert_eq!(result.failed_entries.len(), 1);
-    assert_eq!(result.failed_entries[0].date, "2026-06-25");
-    assert!(result.failed_entries[0]
-        .error
-        .contains("failed to save chatgpt_web response as report"));
-}
-
-#[tokio::test]
-#[allow(clippy::await_holding_lock)]
-async fn daily_agent_locked_all_entries_failed_persists_failed_status() {
-    let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let temp = TempDir::new().unwrap();
-    let _guard = EnvGuard::set_data_dir(temp.path());
-    let _mock = EnvVarGuard::set("BIFROST_CHATGPT_WEB_E2E_MOCK", std::ffi::OsStr::new("1"));
-    let _e2e = EnvVarGuard::set("BIFROST_E2E", std::ffi::OsStr::new("1"));
-    let _fail_dates = EnvVarGuard::set(
-        "BIFROST_CHATGPT_WEB_E2E_FAIL_DATES",
-        std::ffi::OsStr::new("2026-06-24"),
-    );
-
-    let mut config = crate::im_gateway::external_cli::ExternalCliGatewayConfig::default();
-    config.runners.insert(
-        "daily-chatgpt-web-failed".to_string(),
-        crate::im_gateway::external_cli::ExternalCliAgentSettings {
-            enabled: true,
-            adapter: crate::im_gateway::chatgpt_web::ADAPTER_ID.to_string(),
-            adapter_config: crate::im_gateway::external_cli::ExternalCliAdapterConfig {
-                timeout_secs: Some(5),
-                ..Default::default()
-            },
-            inject_bifrost_tools: false,
-            ..Default::default()
-        },
-    );
-    crate::im_gateway::external_cli::ExternalCliConfigStore::new(temp.path())
-        .save(config)
-        .unwrap();
-
-    let mut task = test_directory_task(
-        "daily-agent-locked-failed-task",
-        temp.path().join("audio"),
-    );
-    task.daily_agent.runner = "daily-chatgpt-web-failed".to_string();
-    task.daily_agent.im_delivery.enabled = false;
-    ensure_asr_daily_workspace(&task).unwrap();
-    std::fs::write(
-        daily_dir_for_task(&task.id).join("2026-06-24.md"),
-        "# 2026-06-24 转写\n\n失败日期",
-    )
-    .unwrap();
-    save_tasks(&TaskStore {
-        version: TASK_STORE_VERSION,
-        tasks: vec![task.clone()],
-    })
-    .unwrap();
-
-    let run = run_daily_agent_locked(&task, "manual", None, false).await;
-
-    assert_eq!(run.status, "failed");
-    assert!(run.reports_generated.is_empty());
-    assert!(run
-        .error
-        .as_deref()
-        .is_some_and(|error| error.contains("2026-06-24")));
-
-    let stored = load_tasks()
-        .tasks
-        .into_iter()
-        .find(|stored| stored.id == task.id)
-        .unwrap();
-    assert_eq!(stored.daily_agent.last_status.as_deref(), Some("failed"));
-    assert!(stored
-        .daily_agent
-        .last_error
-        .as_deref()
-        .is_some_and(|stored_error| stored_error.contains("2026-06-24")));
-}
 
 #[test]
 fn daily_agent_partial_success_with_reports_is_sendable_for_im_report_policy() {
@@ -3830,7 +3087,7 @@ fn daily_agent_im_splits_full_report_without_summary_fallback() {
 fn daily_agent_research_manifest_preserves_original_question_and_github_repository() {
     let manifest = parse_daily_research_manifest(
         r#"```json
-{"questions":[{"id":"msft-355","original_question":"微软 355 美元到底意味着什么？","source_excerpt":"原始日报片段","runner":"chatgpt-web","github_repositories":["ibkr-portfolio-dashboard"]}]}
+{"questions":[{"id":"msft-355","original_question":"微软 355 美元到底意味着什么？","source_excerpt":"原始日报片段","runner":"custom-runner","github_repositories":["ibkr-portfolio-dashboard"]}]}
 ```"#,
     )
     .unwrap();
@@ -3850,10 +3107,10 @@ fn daily_agent_research_manifest_preserves_original_question_and_github_reposito
         chatgpt_interface_mode: "chat".to_string(),
         chatgpt_model: "pro".to_string(),
         chatgpt_project_url: None,
-        allowed_runners: vec!["chatgpt-web".to_string()],
+        allowed_runners: vec!["custom-runner".to_string()],
         context_profiles: DailyAgentBTreeMap::new(),
     };
-    validate_daily_research_manifest(&manifest, &fanout, "chatgpt-web").unwrap();
+    validate_daily_research_manifest(&manifest, &fanout, "custom-runner").unwrap();
 }
 
 #[test]
@@ -3923,28 +3180,7 @@ fn daily_agent_research_response_requires_complete_report_contract() {
         .contains("missing required headings"));
 }
 
-#[test]
-fn daily_agent_research_retry_prompt_preserves_question_and_contract() {
-    let question = AsrDailyResearchQuestion {
-        id: "retry".to_string(),
-        original_question: "原始问题必须原样保留吗？".to_string(),
-        source_excerpt: String::new(),
-        background: String::new(),
-        runner: None,
-        github_repositories: vec!["owner/repo".to_string()],
-        context_profile: None,
-        research_prompt: None,
-    };
 
-    let prompt = daily_research_retry_prompt(&question);
-    assert!(prompt.contains(&question.original_question));
-    for heading in DAILY_RESEARCH_REQUIRED_HEADINGS {
-        assert!(prompt.contains(heading), "{heading}");
-    }
-    assert!(prompt.contains("不要再说你将要做什么"));
-    assert!(prompt.contains("GITHUB_CONNECTOR_STATUS: verified"));
-    assert!(prompt.contains("GITHUB_CONNECTOR_STATUS: unavailable"));
-}
 
 #[test]
 fn daily_agent_research_child_prompt_is_compact_and_excludes_daily_report_instructions() {
@@ -4001,7 +3237,7 @@ fn daily_agent_research_fanout_normalizes_runner_and_context_profile_values() {
     assert_eq!(fanout.chatgpt_model, "pro");
     assert_eq!(
         fanout.chatgpt_project_url.as_deref(),
-        Some("https://chatgpt.com/g/g-p-daily-research/project")
+        Some("https://chatgpt.com/g/g-p-daily-research/project/?source=test#new")
     );
     assert_eq!(fanout.context_profiles["ibkr"].runner, "Codex");
     assert_eq!(fanout.context_profiles["ibkr"].work_dir, "/tmp/ibkr");
@@ -4011,57 +3247,11 @@ fn daily_agent_research_fanout_normalizes_runner_and_context_profile_values() {
     );
 }
 
-#[test]
-fn daily_agent_research_fanout_enforces_chat_and_pro_on_chatgpt_children() {
-    let mut adapter_config =
-        crate::im_gateway::external_cli::ExternalCliAdapterConfig::default();
-    let fanout = AsrDailyAgentResearchFanoutConfig::default();
 
-    enforce_daily_research_chatgpt_surface(&mut adapter_config, &fanout);
 
-    assert_eq!(
-        adapter_config.extra.get("chatgpt"),
-        Some(&serde_json::json!({
-            "interfaceMode": "chat",
-            "model": "pro"
-        }))
-    );
-}
 
-#[test]
-fn daily_agent_research_fanout_projects_chatgpt_project_url_to_children() {
-    let mut adapter_config =
-        crate::im_gateway::external_cli::ExternalCliAdapterConfig::default();
-    let fanout = AsrDailyAgentResearchFanoutConfig {
-        chatgpt_project_url: Some(
-            "https://chatgpt.com/g/g-p-daily-research/project".to_string(),
-        ),
-        ..Default::default()
-    };
 
-    enforce_daily_research_chatgpt_surface(&mut adapter_config, &fanout);
 
-    assert_eq!(
-        adapter_config.extra.get("chatgpt"),
-        Some(&serde_json::json!({
-            "interfaceMode": "chat",
-            "model": "pro",
-            "projectUrl": "https://chatgpt.com/g/g-p-daily-research/project"
-        }))
-    );
-}
-
-#[test]
-fn daily_agent_research_fanout_rejects_invalid_chatgpt_project_url() {
-    let mut item = AsrDailyAgentItem::daily_report();
-    item.research_fanout = Some(AsrDailyAgentResearchFanoutConfig {
-        chatgpt_project_url: Some("https://example.com/project".to_string()),
-        ..Default::default()
-    });
-
-    let error = validate_daily_agent_item(&item).unwrap_err();
-    assert!(error.contains("chatgpt_project_url is invalid"), "{error}");
-}
 
 #[test]
 fn daily_agent_research_manifest_rejects_untrusted_github_repository_value() {
@@ -4079,7 +3269,7 @@ fn daily_agent_research_manifest_rejects_untrusted_github_repository_value() {
     };
     let fanout = AsrDailyAgentResearchFanoutConfig::default();
 
-    let error = validate_daily_research_manifest(&manifest, &fanout, "chatgpt-web").unwrap_err();
+    let error = validate_daily_research_manifest(&manifest, &fanout, "custom-runner").unwrap_err();
     assert!(error.contains("invalid GitHub repository"));
 }
 
@@ -4116,30 +3306,7 @@ fn daily_agent_research_tracks_verified_and_unavailable_github_connector_status(
     );
 }
 
-#[test]
-fn daily_agent_research_index_keeps_original_question_and_chatgpt_link() {
-    let result = AsrDailyResearchChildResult {
-        question_id: "q1".to_string(),
-        original_question: "这是日报中的原始问题吗？".to_string(),
-        runner: "chatgpt-web".to_string(),
-        github_repositories: Vec::new(),
-        github_connector_status: None,
-        context_profile: None,
-        status: "success".to_string(),
-        run_id: Some("run-1".to_string()),
-        conversation_id: Some("conversation-1".to_string()),
-        full_report_link: Some("https://chatgpt.com/c/conversation-1".to_string()),
-        result_path: None,
-        context_path: None,
-        error: None,
-        fingerprint_sha256: None,
-        result_sha256: None,
-    };
 
-    let report = render_daily_research_index("2026-07-12", &[result]);
-    assert!(report.contains("## 这是日报中的原始问题吗？"));
-    assert!(report.contains("https://chatgpt.com/c/conversation-1"));
-}
 
 #[test]
 fn daily_agent_research_index_explains_an_empty_manifest() {
@@ -4184,7 +3351,7 @@ fn daily_agent_research_reuses_only_matching_untampered_child() {
     let result = AsrDailyResearchChildResult {
         question_id: "q1".to_string(),
         original_question: "原始问题".to_string(),
-        runner: "chatgpt-web".to_string(),
+        runner: "custom-runner".to_string(),
         github_repositories: Vec::new(),
         github_connector_status: None,
         context_profile: None,
@@ -4224,7 +3391,7 @@ fn daily_agent_research_fingerprint_changes_with_context_profile_contract() {
         original_question: "核验问题".to_string(),
         source_excerpt: "原始片段".to_string(),
         background: "背景".to_string(),
-        runner: Some("chatgpt-web".to_string()),
+        runner: Some("custom-runner".to_string()),
         github_repositories: Vec::new(),
         context_profile: Some("portfolio".to_string()),
         research_prompt: Some("使用一手来源".to_string()),
@@ -4238,13 +3405,13 @@ fn daily_agent_research_fingerprint_changes_with_context_profile_contract() {
             instructions: Some("读取真实数据".to_string()),
         },
     );
-    let first = daily_research_question_fingerprint(&question, "chatgpt-web", &fanout);
+    let first = daily_research_question_fingerprint(&question, "custom-runner", &fanout);
     fanout
         .context_profiles
         .get_mut("portfolio")
         .unwrap()
         .instructions = Some("读取真实数据并核对日期".to_string());
-    let changed = daily_research_question_fingerprint(&question, "chatgpt-web", &fanout);
+    let changed = daily_research_question_fingerprint(&question, "custom-runner", &fanout);
     assert_ne!(first, changed);
 }
 
@@ -4654,6 +3821,7 @@ async fn daily_agent_research_fanout_executes_local_context_and_records_failures
     save_daily_agent_mock_runners(
         temp.path(),
         [
+            ("missing-runner", daily_agent_mock_runner_settings("incomplete research")),
             (
                 "mock-main",
                 daily_agent_mock_runner_settings(&daily_agent_mock_complete_research_response(
@@ -4676,7 +3844,7 @@ async fn daily_agent_research_fanout_executes_local_context_and_records_failures
                 "web-context",
                 crate::im_gateway::external_cli::ExternalCliAgentSettings {
                     enabled: true,
-                    adapter: "chatgpt_web".to_string(),
+                    adapter: "custom_cli".to_string(),
                     ..Default::default()
                 },
             ),
@@ -4929,6 +4097,7 @@ async fn daily_agent_research_fanout_executes_local_context_and_records_failures
 async fn daily_agent_research_fanout_reports_all_children_failed() {
     let temp = TempDir::new().unwrap();
     let _guard = EnvGuard::set_data_dir(temp.path());
+    save_daily_agent_mock_runners(temp.path(), [("missing-runner", daily_agent_mock_runner_settings("incomplete research"))]);
     let mut agent = AsrDailyAgentItem::daily_report();
     agent.id = "research_fanout".to_string();
     agent.name = "research_fanout".to_string();
@@ -4965,6 +4134,7 @@ async fn daily_agent_research_fanout_reports_all_children_failed() {
 async fn daily_agent_research_fanout_accepts_an_empty_manifest() {
     let temp = TempDir::new().unwrap();
     let _guard = EnvGuard::set_data_dir(temp.path());
+    save_daily_agent_mock_runners(temp.path(), [("missing-runner", daily_agent_mock_runner_settings("incomplete research"))]);
     let mut agent = AsrDailyAgentItem::daily_report();
     agent.id = "research_fanout".to_string();
     agent.name = "research_fanout".to_string();
@@ -5012,11 +4182,6 @@ async fn daily_agent_research_child_reports_disabled_surface_timeout_and_process
     let _guard = EnvGuard::set_data_dir(temp.path());
     let mut disabled = daily_agent_mock_runner_settings("disabled");
     disabled.enabled = false;
-    let chatgpt = crate::im_gateway::external_cli::ExternalCliAgentSettings {
-        enabled: true,
-        adapter: "chatgpt_web".to_string(),
-        ..Default::default()
-    };
     let mut failing = daily_agent_mock_runner_settings("unreachable");
     if cfg!(windows) {
         failing.adapter_config.executable = Some("cmd.exe".to_string());
@@ -5036,7 +4201,6 @@ async fn daily_agent_research_child_reports_disabled_surface_timeout_and_process
         temp.path(),
         [
             ("disabled", disabled),
-            ("chatgpt", chatgpt),
             ("timeout", daily_agent_mock_runner_settings("late")),
             ("failing", failing),
         ],
@@ -5065,20 +4229,6 @@ async fn daily_agent_research_child_reports_disabled_surface_timeout_and_process
         Err(error) => error,
     };
     assert!(disabled_error.contains("is disabled"));
-    let surface_error = match run_daily_research_child(
-        &task,
-        "chatgpt",
-        "prompt".to_string(),
-        &work_dir,
-        "chatgpt-session",
-    )
-    .await
-    {
-        Ok(_) => panic!("ChatGPT runner unexpectedly succeeded without fan-out config"),
-        Err(error) => error,
-    };
-    assert!(surface_error.contains("research fan-out config is missing"));
-
     let mut timeout_task = task.clone();
     timeout_task.daily_agent.timeout_ms = 0;
     let timeout_error = match run_daily_research_child(
@@ -5250,7 +4400,7 @@ fn daily_agent_research_manifest_loader_and_conversation_link_cover_edges() {
     let execution = AsrDailyResearchExecution {
         run_id: "run".to_string(),
         response: "response".to_string(),
-        adapter: "chatgpt_web".to_string(),
+        adapter: "custom_cli".to_string(),
         metadata: DailyAgentBTreeMap::from([(
             "conversation_id".to_string(),
             "conversation-42".to_string(),
@@ -5260,129 +4410,12 @@ fn daily_agent_research_manifest_loader_and_conversation_link_cover_edges() {
         daily_research_conversation_link(&execution),
         (
             Some("conversation-42".to_string()),
-            Some("https://chatgpt.com/c/conversation-42".to_string())
+            None
         )
     );
 }
 
-#[tokio::test(flavor = "current_thread")]
-#[allow(clippy::await_holding_lock)]
-async fn daily_research_completion_reuses_same_chatgpt_conversation_before_retrying() {
-    let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|error| error.into_inner());
-    let temp = TempDir::new().unwrap();
-    let _guard = EnvGuard::set_data_dir(temp.path());
-    let _e2e = EnvVarGuard::set("BIFROST_E2E", std::ffi::OsStr::new("1"));
-    let _mock = EnvVarGuard::set(
-        "BIFROST_CHATGPT_WEB_E2E_MOCK",
-        std::ffi::OsStr::new("1"),
-    );
-    let _planning = EnvVarGuard::set(
-        "BIFROST_CHATGPT_WEB_E2E_MOCK_PLANNING_FIRST",
-        std::ffi::OsStr::new("1"),
-    );
-    save_daily_agent_mock_runners(
-        temp.path(),
-        [(
-            "chatgpt-web",
-            crate::im_gateway::external_cli::ExternalCliAgentSettings {
-                enabled: true,
-                adapter: "chatgpt_web".to_string(),
-                ..Default::default()
-            },
-        )],
-    );
 
-    let mut task = test_directory_task("research-completion", temp.path().join("audio"));
-    let mut agent = AsrDailyAgentItem::daily_report();
-    agent.runner = "chatgpt-web".to_string();
-    agent.timeout_ms = 30_000;
-    agent.research_fanout = Some(AsrDailyAgentResearchFanoutConfig {
-        allowed_runners: vec!["chatgpt-web".to_string()],
-        ..Default::default()
-    });
-    task.daily_agent.agents = vec![agent.clone()];
-    let task = task_for_daily_agent(&task, &agent);
-    let work_dir = temp.path().join("work");
-    std::fs::create_dir_all(&work_dir).unwrap();
-    let question = AsrDailyResearchQuestion {
-        id: "retry-question".to_string(),
-        original_question: "请直接回答这个研究问题".to_string(),
-        source_excerpt: String::new(),
-        background: String::new(),
-        runner: Some("chatgpt-web".to_string()),
-        github_repositories: Vec::new(),
-        context_profile: None,
-        research_prompt: None,
-    };
-
-    let non_web_error = match ensure_complete_daily_research_execution(
-        &task,
-        "chatgpt-web",
-        &question,
-        &work_dir,
-        "research-session",
-        AsrDailyResearchExecution {
-            run_id: "non-web".to_string(),
-            response: "still planning".to_string(),
-            adapter: "mock".to_string(),
-            metadata: DailyAgentBTreeMap::new(),
-        },
-    )
-    .await
-    {
-        Ok(_) => panic!("non-web placeholder unexpectedly passed validation"),
-        Err(error) => error,
-    };
-    assert!(!non_web_error.trim().is_empty());
-
-    let missing_id_error = match ensure_complete_daily_research_execution(
-        &task,
-        "chatgpt-web",
-        &question,
-        &work_dir,
-        "research-session",
-        AsrDailyResearchExecution {
-            run_id: "missing-id".to_string(),
-            response: "still planning".to_string(),
-            adapter: "chatgpt_web".to_string(),
-            metadata: DailyAgentBTreeMap::new(),
-        },
-    )
-    .await
-    {
-        Ok(_) => panic!("ChatGPT placeholder without conversation id unexpectedly passed"),
-        Err(error) => error,
-    };
-    assert!(missing_id_error.contains("did not return a conversation id"));
-
-    let completed = ensure_complete_daily_research_execution(
-        &task,
-        "chatgpt-web",
-        &question,
-        &work_dir,
-        "research-session",
-        AsrDailyResearchExecution {
-            run_id: "initial".to_string(),
-            response: "我会先检索，再给你研究结果。".to_string(),
-            adapter: "chatgpt_web".to_string(),
-            metadata: DailyAgentBTreeMap::from([(
-                "conversationId".to_string(),
-                "conversation-retry".to_string(),
-            )]),
-        },
-    )
-    .await
-    .unwrap();
-    assert!(completed.response.contains("## 对原始问题的直接回答"));
-    assert_eq!(
-        metadata_value(
-            &completed.metadata,
-            &["conversationId", "conversation_id"]
-        )
-        .as_deref(),
-        Some("conversation-retry")
-    );
-}
 
 #[tokio::test(flavor = "current_thread")]
 async fn daily_agent_orchestrator_runs_dependency_chain_and_tracks_run_ids() {
@@ -6162,4 +5195,212 @@ async fn daily_agent_run_api_executes_selected_agent_background_job() {
             .contains(&task.id),
         "selected API job did not release its running marker"
     );
+}
+
+#[tokio::test]
+async fn retired_web_research_binding_is_rejected_before_cache_lookup() {
+    let temp = TempDir::new().unwrap();
+    let _guard = EnvGuard::set_data_dir(temp.path());
+    let config_path = temp.path().join("admin/im_gateway_external_cli_agent.json");
+    std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+    std::fs::write(&config_path, r#"{"version":2,"defaultRunnerId":"web","runners":{"web":{"enabled":true,"adapter":"chatgpt_web","adapterConfig":{}}},"channels":{}}"#).unwrap();
+    let history = temp.path().join("old-research-report.md");
+    std::fs::write(&history, "preserve cached report").unwrap();
+    let mut task = test_directory_task("retired-research", temp.path().join("audio"));
+    task.daily_agent.runner = "web".into();
+    task.daily_agent.research_fanout = Some(AsrDailyAgentResearchFanoutConfig::default());
+    let plan = AsrDailyAgentChangePlan { task_id: task.id.clone(), entries: Vec::new(), skipped: false, skip_reason: None };
+    assert!(run_daily_agent_research_fanout(&task, &plan).await.unwrap_err().contains("removed"));
+    assert_eq!(std::fs::read_to_string(history).unwrap(), "preserve cached report");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn retired_project_settings_api_migrates_multiple_agents_without_changing_runners() {
+    let temp = TempDir::new().unwrap();
+    let _guard = EnvGuard::set_data_dir(temp.path());
+    let mut task = test_directory_task("legacy-project-migration", temp.path().join("audio"));
+    let mut first = AsrDailyAgentItem::daily_report();
+    first.runner = "web-a".into();
+    first.research_fanout = Some(AsrDailyAgentResearchFanoutConfig {
+        chatgpt_project_url: Some("https://chatgpt.com/project-a".into()),
+        ..Default::default()
+    });
+    let mut second = first.clone();
+    second.id = "second".into();
+    second.output_dir = "second".into();
+    second.enabled = false;
+    second.runner = "web-b".into();
+    task.daily_agent.agents = vec![first, second];
+    add_task(task.clone()).unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        loop {
+            let (stream, _) = listener.accept().await.unwrap();
+            tokio::spawn(async move {
+                let _ = hyper::server::conn::http1::Builder::new().serve_connection(
+                    hyper_util::rt::TokioIo::new(stream),
+                    hyper::service::service_fn(|request| async move {
+                        let path = request.uri().path().to_string();
+                        Ok::<_, std::convert::Infallible>(handle_asr_tasks(request, &path).await)
+                    }),
+                ).await;
+            });
+        }
+    });
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let url = format!("http://{address}/api/asr/tasks/{}/daily-agent", task.id);
+    let rejected = client.put(&url).json(&serde_json::json!({"agents": task.daily_agent.agents})).send().await.unwrap();
+    assert_eq!(rejected.status(), reqwest::StatusCode::BAD_REQUEST);
+    let response = client.put(&url).json(&serde_json::json!({"remove_retired_project_urls":true})).send().await.unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK, "{}", response.text().await.unwrap());
+    let migrated = find_task(&task.id).unwrap();
+    assert_eq!(migrated.daily_agent.agents.len(), 2);
+    for (old, new) in task.daily_agent.agents.iter().zip(&migrated.daily_agent.agents) {
+        assert_eq!(old.runner, new.runner);
+        assert_eq!(old.enabled, new.enabled);
+        assert!(new.research_fanout.as_ref().unwrap().chatgpt_project_url.is_none());
+    }
+    let response = client.put(url).json(&serde_json::json!({"agents": migrated.daily_agent.agents})).send().await.unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    server.abort();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn retired_web_deleted_daily_binding_never_dispatches_codex_or_reuses_cache() {
+    use crate::im_gateway::external_cli::{ExternalCliConfigStore, effective_config_for_provider_and_runner};
+    let temp = TempDir::new().unwrap();
+    let _guard = EnvGuard::set_data_dir(temp.path());
+    let path = temp.path().join("admin/im_gateway_external_cli_agent.json");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, r#"{"version":2,"defaultRunnerId":"Codex","runners":{"web":{"enabled":true,"adapter":"chatgpt_web"}},"channels":{}}"#).unwrap();
+    let store = ExternalCliConfigStore::new(temp.path());
+    let mut task = test_directory_task("deleted-web-binding", temp.path().join("audio"));
+    task.daily_agent.runner = "web".into();
+    task.daily_agent.research_fanout = Some(AsrDailyAgentResearchFanoutConfig {allowed_runners:vec!["web".into()], ..Default::default()});
+    let mut agent = AsrDailyAgentItem::daily_report();
+    agent.runner = "web".into();
+    agent.research_fanout = task.daily_agent.research_fanout.clone();
+    task.daily_agent.agents = vec![agent.clone()];
+    let mut task = task_for_daily_agent(&task, &agent);
+    add_task(task.clone()).unwrap();
+    let mut config = store.load();
+    config.runners.remove("web");
+    store.save(config).unwrap();
+    assert_eq!(find_task(&task.id).unwrap().daily_agent.runner, "web");
+    let mut ordinary = task.clone();
+    ordinary.daily_agent.research_fanout = None;
+    ensure_asr_daily_workspace(&ordinary).unwrap();
+    std::fs::write(daily_dir_for_task(&task.id).join("2026-07-22.md"), "daily source").unwrap();
+    let error = run_daily_agent_inner(&ordinary, "manual", Some("2026-07-22"), true, "deleted-runner-trigger").await.unwrap_err();
+    assert!(error.contains("does not exist"), "{error}");
+    let effective = effective_config_for_provider_and_runner(&store.load(), None, Some("web"));
+    let error = run_external_daily_agent_prompt_with_params(&task, "web", "do not execute".into(), temp.path(), None, serde_json::json!({}), &effective).await.unwrap_err();
+    assert!(error.contains("does not exist"), "{error}");
+    assert!(!temp.path().join("im_gateway/runs").exists());
+
+    // A valid successful child cache must not turn a missing binding into success.
+    let date = "2026-07-22";
+    task.daily_agent.dependencies = vec![AsrDailyAgentDependency {agent_id:"dispatcher".into(),include_output:true}];
+    let dependency = daily_agent_upstream_input_dir(&task, "dispatcher");
+    std::fs::create_dir_all(&dependency).unwrap();
+    let manifest: AsrDailyResearchManifest = serde_json::from_value(serde_json::json!({"questions":[{"id":"q1","original_question":"cached question"}]})).unwrap();
+    std::fs::write(dependency.join(format!("{date}-report.md")), serde_json::to_vec(&manifest).unwrap()).unwrap();
+    let child_dir = daily_agent_output_dir(&task).join(date);
+    std::fs::create_dir_all(&child_dir).unwrap();
+    let result_path = child_dir.join("q1.md");
+    let metadata_path = child_dir.join("q1.json");
+    std::fs::write(&result_path, "preserve cached report").unwrap();
+    validate_daily_research_manifest(&manifest, task.daily_agent.research_fanout.as_ref().unwrap(), "web").unwrap();
+    let fingerprint = daily_research_question_fingerprint(&manifest.questions[0], "web", task.daily_agent.research_fanout.as_ref().unwrap());
+    let cached: AsrDailyResearchChildResult = serde_json::from_value(serde_json::json!({"question_id":"q1","original_question":"cached question","runner":"web","status":"success","result_path":result_path,"fingerprint_sha256":fingerprint,"result_sha256":compute_sha256(&result_path).unwrap()})).unwrap();
+    atomic_json_write(&metadata_path, &cached).unwrap();
+    assert!(reusable_daily_research_child(&metadata_path, &result_path, &fingerprint).is_some());
+    let before = std::fs::read(&metadata_path).unwrap();
+    let error = run_daily_agent_research_fanout(&task, &daily_agent_research_plan(&task, date)).await.unwrap_err();
+    assert!(error.contains("does not exist"), "{error}");
+    assert_eq!(std::fs::read(metadata_path).unwrap(), before);
+    assert_eq!(std::fs::read_to_string(result_path).unwrap(), "preserve cached report");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn retired_builtin_config_api_delete_cannot_reactivate_daily_agent_or_cached_codex() {
+    let temp = TempDir::new().unwrap();
+    let _guard = EnvGuard::set_data_dir(temp.path());
+    let config_path = temp.path().join("admin/im_gateway_external_cli_agent.json");
+    std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+    std::fs::write(&config_path, r#"{"version":2,"defaultRunnerId":"safe","runners":{"safe":{"enabled":true,"adapter":"custom_cli"},"Codex":{"enabled":true,"adapter":"chatgpt_web"}},"channels":{}}"#).unwrap();
+    let service = std::sync::Arc::new(crate::ImGatewayService::new(temp.path()));
+    let mut task = test_directory_task("retired-builtin-daily", temp.path().join("audio"));
+    let mut agent = AsrDailyAgentItem::daily_report();
+    agent.runner = "Codex".into();
+    agent.research_fanout = Some(AsrDailyAgentResearchFanoutConfig {allowed_runners:vec!["Codex".into()],..Default::default()});
+    task.daily_agent.agents = vec![agent.clone()];
+    let mut task = task_for_daily_agent(&task, &agent);
+    add_task(task.clone()).unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        loop {
+            let (stream, _) = listener.accept().await.unwrap();
+            let service = service.clone();
+            tokio::spawn(async move {
+                let _ = hyper::server::conn::http1::Builder::new().serve_connection(
+                    hyper_util::rt::TokioIo::new(stream),
+                    hyper::service::service_fn(move |request| {
+                        let service = service.clone();
+                        async move {
+                            let path = request.uri().path().to_string();
+                            Ok::<_, std::convert::Infallible>(crate::handlers::im_gateway::handle_im_gateway(request, Some(service), &path).await)
+                        }
+                    }),
+                ).await;
+            });
+        }
+    });
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let url = format!("http://{address}/api/im-gateway/chat/config");
+    let mut config: serde_json::Value = client.get(&url).send().await.unwrap().json().await.unwrap();
+    config["runners"].as_object_mut().unwrap().remove("Codex");
+    let response = client.patch(&url).json(&config).send().await.unwrap();
+    // On the old implementation this is 200 and an enabled native Codex is inserted.
+    // Stop here on regression, before anything could invoke an actual provider.
+    assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST, "{}", response.text().await.unwrap());
+    let config: serde_json::Value = client.get(&url).send().await.unwrap().json().await.unwrap();
+    assert_eq!(config["runners"]["Codex"]["adapter"], "chatgpt_web");
+    assert_eq!(find_task(&task.id).unwrap().daily_agent.runner, "Codex");
+    let response = client.post(format!("http://{address}/api/im-gateway/chat")).json(&serde_json::json!({"runnerId":"Codex","message":"must not execute"})).send().await.unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+    assert!(response.text().await.unwrap().contains("removed"));
+    server.abort();
+
+    let date = "2026-07-22";
+    let mut ordinary = task.clone();
+    ordinary.daily_agent.research_fanout = None;
+    ensure_asr_daily_workspace(&ordinary).unwrap();
+    std::fs::write(daily_dir_for_task(&task.id).join(format!("{date}.md")), "daily source").unwrap();
+    let error = run_daily_agent_inner(&ordinary, "manual", Some(date), true, "retired-builtin-trigger").await.unwrap_err();
+    assert!(error.contains("removed"), "{error}");
+    assert!(!temp.path().join("im_gateway/runs").exists());
+
+    task.daily_agent.dependencies = vec![AsrDailyAgentDependency {agent_id:"dispatcher".into(),include_output:true}];
+    let dependency = daily_agent_upstream_input_dir(&task, "dispatcher");
+    std::fs::create_dir_all(&dependency).unwrap();
+    let manifest: AsrDailyResearchManifest = serde_json::from_value(serde_json::json!({"questions":[{"id":"q1","original_question":"cached question","runner":"Codex"}]})).unwrap();
+    validate_daily_research_manifest(&manifest, task.daily_agent.research_fanout.as_ref().unwrap(), "Codex").unwrap();
+    std::fs::write(dependency.join(format!("{date}-report.md")), serde_json::to_vec(&manifest).unwrap()).unwrap();
+    let child_dir = daily_agent_output_dir(&task).join(date);
+    std::fs::create_dir_all(&child_dir).unwrap();
+    let result_path = child_dir.join("q1.md");
+    let metadata_path = child_dir.join("q1.json");
+    std::fs::write(&result_path, "preserve cached result").unwrap();
+    let fingerprint = daily_research_question_fingerprint(&manifest.questions[0], "Codex", task.daily_agent.research_fanout.as_ref().unwrap());
+    let cached: AsrDailyResearchChildResult = serde_json::from_value(serde_json::json!({"question_id":"q1","original_question":"cached question","runner":"Codex","status":"success","result_path":result_path,"fingerprint_sha256":fingerprint,"result_sha256":compute_sha256(&result_path).unwrap()})).unwrap();
+    atomic_json_write(&metadata_path, &cached).unwrap();
+    assert!(reusable_daily_research_child(&metadata_path, &result_path, &fingerprint).is_some());
+    let before = std::fs::read(&metadata_path).unwrap();
+    let error = run_daily_agent_research_fanout(&task, &daily_agent_research_plan(&task, date)).await.unwrap_err();
+    assert!(error.contains("removed"), "{error}");
+    assert_eq!(std::fs::read(metadata_path).unwrap(), before);
+    assert_eq!(std::fs::read_to_string(result_path).unwrap(), "preserve cached result");
 }

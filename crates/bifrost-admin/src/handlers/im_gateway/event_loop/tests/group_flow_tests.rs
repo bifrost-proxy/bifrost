@@ -2273,7 +2273,7 @@ async fn disabled_and_busy_external_runner_paths_preserve_group_queue_state() {
         .get_mut(&default_runner_id)
         .unwrap();
     default_runner.enabled = true;
-    default_runner.adapter = crate::im_gateway::chatgpt_web::ADAPTER_ID.to_string();
+    default_runner.adapter = "custom_cli".to_string();
     service
         .external_cli_config_store
         .save(external_cli_config)

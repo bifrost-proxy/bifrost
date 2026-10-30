@@ -2,7 +2,6 @@
 
 ## 功能模块说明
 
-本用例验证 ASR Daily Agent 在重启、重复请求、部分失败和历史补录场景下的持久化边界。覆盖微信发送就绪状态、幂等投递、研究问题级复用、产物失效、导入完成屏障、日期水位线，以及 ChatGPT Web 已提交请求的完成检测与防重发。
 
 ## 前置条件
 
@@ -133,23 +132,6 @@
 - 完整 token 只允许一次调度。
 - 调度失败后 token 回到可重试状态。
 - 不会创建并发或重复 ASR run。
-
-### TC-ADR-09 ChatGPT Web 提交后快速移交且不重复发送
-
-操作步骤：
-
-1. 记录真实 9900 服务的 PID、系统代理状态，以及当前 Daily Agent run、ChatGPT Web conversation 和已生成 report 的状态。
-2. 安装本次修复的 release 二进制，完整重启 Bifrost，确认 PID 已变化、服务和系统代理均恢复。
-3. 对一个已有短日期仅强制运行 `daily_report`，记录对应 Daily Agent run 与 IM Gateway run ID。
-4. 观察 `conversation_handoff.json`、`normalized_events.jsonl`、最终 `result.json` 和 report；同时查询日志中该 run 的 `attempt`、`browser_post_captured` 与 handoff 事件。
-5. 等待运行结束，再次统计该日期的持久化处理记录和仍在运行的任务。
-
-预期结果：
-
-- ChatGPT 页面一旦出现非临时 conversation ID 且已有消息 turn，send 阶段立即移交到 final wait，不再等待 `Network.loadingFinished`。
-- POST 已捕获后即使 CDP/SSE 结束异常，也只恢复已提交 conversation；无法恢复时明确失败且拒绝整轮重发。
-- 同一个 Daily Agent run 不出现 `attempt=2`，不创建第二个 ChatGPT conversation，也不重复生成逻辑任务。
-- 最终 `result.json` 与 report 成功落盘，Daily Agent 状态从 running 收敛到 success；系统代理和已有配置保持不变。
 
 ## 清理步骤
 

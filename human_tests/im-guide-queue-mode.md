@@ -4,7 +4,7 @@
 
 IM Gateway 消息处理的两种模式，用于处理 Agent 正在处理中（session busy）时用户发来的新消息：
 
-- **排队模式**（`/q <消息>` 或 ChatGPT Web 默认）：消息加入 FIFO 队列，每个 turn/run 完成后按顺序处理队列消息。最多排队 10 条。Codex/Traex app-server 与其他非 ChatGPT Web Runner 在 busy 时默认先尝试 live guide；不支持、拒绝或超时才明确降级排队并保留原消息和附件。
+- **排队模式**（`/q <消息>`  默认）：消息加入 FIFO 队列，每个 turn/run 完成后按顺序处理队列消息。最多排队 10 条。Codex/Traex app-server 与其他 Runner 在 busy 时默认先尝试 live guide；不支持、拒绝或超时才明确降级排队并保留原消息和附件。
 - **删除排队**（`/rq <序号>`）：通过序号删除指定的排队消息。
 - **Codex Runner 接续**：Codex app-server 使用 `turn/steer` 追加当前 turn 引导；显式 `/q` 或 Guide 降级后的消息在 queue drain 时复用上一轮 `threadId` 接续同一个 Codex session。
 
@@ -27,16 +27,8 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8801 --unsa
 ### TC-GQ-16: 外部 Runner busy 默认 Guide，系统 slash 不透传，失败路径进入 queue
 
 - **操作步骤**:
-  ```bash
-  cargo test -p bifrost-admin busy_default_mode_guides_external_runners_except_chatgpt_web --lib
-  cargo test -p bifrost-admin apply_busy_message_default_queues_custom_runner_messages --lib
-  cargo test -p bifrost-admin codex_runner_metadata_resumes_queued_messages_after_current_run --lib
-  cargo test -p bifrost-admin codex_runner_metadata_does_not_override_explicit_thread --lib
-  SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin external_cli_effort_slash --lib
-  SKIP_BUILD=true BIFROST_BIN=target/debug/bifrost e2e-tests/tests/test_external_runner_live_guide.sh
-  ```
+
 - **预期结果**:
-  - `runner = "codex"`、`"traex"`、`"claude_code"` 或其他非 ChatGPT Web runner 时 busy 默认策略为 ExternalGuide；ChatGPT Web 为 Queue。
   - 普通消息尝试注入 active worker；隐藏兼容命令 `/g <消息>` 行为相同；不支持、拒绝或超时则完整进入 FIFO queue，`/q` 始终直接排队。
   - Codex/Traex active 时，`/efforts` 与 `/effort <级别>` 由 Bifrost 作为系统命令处理，不得进入 `turn/steer`；effort override 写入 session，并从下一轮生效。
   - Codex/Traex app-server 接收 `turn/steer`，并在等待 ACK 时保持 runner control future 持续运行。

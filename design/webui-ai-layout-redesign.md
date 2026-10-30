@@ -149,7 +149,6 @@ Runner 展示名建议：
 | `codex` | Codex Runner |
 | `claude_code` | Claude Code |
 | `traex` | Trae X |
-| `chatgpt_web` | ChatGPT Web |
 | custom id | 使用后端返回 label，缺失时展示 runner id |
 
 排序规则：
@@ -157,7 +156,6 @@ Runner 展示名建议：
 1. Codex Runner。
 2. Claude Code。
 3. Trae X。
-4. ChatGPT Web。
 5. 其它自定义 runner 按 label 或 id 排序。
 
 Runner 下拉必须展示不可用状态：

@@ -19,7 +19,6 @@ import {
 import {
   DeleteOutlined,
   EditOutlined,
-  LoginOutlined,
   PlusOutlined,
   ReloadOutlined,
   RocketOutlined,
@@ -28,7 +27,6 @@ import * as imGatewayApi from "../../../../api/imGateway";
 import { normalizeApiErrorMessage } from "../../../../api/client";
 import type {
   ExternalCliAgentSettings,
-  ChatGptWebAuthStatus,
   ExternalCliChannelSettings,
   ExternalCliGatewayConfig,
   ExternalCliRunResult,
@@ -52,7 +50,6 @@ const ADAPTER_OPTIONS = [
   { label: "Codex CLI", value: "codex" },
   { label: "Traex CLI", value: "traex" },
   { label: "Claude Code", value: "claude_code" },
-  { label: "ChatGPT Web", value: "chatgpt_web" },
 ];
 
 function getDeliveryOptions(t: TFunction) {
@@ -93,13 +90,6 @@ function runnerToFormValues(runner: ExternalCliAgentSettings) {
     adapter: runner.adapter,
     executable: runner.adapterConfig?.executable,
     args: runner.adapterConfig?.args?.join("\n"),
-    browserChannel: runner.adapterConfig?.browser?.channel || "edge",
-    browserProfileDir: runner.adapterConfig?.browser?.profileDir,
-    executionMode: runner.adapterConfig?.browser?.executionMode || "headed",
-    chatgptBaseUrl: runner.adapterConfig?.chatgpt?.baseUrl || "https://chatgpt.com",
-    pollIntervalMs: runner.adapterConfig?.chatgpt?.pollIntervalMs || 1000,
-    chatgptTimeoutSecs:
-      runner.adapterConfig?.timeoutSecs || runner.adapterConfig?.chatgpt?.timeoutSecs || 7200,
     permissionMode:
       runner.adapterConfig?.permissionMode && runner.adapterConfig.permissionMode !== "default"
         ? runner.adapterConfig.permissionMode
@@ -113,34 +103,7 @@ function runnerToFormValues(runner: ExternalCliAgentSettings) {
 function formToRunner(values: Record<string, unknown>): ExternalCliAgentSettings {
   const args = lines(values.args);
   const adapter = String(values.adapter || "codex").trim() || "codex";
-  if (adapter === "chatgpt_web") {
-    return {
-      enabled: Boolean(values.enabled),
-      adapter,
-      instructions: String(values.instructions || "").trim() || undefined,
-      adapterConfig: {
-        timeoutSecs: Number(values.chatgptTimeoutSecs || 7200),
-        browser: {
-          channel: String(values.browserChannel || "edge"),
-          ...(values.browserProfileDir
-            ? { profileDir: String(values.browserProfileDir).trim() }
-            : {}),
-          openOnAuthRequired: true,
-          executionMode: String(values.executionMode || "headed"),
-          closeTargetAfterRun: true,
-        },
-        chatgpt: {
-          baseUrl: String(values.chatgptBaseUrl || "https://chatgpt.com").trim(),
-          pollIntervalMs: Number(values.pollIntervalMs || 1000),
-          timeoutSecs: Number(values.chatgptTimeoutSecs || 7200),
-        },
-      },
-      injectBifrostTools: false,
-      skillPaths: [],
-      deliveryMode:
-        (values.deliveryMode as ExternalCliAgentSettings["deliveryMode"]) || "final_reply",
-    };
-  }
+
   return {
     enabled: Boolean(values.enabled),
     adapter,
@@ -179,13 +142,9 @@ export default function ExternalCliPanel({
   const [testResult, setTestResult] = useState<ExternalCliRunResult | null>(null);
   const [runnerModalOpen, setRunnerModalOpen] = useState(false);
   const [editingRunnerId, setEditingRunnerId] = useState<string | null>(null);
-  const [authStatus, setAuthStatus] = useState<ChatGptWebAuthStatus | null>(null);
-  const [authChecking, setAuthChecking] = useState(false);
-  const [loginOpening, setLoginOpening] = useState(false);
   const [runnerForm] = Form.useForm();
   const [channelForm] = Form.useForm();
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const loginStopRequested = useRef(false);
 
   const runnerIds = useMemo(() => Object.keys(config?.runners || {}).sort(), [config?.runners]);
   const selectedOverride =
@@ -249,7 +208,6 @@ export default function ExternalCliPanel({
 
   const openCreateRunner = () => {
     setEditingRunnerId(null);
-    setAuthStatus(null);
     runnerForm.resetFields();
     runnerForm.setFieldsValue({
       runnerId: "",
@@ -261,78 +219,12 @@ export default function ExternalCliPanel({
   const openEditRunner = (runnerId: string) => {
     if (!config) return;
     setEditingRunnerId(runnerId);
-    setAuthStatus(null);
     runnerForm.resetFields();
     runnerForm.setFieldsValue({
       runnerId,
       ...runnerToFormValues(config.runners[runnerId] || DEFAULT_RUNNER),
     });
     setRunnerModalOpen(true);
-  };
-
-  const currentModalRunnerId = () =>
-    String(runnerForm.getFieldValue("runnerId") || editingRunnerId || "")
-      .trim()
-      .replace(/\s+/g, "-");
-
-  const handleCheckChatGptLogin = async () => {
-    const runnerId = currentModalRunnerId();
-    if (!runnerId) {
-      message.error(t("imGateway.externalCli.runnerIdFirst"));
-      return;
-    }
-    setAuthChecking(true);
-    try {
-      const status = await imGatewayApi.getChatGptWebAuthStatus(runnerId);
-      setAuthStatus(status);
-      message[status.loggedIn ? "success" : "warning"](
-        status.loggedIn ? t("imGateway.externalCli.loginValid") : t("imGateway.externalCli.loginRequired"),
-      );
-    } catch (err) {
-      message.error(normalizeApiErrorMessage(err, t("imGateway.externalCli.checkLoginFailed")));
-    } finally {
-      setAuthChecking(false);
-    }
-  };
-
-  const handleOpenChatGptLogin = async () => {
-    const runnerId = currentModalRunnerId();
-    if (!runnerId) {
-      message.error(t("imGateway.externalCli.runnerIdFirst"));
-      return;
-    }
-    loginStopRequested.current = false;
-    setLoginOpening(true);
-    try {
-      const status = await imGatewayApi.openChatGptWebLogin(runnerId);
-      setAuthStatus(status);
-      message[status.loggedIn ? "success" : "warning"](
-        status.loggedIn ? t("imGateway.externalCli.loginCaptured") : t("imGateway.externalCli.loginStillRequired"),
-      );
-    } catch (err) {
-      if (!loginStopRequested.current) {
-        message.error(normalizeApiErrorMessage(err, t("imGateway.externalCli.openLoginFailed")));
-      }
-    } finally {
-      loginStopRequested.current = false;
-      setLoginOpening(false);
-    }
-  };
-
-  const handleStopChatGptLogin = async () => {
-    const runnerId = currentModalRunnerId();
-    if (!runnerId) {
-      message.error(t("imGateway.externalCli.runnerIdFirst"));
-      return;
-    }
-    loginStopRequested.current = true;
-    try {
-      const status = await imGatewayApi.stopChatGptWebLogin(runnerId);
-      setAuthStatus(status);
-      message.info(t("imGateway.externalCli.loginStopped"));
-    } catch (err) {
-      message.error(normalizeApiErrorMessage(err, t("imGateway.externalCli.stopLoginFailed")));
-    }
   };
 
   const handleSaveRunner = async () => {
@@ -371,6 +263,11 @@ export default function ExternalCliPanel({
 
   const handleDeleteRunner = (runnerId: string) => {
     if (!config || runnerIds.length <= 1) return;
+    if (imGatewayApi.isRetiredRunnerAdapter(config.runners[runnerId]?.adapter || "") &&
+        (config.defaultRunnerId === runnerId || Object.values(config.channels).some((channel) => channel.runnerId === runnerId))) {
+      message.error(t("imGateway.externalCli.retiredBinding"));
+      return;
+    }
     const runners = { ...config.runners };
     delete runners[runnerId];
     const fallbackRunnerId =
@@ -488,7 +385,9 @@ export default function ExternalCliPanel({
                 {
                   title: t("imGateway.externalCli.executor"),
                   dataIndex: ["runner", "adapter"],
-                  render: (adapter: string) => <Tag>{adapter}</Tag>,
+                  render: (adapter: string) => imGatewayApi.isRetiredRunnerAdapter(adapter)
+                    ? <Tag color="error">{t("imGateway.externalCli.retiredRunner")}</Tag>
+                    : <Tag>{adapter}</Tag>,
                 },
                 {
                   title: t("common.enabled"),
@@ -578,7 +477,7 @@ export default function ExternalCliPanel({
                   disabled={!selectedProviderId}
                   options={[
                     { label: t("imGateway.externalCli.inheritGlobalRunner"), value: "__inherit__" },
-                    ...runnerIds.map((id) => ({ label: id, value: id })),
+                    ...imGatewayApi.selectableRunnerIds(config).map((id) => ({ label: id, value: id })),
                   ]}
                 />
               </Form.Item>
@@ -660,82 +559,6 @@ export default function ExternalCliPanel({
           <Form.Item name="adapter" label={t("imGateway.externalCli.adapter")}>
             <Select options={ADAPTER_OPTIONS} />
           </Form.Item>
-          <Form.Item shouldUpdate noStyle>
-            {({ getFieldValue }) =>
-              getFieldValue("adapter") === "chatgpt_web" ? (
-                <Space direction="vertical" style={{ width: "100%" }} size={12}>
-                  <Descriptions size="small" column={1} bordered>
-                    <Descriptions.Item label={t("imGateway.externalCli.loginState")}>
-                      <Space wrap>
-                        <Tag color={authStatus?.loggedIn ? "green" : "orange"}>
-                          {authStatus?.state || t("imGateway.externalCli.notChecked")}
-                        </Tag>
-                        {authStatus && (
-                          <Text type="secondary">
-                            {t("imGateway.externalCli.cookiesHeaders", {
-                              cookies: authStatus.cookieCount,
-                              headers: authStatus.capturedHeaderNames.length,
-                            })}
-                          </Text>
-                        )}
-                      </Space>
-                    </Descriptions.Item>
-                    <Descriptions.Item label={t("imGateway.externalCli.profile")}>
-                      <Text type="secondary">{authStatus?.profileDir || t("imGateway.externalCli.bifrostDataDir")}</Text>
-                    </Descriptions.Item>
-                  </Descriptions>
-                  <Space>
-                    <Button
-                      icon={<ReloadOutlined />}
-                      loading={authChecking}
-                      onClick={handleCheckChatGptLogin}
-                    >
-                      {t("imGateway.externalCli.checkLogin")}
-                    </Button>
-                    <Button
-                      icon={<LoginOutlined />}
-                      loading={loginOpening}
-                      onClick={handleOpenChatGptLogin}
-                    >
-                      {t("imGateway.externalCli.openLoginBrowser")}
-                    </Button>
-                    {loginOpening && (
-                      <Button danger onClick={handleStopChatGptLogin}>
-                        {t("imGateway.externalCli.stopLogin")}
-                      </Button>
-                    )}
-                  </Space>
-                  <Form.Item name="browserChannel" label={t("imGateway.externalCli.browser")}>
-                    <Select
-                      options={[
-                        { label: "Microsoft Edge", value: "edge" },
-                        { label: "Google Chrome", value: "chrome" },
-                      ]}
-                    />
-                  </Form.Item>
-                  <Form.Item name="browserProfileDir" label={t("imGateway.externalCli.browserProfileDir")}>
-                    <Input placeholder={t("imGateway.externalCli.browserProfileDirPlaceholder")} />
-                  </Form.Item>
-                  <Form.Item name="executionMode" label={t("imGateway.externalCli.executionMode")}>
-                    <Select
-                      options={[
-                        { label: t("imGateway.externalCli.headless"), value: "headless" },
-                        { label: t("imGateway.externalCli.headed"), value: "headed" },
-                      ]}
-                    />
-                  </Form.Item>
-                  <Form.Item name="chatgptBaseUrl" label={t("imGateway.externalCli.baseUrl")}>
-                    <Input placeholder="https://chatgpt.com" />
-                  </Form.Item>
-                  <Form.Item name="chatgptTimeoutSecs" label={t("imGateway.externalCli.runTimeoutSeconds")}>
-                    <Input type="number" min={60} />
-                  </Form.Item>
-                  <Form.Item name="pollIntervalMs" label={t("imGateway.externalCli.pollIntervalMs")}>
-                    <Input type="number" min={250} />
-                  </Form.Item>
-                </Space>
-              ) : (
-                <>
                   <Form.Item name="executable" label={t("imGateway.externalCli.executable")}>
                     <Input placeholder="Codex" />
                   </Form.Item>
@@ -757,10 +580,6 @@ export default function ExternalCliPanel({
                   <Form.Item name="skillPaths" label={t("imGateway.externalCli.skillPaths")}>
                     <Input.TextArea rows={3} placeholder={t("imGateway.externalCli.skillPathsPlaceholder")} />
                   </Form.Item>
-                </>
-              )
-            }
-          </Form.Item>
           <Form.Item name="deliveryMode" label={t("imGateway.externalCli.defaultImDelivery")}>
             <Select options={deliveryOptions} />
           </Form.Item>

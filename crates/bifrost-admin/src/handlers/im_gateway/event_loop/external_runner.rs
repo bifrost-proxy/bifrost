@@ -1522,9 +1522,7 @@ pub(super) async fn run_external_cli_agent_chat(
             ctx.agent_session_manager.clear_session(&input.session_key);
         }
         ctx.queue_manager.clear_session(&input.session_key);
-        if settings.adapter == crate::im_gateway::chatgpt_web::ADAPTER_ID {
-            crate::im_gateway::chatgpt_web::clear_session_conversation(&input.session_key).await;
-        }
+
         clear_persisted_agent_session_state(
             &input.session_key,
             Some(&settings.adapter),
@@ -2666,37 +2664,6 @@ pub(in crate::handlers::im_gateway) fn apply_external_cli_resume_metadata(
     request: &mut crate::im_gateway::external_cli::ExternalCliRunRequest,
     metadata: &std::collections::BTreeMap<String, String>,
 ) {
-    if request.adapter == crate::im_gateway::chatgpt_web::ADAPTER_ID {
-        if request
-            .params
-            .get("conversationId")
-            .or_else(|| request.params.get("conversation_id"))
-            .and_then(serde_json::Value::as_str)
-            .map(str::trim)
-            .is_some_and(|value| !value.is_empty())
-        {
-            return;
-        }
-        let Some(conversation_id) = metadata
-            .get("conversationId")
-            .or_else(|| metadata.get("conversation_id"))
-            .map(String::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        else {
-            return;
-        };
-        if !request.params.is_object() {
-            request.params = serde_json::json!({});
-        }
-        if let Some(params) = request.params.as_object_mut() {
-            params.insert(
-                "conversationId".to_string(),
-                serde_json::Value::String(conversation_id.to_string()),
-            );
-        }
-        return;
-    }
     if !matches!(
         request.adapter.as_str(),
         "codex"
@@ -3013,12 +2980,8 @@ pub(super) fn sync_external_cli_active_status(session: &bifrost_agent::session::
     status.estimated_context_tokens = session.effective_token_count();
 }
 
-pub(super) fn external_cli_adapter_label(adapter: &str) -> &'static str {
-    if adapter == crate::im_gateway::chatgpt_web::ADAPTER_ID {
-        "ChatGPT Web"
-    } else {
-        "Runner"
-    }
+pub(super) fn external_cli_adapter_label(_adapter: &str) -> &'static str {
+    "Runner"
 }
 
 pub(in crate::handlers::im_gateway) fn external_cli_progress_runner_summary(

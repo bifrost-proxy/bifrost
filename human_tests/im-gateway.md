@@ -119,7 +119,7 @@ rm -rf ./.bifrost-test
 
 - **前置条件**:
   - 使用独立临时 `BIFROST_DATA_DIR` 启动当前源码版 Bifrost，设置 `BIFROST_DISABLE_TRAY=1`、`BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1` 并携带 `--no-system-proxy`。
-  - 已创建测试 Provider、Configured Target，并至少启用 Codex、Traex、Claude Code 或 ChatGPT Web 中一个 External Runner。
+  - 已创建测试 Provider、Configured Target，并至少启用 Codex、Traex、Claude Code  中一个 External Runner。
 - **操作步骤**:
   1. 执行 `bifrost im schedule preview agent-daily --provider test-feishu --target oncall --target-mode configured_target --cron '0 9 * * 1-5' --timezone Asia/Shanghai --agent-prompt 'Summarize traffic' --agent-runner-id traex --idempotency-key im:test-76 --format json-pretty`。
   2. 检查返回的规范化 schedule 与 `upcoming_run_times`，不执行创建，确认 GET `/schedules` 仍为空。
@@ -130,7 +130,7 @@ rm -rf ./.bifrost-test
   - preview 返回未来三次严格递增的运行时间，Asia/Shanghai 工作日 09:00 的 UTC 换算正确，且 preview 不落库。
   - 首次 add 创建一条 schedule；相同幂等键和相同请求返回原 schedule，不重复创建；相同幂等键但不同请求返回 HTTP 409。
   - Provider 不存在、Target 不存在或 Target 属于其他 Provider 时，preview/add 均拒绝。
-  - IM External Runner 的可信上下文包含公共 `preview -> explicit confirmation -> add` 流程和当前会话锁定的 provider/destination；Codex、Traex、Claude Code、ChatGPT Web 不使用各自私有 scheduler。
+  - IM External Runner 的可信上下文包含公共 `preview -> explicit confirmation -> add` 流程和当前会话锁定的 provider/destination；Codex、Traex、Claude Code 不使用各自私有 scheduler。
   - WebUI 在亮色和暗色主题下布局、边框、文字与弹窗均可读，确认前不创建 schedule。
 - **清理步骤**:
   - 删除 `im:test-76` 对应 schedule、测试 Target 与 Provider；停止测试进程并删除临时数据目录。
@@ -185,7 +185,7 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
 ### TC-IMG-20: Inbound 消息接收 + OK reaction
 
 - **操作步骤**: 在飞书上给 bifrost_IM 机器人发送一条消息
-- **预期结果**: 
+- **预期结果**:
   - 机器人在该消息上添加 OK 表情
   - 日志显示 "received inbound event from owner" 和 "added OK reaction to message"
 
@@ -215,7 +215,7 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
 ### TC-IMG-24: Schedule 手动执行并发送结果给 owner
 
 - **操作步骤**: 执行 `curl -s -X POST http://127.0.0.1:8800/_bifrost/api/im-gateway/schedules/test-schedule-1/run`
-- **预期结果**: 
+- **预期结果**:
   - 返回 `status: "Success"`, `exit_code: 0`
   - 绑定 Connection 的默认接收者收到执行结果消息（包含状态和脚本输出）
   - 消息记录中新增一条 direction=outbound, trigger=schedule:test-schedule-1
@@ -707,38 +707,11 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
   - 亮色和暗色主题下字段文本、状态标签和复制按钮均可读可点击。
 - **执行记录（2026-05-15）**: PASS — 执行 `pnpm --dir web exec playwright test tests/ui/im-gateway-provider.spec.ts --grep "卡片单列展示"`，用 API 创建 `Copyable Provider`，浏览器打开 Connections 后确认卡片顶部包含名称、连接状态、Enabled 和 Long Connection；App ID、Owner ID、Agent Work Dir 三个字段的 bounding box y 坐标递增，确认纵向单列展示；悬浮 App ID 后复制按钮 opacity 从 0 变为 1，点击后三个字段分别把完整 `cli_copyable_provider_id`、`ou_copyable_provider_owner`、`~/work/github/bifrost` 写入剪贴板。
 
-### TC-IMG-54: Schedule Agent 选择 Runner 与 ChatGPT Web 初始化 Prompt
-
-- **前置条件**:
-  - 使用当前源码构建的 Bifrost 或 Vite dev server 打开 `/_bifrost/ai?aiSection=im-gateway-schedules&imGatewaySection=schedules`。
-  - 已存在至少一个配置了默认接收者的 Connection；External CLI Runner 配置中存在一个 adapter 为 `chatgpt_web` 的 Runner。
-- **操作步骤**:
-  1. 点击 Schedules 页面 Add，选择 `Task Type=Agent`。
-  2. 在 `IM Channel` 中选择一个 Connection。
-  3. 在 `Runner` 中选择 Codex，确认表单没有展示 ChatGPT Web 专用 `First-round Prompt`。
-  4. 将 `Runner` 切换到 ChatGPT Web Runner，填写 `First-round Prompt`、`Preset Prompt` 和 `Default Execution Directory`。
-  5. 提交创建 schedule，并查看详情页。
-  6. 点击该 schedule 行上的 Run 按钮手动触发，随后进入详情页检查 run 记录与发送结果。
-- **预期结果**:
-  - Agent schedule 创建时 `IM Channel` 必填且可选择现有 Connection，不需要选择具体发送对象。
-  - Runner 下拉只包含已配置并启用的外部 Runner。
-  - 选择 ChatGPT Web Runner 后展示 `First-round Prompt`，提交 payload 中保存为 `agent.initial_prompt`；该 schedule session 尚无 ChatGPT Web conversation 绑定时先发送这条初始化消息，后续 run 复用同一 conversation 并只发送 `Preset Prompt`。
-  - Codex 等文件型外部 Runner 可保存 `agent.work_dir` 作为默认执行目录；实际 run 必须从该目录执行，未配置 schedule 目录时继承 Provider/全局 Agent 工作目录。
-  - ChatGPT Web run 成功后 schedule 原信息写入 `agent.conversation_ref.conversation_id`；Codex run 成功后写入 `agent.conversation_ref.thread_id`；下一次 run 复用该 schedule 自身的对话引用。
-  - run 记录包含 `runner_id`、`provider_id`、`input_preview` 和 `agent_final_response`。
-  - schedule run 完成后使用绑定 IM Channel 的默认接收者发送完成消息，消息正文优先包含 Agent 最终结果。
-  - 点击 schedule 行可查看历史运行详情；每次 run 都展示当次输入和当次输出。
-- **清理步骤**:
-  - 删除测试 schedule。
-  - 如启动了临时 Bifrost/Vite 服务，停止进程并删除临时数据目录。
-- **执行记录（2026-05-19）**: PASS — 执行 `pnpm --dir web exec tsc -b --pretty false` 通过，确认 SchedulesPanel 类型接入 `ExternalCliGatewayConfig`、Agent 表单包含 Runner、`Default Execution Directory` 与 ChatGPT Web `First-round Prompt` 条件展示，`IM Channel` 下拉直接使用 Connections；执行 `cargo test -p bifrost-admin schedule_agent_can_run_selected_external_runner_with_initial_prompt -- --nocapture` 通过，mock 外部 Runner 断言输入同时包含 `INIT_MARKER` 和 `TASK_MARKER`，run 记录为 `status=Success`、`runner_id=chatgpt-test`、`provider_id=feishu-main`、`input_preview` 包含实际发送消息、`agent_final_response=SCHEDULE_RUNNER_OK`。第二轮 review 补充 `schedule_chatgpt_web_initial_prompt_is_sent_as_first_message_only`，覆盖 ChatGPT Web 初始 Prompt 仅在没有 conversation 绑定时作为第一条消息发送，已有 conversation 后只发送 preset prompt。后续增强执行 `cargo test -p bifrost-admin schedule_agent_persists_codex_thread_id_for_next_run -- --nocapture`、`cargo test -p bifrost-admin schedule_external_result_extracts_chatgpt_conversation_id -- --nocapture`、`cargo test -p bifrost-admin schedule_agent_work_dir_prefers_schedule_then_inherited_default -- --nocapture`、`cargo test -p bifrost-admin schedule_external_runner_executes_from_configured_work_dir -- --nocapture` 通过，验证 schedule 持久化 ChatGPT/Codex 对话引用，并且 Codex Runner 使用 schedule 或继承的默认执行目录。
-
 ### TC-IMG-55: Agent Markdown 图片附件通过 IM 图片通道发送
 
 - **前置条件**:
   - 使用临时 `BIFROST_DATA_DIR`，避免污染默认用户数据。
   - 准备一个 mock Chat Completions 服务，返回内容包含：
-    - 本地图片 Markdown：`![ChatGPT 生成图片 1](/tmp/.../chatgpt-web-image-1.png)`。
     - 远端图片附件 Markdown：`![远端附件](http://127.0.0.1:<port>/chart.png)`，HTTP 响应 `Content-Type=image/png`。
     - 普通下载链接 Markdown：`[下载图片](http://127.0.0.1:<port>/download)`，URL 不带图片扩展名但 HTTP 响应 `Content-Type=image/png`。
     - 明确文件附件链接：`[报告附件](https://files.oaiusercontent.com/report.pdf)`。
@@ -939,7 +912,6 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
 - **清理步骤**:
   - 删除测试 Provider。
   - 停止临时服务并删除临时 `BIFROST_DATA_DIR`。
-- **执行记录（2026-06-04）**: PASS — 执行 `SKIP_FRONTEND_BUILD=1 e2e-tests/tests/test_im_online_notification_runner_context.sh`，脚本使用 mock Feishu API、临时数据目录和预置 `feishu-main:ou_owner` 两轮 user history 启动当前源码 Bifrost；创建绑定 `web-main` / `chatgpt_web` 的 Provider 并调用 connect 后，message log 最新 `trigger=online` 记录为 `status=success`、`msg_type=interactive`，`content_preview` 包含 `Provider`、`Device`、`Workspace`、`Runner Type: chatgpt_web`、`Runner ID: web-main`、`Bound Session: feishu-main:ou_owner`、`Completed User Turns: 2` 与 `Status: Ready`；mock Feishu 实收卡片正文也包含 Runner 类型与轮次。
 
 ### TC-IMG-63: Feishu text 发送默认转为 Markdown 卡片
 

@@ -663,7 +663,6 @@ SKIP_IN_CI_TESTS=(
   # These shell wrappers are pure Rust compile/test contract checks, not shell
   # E2E flows. Keep them local-only so CI shell jobs do not compile again after
   # the dedicated unit/integration jobs already covered the Rust paths.
-  "test_chatgpt_web_shared_profile.sh"
   "test_utf8_safe_preview_e2e.sh"
   "test_im_online_notification_runner_context.sh"
   # These desktop contract/lifecycle wrappers require either a costly Tauri
@@ -718,7 +717,6 @@ shell_test_weight() {
     test_cli_online_commands_e2e.sh) echo 109 ;;
     test_client_process_transport_attribution.sh) echo 103 ;;
     test_im_online_notification_runner_context.sh) echo 87 ;;
-    test_chatgpt_web_behavior_artifacts.sh) echo 85 ;;
     test_remote_invoke_e2e.sh) echo 75 ;;
     test_security_hardening_functional.sh) echo 72 ;;
     test_remote_invoke_ssh_e2e.sh) echo 59 ;;
@@ -777,7 +775,6 @@ shell_test_runs_serial_in_parallel_shell_job() {
     test_stop_restart_shutdown_marker.sh|\
     test_asr_model_autonomy.sh|\
     test_asr_task_pause_resume.sh|\
-    test_chatgpt_web_behavior_artifacts.sh|\
     test_http3_e2e.sh|\
     test_im_gateway_long_reply_delivery_regression.sh|\
     test_qwen3_asr_local_server.sh|\
@@ -1302,7 +1299,6 @@ run_shell_tests_parallel() {
   local CARGO_HEAVY_TESTS=(
     "test_asr_model_autonomy.sh"
     "test_asr_task_pause_resume.sh"
-    "test_chatgpt_web_behavior_artifacts.sh"
     "test_client_process_transport_attribution.sh"
     "test_http3_e2e.sh"
     "test_im_gateway_long_reply_delivery_regression.sh"

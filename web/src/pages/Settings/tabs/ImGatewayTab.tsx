@@ -476,8 +476,8 @@ function ConnectionsPanel({
   const inheritedUserInstructions =
     agentDefaults?.user_instructions || t("imGateway.provider.noGlobalUserInstructions");
   const runnerIds = useMemo(
-    () => Object.keys(externalCliConfig?.runners || {}).sort(),
-    [externalCliConfig?.runners],
+    () => imGatewayApi.selectableRunnerIds(externalCliConfig),
+    [externalCliConfig],
   );
   const agentRunnerOptions = useMemo(
     () => [
@@ -2214,17 +2214,14 @@ function SchedulesPanel({
   const [form] = Form.useForm();
   const taskType = Form.useWatch("task_type", form) || "script";
   const triggerType = Form.useWatch("trigger_type", form) || "interval";
-  const selectedRunnerId = Form.useWatch("agent_runner_id", form) || externalCliConfig?.defaultRunnerId || "Codex";
   const scheduleRunnerOptions = useMemo(
     () => [
-      ...Object.keys(externalCliConfig?.runners || {})
+      ...imGatewayApi.selectableRunnerIds(externalCliConfig)
         .sort()
         .map((id) => ({ label: id, value: id })),
     ],
-    [externalCliConfig?.runners],
+    [externalCliConfig],
   );
-  const selectedRunner = externalCliConfig?.runners?.[selectedRunnerId];
-  const selectedRunnerIsChatGptWeb = selectedRunner?.adapter === "chatgpt_web";
   const providerById = useMemo(
     () => new Map(providers.map((provider) => [provider.id, provider])),
     [providers],
@@ -2317,9 +2314,6 @@ function SchedulesPanel({
         payload.agent = {
           prompt: values.agent_prompt,
           runner_id: values.agent_runner_id || undefined,
-          initial_prompt: selectedRunnerIsChatGptWeb
-            ? values.agent_initial_prompt || undefined
-            : undefined,
           session_key: values.agent_session_key || undefined,
           work_dir: values.agent_work_dir || undefined,
           system_prompt: values.agent_system_prompt || undefined,
@@ -2691,14 +2685,6 @@ function SchedulesPanel({
               <Form.Item name="agent_runner_id" label={t("imGateway.schedules.runner")} initialValue={externalCliConfig?.defaultRunnerId || "Codex"}>
                 <Select options={scheduleRunnerOptions} />
               </Form.Item>
-              {selectedRunnerIsChatGptWeb && (
-                <Form.Item name="agent_initial_prompt" label={t("imGateway.schedules.firstRoundPrompt")}>
-                  <Input.TextArea
-                    rows={3}
-                    placeholder={t("imGateway.schedules.firstRoundPromptPlaceholder")}
-                  />
-                </Form.Item>
-              )}
               <Form.Item
                 name="agent_prompt"
                 label={t("imGateway.schedules.presetPrompt")}

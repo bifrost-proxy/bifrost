@@ -1,5 +1,4 @@
 pub mod agent;
-pub mod chatgpt_web;
 pub mod connection;
 pub mod event_router;
 pub mod event_store;

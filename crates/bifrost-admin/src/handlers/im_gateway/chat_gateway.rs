@@ -439,72 +439,9 @@ pub(super) async fn handle_chat_gateway(
         };
     }
 
-    if rest == "/adapters/chatgpt-web/auth/status" {
-        return match *req.method() {
-            Method::GET => {
-                let runner_id = query_param(req.uri().query(), "runnerId");
-                match chatgpt_web_settings(_service, runner_id.as_deref()) {
-                    Ok(settings) => {
-                        match crate::im_gateway::chatgpt_web::auth_status(&settings).await {
-                            Ok(status) => json_response(&status),
-                            Err(error) => error_response(StatusCode::BAD_REQUEST, &error),
-                        }
-                    }
-                    Err(error) => error_response(StatusCode::BAD_REQUEST, &error),
-                }
-            }
-            _ => method_not_allowed(),
-        };
-    }
-
-    if rest == "/adapters/chatgpt-web/auth/open" {
-        return match *req.method() {
-            Method::POST => {
-                let payload: serde_json::Value = match read_body_json(req).await {
-                    Ok(value) => value,
-                    Err(response) => return response,
-                };
-                let runner_id = payload
-                    .get("runnerId")
-                    .and_then(|value| value.as_str())
-                    .map(ToString::to_string);
-                match chatgpt_web_settings(_service, runner_id.as_deref()) {
-                    Ok(settings) => {
-                        match crate::im_gateway::chatgpt_web::open_login(&settings).await {
-                            Ok(status) => json_response(&status),
-                            Err(error) => error_response(StatusCode::BAD_REQUEST, &error),
-                        }
-                    }
-                    Err(error) => error_response(StatusCode::BAD_REQUEST, &error),
-                }
-            }
-            _ => method_not_allowed(),
-        };
-    }
-
-    if rest == "/adapters/chatgpt-web/auth/stop" {
-        return match *req.method() {
-            Method::POST => {
-                let payload: serde_json::Value = match read_body_json(req).await {
-                    Ok(value) => value,
-                    Err(response) => return response,
-                };
-                let runner_id = payload
-                    .get("runnerId")
-                    .and_then(|value| value.as_str())
-                    .map(ToString::to_string);
-                match chatgpt_web_settings(_service, runner_id.as_deref()) {
-                    Ok(settings) => {
-                        match crate::im_gateway::chatgpt_web::stop_login(&settings).await {
-                            Ok(status) => json_response(&status),
-                            Err(error) => error_response(StatusCode::BAD_REQUEST, &error),
-                        }
-                    }
-                    Err(error) => error_response(StatusCode::BAD_REQUEST, &error),
-                }
-            }
-            _ => method_not_allowed(),
-        };
+    if rest.starts_with("/adapters/chatgpt-web/") {
+        return error_response(StatusCode::GONE,
+            "ChatGPT Web Runner has been removed. Configure another Runner explicitly; stored sessions and credentials are preserved.");
     }
 
     if rest == "/runner-calls/stream" {
@@ -547,6 +484,11 @@ pub(super) async fn handle_chat_gateway(
                     request,
                     &effective.settings,
                 );
+                if let Err(error) =
+                    crate::im_gateway::external_cli::validate_supported_adapter(&request.adapter)
+                {
+                    return error_response(StatusCode::BAD_REQUEST, &error);
+                }
                 if is_clear_session_command(&request.message) {
                     return clear_chat_gateway_session_response(
                         _service,
@@ -599,22 +541,21 @@ pub(super) async fn handle_chat_gateway(
                             Some(effective.runner_id.clone()),
                         )
                     {
-                        if request.adapter != crate::im_gateway::chatgpt_web::ADAPTER_ID {
-                            if let Some(guide_message) = request
-                                .message
-                                .trim()
-                                .strip_prefix("/g ")
-                                .map(str::trim)
-                                .filter(|message| !message.is_empty())
-                            {
-                                return guide_external_cli_stream_response(
-                                    _service,
-                                    session_key,
-                                    guide_message,
-                                )
-                                .await;
-                            }
+                        if let Some(guide_message) = request
+                            .message
+                            .trim()
+                            .strip_prefix("/g ")
+                            .map(str::trim)
+                            .filter(|message| !message.is_empty())
+                        {
+                            return guide_external_cli_stream_response(
+                                _service,
+                                session_key,
+                                guide_message,
+                            )
+                            .await;
                         }
+
                         return queue_external_cli_stream_response(
                             _service,
                             session_key,
@@ -673,8 +614,6 @@ pub(super) async fn handle_chat_gateway(
                             )))))
                             .await;
                         let request_snapshot = current_request.clone();
-                        let streams_progress =
-                            current_request.adapter != crate::im_gateway::chatgpt_web::ADAPTER_ID;
                         let (progress_tx, mut progress_rx) = tokio::sync::mpsc::channel::<
                             crate::im_gateway::external_cli::ExternalCliProgressEvent,
                         >(
@@ -748,29 +687,7 @@ pub(super) async fn handle_chat_gateway(
                                     &runner_id_for_state,
                                     "web_turn_finished",
                                 );
-                                if !streams_progress {
-                                    for event in &result.events {
-                                        if let Some(progress) = web_im_progress.as_ref() {
-                                            progress.forwarder.forward(event);
-                                        }
-                                        if matches!(
-                                            event.event_type,
-                                            crate::im_gateway::external_cli::ExternalCliProgressEventType::RunStarted
-                                                | crate::im_gateway::external_cli::ExternalCliProgressEventType::RunFinished
-                                        ) {
-                                            continue;
-                                        }
-                                        let line = serde_json::to_string(
-                                            &external_cli_progress_event_payload(event),
-                                        )
-                                        .unwrap_or_else(|_| "{}".to_string());
-                                        let _ = tx
-                                            .send(Ok(hyper::body::Frame::data(bytes::Bytes::from(
-                                                format!("{line}\n"),
-                                            ))))
-                                            .await;
-                                    }
-                                }
+
                                 let finished = serde_json::json!({"eventType":"run_finished","runId":result.run_id,"status":result.status,"response":result.response});
                                 let _ = tx
                                     .send(Ok(hyper::body::Frame::data(bytes::Bytes::from(
@@ -902,6 +819,11 @@ pub(super) async fn handle_chat_gateway(
                     request,
                     &effective.settings,
                 );
+                if let Err(error) =
+                    crate::im_gateway::external_cli::validate_supported_adapter(&request.adapter)
+                {
+                    return error_response(StatusCode::BAD_REQUEST, &error);
+                }
                 if is_clear_session_command(&request.message) {
                     return clear_chat_gateway_session_response(
                         _service,
@@ -1178,6 +1100,7 @@ fn resolve_runner_call_target(
         None,
         Some(target_runner_id),
     );
+    crate::im_gateway::external_cli::validate_supported_adapter(&effective.settings.adapter)?;
     if !effective.settings.enabled {
         return Err(format!("runner '{}' is not enabled", effective.runner_id));
     }
@@ -1275,7 +1198,6 @@ async fn runner_call_stream_response(
             &effective.runner_id,
             "web_runner_call_started",
         );
-        let streams_progress = request.adapter != crate::im_gateway::chatgpt_web::ADAPTER_ID;
         let (progress_tx, mut progress_rx) = tokio::sync::mpsc::channel::<
             crate::im_gateway::external_cli::ExternalCliProgressEvent,
         >(
@@ -1324,12 +1246,7 @@ async fn runner_call_stream_response(
                     &effective.runner_id,
                     "web_runner_call_finished",
                 );
-                if !streams_progress {
-                    for event in &result.events {
-                        let line = external_cli_progress_event_payload(event);
-                        let _ = send_ndjson_event(&tx, &line).await;
-                    }
-                }
+
                 remember_runner_call_for_caller(
                     &service_agent_sessions,
                     &caller_scope,
@@ -2036,9 +1953,7 @@ async fn clear_chat_gateway_session_response(
     service.agent_session_manager.clear_session(session_key);
     // Drop messages that arrived while Stop was in flight.
     service.queue_manager.clear_session(session_key);
-    if request.adapter == crate::im_gateway::chatgpt_web::ADAPTER_ID {
-        crate::im_gateway::chatgpt_web::clear_session_conversation(session_key).await;
-    }
+
     clear_persisted_agent_session_state(session_key, Some(&request.adapter), Some(runner_id));
     let payload = serde_json::json!({
         "success": true,
@@ -3228,29 +3143,7 @@ fn apply_agent_instructions_to_external_cli_request(
         );
 }
 
-fn chatgpt_web_settings(
-    service: &ImGatewayService,
-    runner_id: Option<&str>,
-) -> Result<crate::im_gateway::external_cli::ExternalCliAgentSettings, String> {
-    let config = service.external_cli_config_store.load();
-    let runner_id = runner_id
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or(config.default_runner_id.as_str());
-    let settings = config
-        .runners
-        .get(runner_id)
-        .cloned()
-        .ok_or_else(|| format!("runner '{runner_id}' not found"))?;
-    if settings.adapter != crate::im_gateway::chatgpt_web::ADAPTER_ID {
-        return Err(format!(
-            "runner '{}' uses adapter '{}', not chatgpt_web",
-            runner_id, settings.adapter
-        ));
-    }
-    Ok(settings)
-}
-
+#[cfg(test)]
 fn query_param(query: Option<&str>, name: &str) -> Option<String> {
     query.and_then(|query| {
         url::form_urlencoded::parse(query.as_bytes())
@@ -3263,6 +3156,28 @@ fn query_param(query: Option<&str>, name: &str) -> Option<String> {
 mod tests {
     use super::*;
     use http_body_util::BodyExt;
+
+    #[tokio::test]
+    async fn retired_web_login_endpoints_are_gone() {
+        for rest in [
+            "/adapters/chatgpt-web/auth/status",
+            "/adapters/chatgpt-web/auth/open",
+            "/adapters/chatgpt-web/auth/stop",
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let service = Arc::new(ImGatewayService::new(temp.path()));
+            let (url, server) = spawn_chat_gateway_test_server(service, rest).await;
+            let response = reqwest::Client::new()
+                .post(url)
+                .json(&serde_json::json!({"runnerId":"web"}))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::GONE);
+            assert!(response.text().await.unwrap().contains("removed"));
+            server.abort();
+        }
+    }
 
     pub(super) async fn spawn_chat_gateway_test_server(
         service: crate::SharedImGatewayService,
@@ -3852,7 +3767,7 @@ mod tests {
             runner_id: Some("web".to_string()),
             session_key: Some("web-refresh-running-session".to_string()),
             runtime: "local".to_string(),
-            adapter: "chatgpt_web".to_string(),
+            adapter: "custom_cli".to_string(),
             work_dir: Some(std::path::PathBuf::from("/tmp/web-workspace")),
             instructions: None,
             adapter_config: Default::default(),
@@ -3864,7 +3779,7 @@ mod tests {
         remember_external_cli_started_state(&request, "web");
         let running_state = crate::im_gateway::session_state::load_session_state(
             "web-refresh-running-session",
-            "chatgpt_web",
+            "custom_cli",
             Some("web"),
         )
         .expect("running state should be persisted immediately");
@@ -3901,7 +3816,7 @@ mod tests {
 
         let finished_state = crate::im_gateway::session_state::load_session_state(
             "web-refresh-running-session",
-            "chatgpt_web",
+            "custom_cli",
             Some("web"),
         )
         .expect("finished state");
@@ -4012,7 +3927,7 @@ mod tests {
             runner_id: Some("web".to_string()),
             session_key: Some(session_key.to_string()),
             runtime: "external_cli".to_string(),
-            adapter: "chatgpt_web".to_string(),
+            adapter: "custom_cli".to_string(),
             work_dir: Some(std::path::PathBuf::from("/tmp/web-workspace")),
             instructions: None,
             adapter_config: Default::default(),
@@ -4606,7 +4521,7 @@ mod tests {
             runner_id: Some("gpt".to_string()),
             session_key: Some(session_key.to_string()),
             runtime: "external_cli".to_string(),
-            adapter: "chatgpt_web".to_string(),
+            adapter: "custom_cli".to_string(),
             work_dir: Some(std::path::PathBuf::from("/tmp/web-workspace")),
             instructions: None,
             adapter_config: Default::default(),
@@ -4618,7 +4533,7 @@ mod tests {
         remember_external_cli_started_state(&request, "gpt");
         let started_state = crate::im_gateway::session_state::load_session_state(
             session_key,
-            "chatgpt_web",
+            "custom_cli",
             Some("gpt"),
         )
         .expect("started state");
@@ -4675,7 +4590,7 @@ mod tests {
         }));
         let finished_state = crate::im_gateway::session_state::load_session_state(
             session_key,
-            "chatgpt_web",
+            "custom_cli",
             Some("gpt"),
         )
         .expect("finished state");
@@ -4808,7 +4723,7 @@ mod tests {
         let manager = std::sync::Arc::new(bifrost_agent::AgentSessionManager::new(60));
         let source_session_key = "source-web-history";
         let caller_scope = (
-            "chatgpt_web".to_string(),
+            "custom_cli".to_string(),
             Some("web".to_string()),
             "web".to_string(),
         );
@@ -4821,7 +4736,7 @@ mod tests {
                 serde_json::json!({
                     "source": "admin-api",
                     "runtime": "external_cli",
-                    "adapter": "chatgpt_web",
+                    "adapter": "custom_cli",
                     "runner_id": "web",
                 }),
             )
@@ -4836,7 +4751,7 @@ mod tests {
         crate::im_gateway::session_state::remember_session_state(
             crate::im_gateway::session_state::ImAgentSessionState {
                 session_key: source_session_key.to_string(),
-                adapter: "chatgpt_web".to_string(),
+                adapter: "custom_cli".to_string(),
                 runner_id: Some("web".to_string()),
                 history_path: Some(history_path.clone()),
                 ..crate::im_gateway::session_state::ImAgentSessionState::default()
@@ -4850,7 +4765,7 @@ mod tests {
             source_session_key,
             "call-visible-history",
             "web",
-            "chatgpt_web",
+            "custom_cli",
             "generate four images",
             1_000,
         );
@@ -4860,7 +4775,7 @@ mod tests {
             source_session_key,
             "call-visible-history",
             "web",
-            "chatgpt_web",
+            "custom_cli",
             Some("run-visible-history"),
             "generate four images",
             "generated four images",
@@ -4872,7 +4787,7 @@ mod tests {
             .expect("load parent history");
         let finished_state = crate::im_gateway::session_state::load_session_state(
             source_session_key,
-            "chatgpt_web",
+            "custom_cli",
             Some("web"),
         )
         .expect("finished parent state");
@@ -4918,7 +4833,7 @@ mod tests {
                 call_id: "call-import".to_string(),
                 source_session_key: "external-import-session".to_string(),
                 target_runner_id: "web".to_string(),
-                target_adapter: "chatgpt_web".to_string(),
+                target_adapter: "custom_cli".to_string(),
                 user_message: "ask web".to_string(),
                 response: "web answer".to_string(),
                 created_at: 1,
@@ -5185,7 +5100,7 @@ mod coverage_boost {
             runner_id: Some("web".to_string()),
             session_key: Some("session-key".to_string()),
             runtime: "local".to_string(),
-            adapter: "chatgpt_web".to_string(),
+            adapter: "custom_cli".to_string(),
             work_dir: None,
             instructions: None,
             adapter_config: Default::default(),
@@ -5220,7 +5135,7 @@ mod coverage_boost {
         let json = r#"{
             "callerSessionKey": " source ",
             "callerRunnerId": " web ",
-            "callerRunnerAdapter": " chatgpt_web ",
+            "callerRunnerAdapter": " custom_cli ",
             "targetRunnerId": "codex",
             "message": " hi ",
             "images": [
@@ -5237,7 +5152,7 @@ mod coverage_boost {
 
         assert_eq!(req.caller_session_key, " source ");
         assert_eq!(req.caller_runner_id.as_deref(), Some(" web "));
-        assert_eq!(req.caller_runner_adapter.as_deref(), Some(" chatgpt_web "));
+        assert_eq!(req.caller_runner_adapter.as_deref(), Some(" custom_cli "));
         assert_eq!(req.target_runner_id, "codex");
         assert_eq!(req.message, " hi ");
         assert_eq!(req.images.len(), 1);
@@ -5335,8 +5250,8 @@ mod coverage_boost {
         assert_eq!(runner, "external");
 
         let (adapter, runner_opt, runner) =
-            caller_runner_scope(Some(" codex "), Some(" chatgpt_web "));
-        assert_eq!(adapter, "chatgpt_web");
+            caller_runner_scope(Some(" codex "), Some(" custom_cli "));
+        assert_eq!(adapter, "custom_cli");
         assert_eq!(runner_opt.as_deref(), Some("codex"));
         assert_eq!(runner, "codex");
 
@@ -5710,64 +5625,6 @@ mod coverage_boost {
     }
 
     #[test]
-    fn chatgpt_web_settings_uses_default_runner_and_validates_adapter() {
-        let harness = TestAdminState::builder().build();
-        let service = harness.im_gateway_service();
-
-        // Unknown runner id -> not found
-        let err = chatgpt_web_settings(&service, Some("missing")).unwrap_err();
-        assert!(err.contains("runner 'missing' not found"));
-
-        // Non-chatgpt_web adapter -> error
-        let mut runners = std::collections::BTreeMap::new();
-        runners.insert(
-            "web".to_string(),
-            crate::im_gateway::external_cli::ExternalCliAgentSettings {
-                enabled: true,
-                adapter: "codex".to_string(),
-                ..Default::default()
-            },
-        );
-        let config = crate::im_gateway::external_cli::ExternalCliGatewayConfig {
-            version: 1,
-            default_runner_id: "web".to_string(),
-            runners,
-            channels: std::collections::BTreeMap::new(),
-        };
-        service
-            .external_cli_config_store
-            .save(config)
-            .expect("save config");
-        let err = chatgpt_web_settings(&service, Some("web")).unwrap_err();
-        assert!(err.contains("uses adapter 'codex', not chatgpt_web"));
-
-        // Valid chatgpt_web runner with default id
-        let mut runners = std::collections::BTreeMap::new();
-        runners.insert(
-            "web".to_string(),
-            crate::im_gateway::external_cli::ExternalCliAgentSettings {
-                enabled: true,
-                adapter: crate::im_gateway::chatgpt_web::ADAPTER_ID.to_string(),
-                ..Default::default()
-            },
-        );
-        let config = crate::im_gateway::external_cli::ExternalCliGatewayConfig {
-            version: 1,
-            default_runner_id: "web".to_string(),
-            runners,
-            channels: std::collections::BTreeMap::new(),
-        };
-        service
-            .external_cli_config_store
-            .save(config)
-            .expect("save config");
-
-        let settings = chatgpt_web_settings(&service, None).expect("settings");
-        assert!(settings.enabled);
-        assert_eq!(settings.adapter, crate::im_gateway::chatgpt_web::ADAPTER_ID);
-    }
-
-    #[test]
     fn external_progress_tool_name_and_arguments_and_call_id() {
         use crate::im_gateway::external_cli::ExternalCliProgressEventType as EventType;
 
@@ -5842,7 +5699,7 @@ mod coverage_boost {
                 call_id: "call-import".to_string(),
                 source_session_key: "external-import-session-2".to_string(),
                 target_runner_id: "web".to_string(),
-                target_adapter: "chatgpt_web".to_string(),
+                target_adapter: "custom_cli".to_string(),
                 user_message: "ask web".to_string(),
                 response: "web answer".to_string(),
                 created_at: 1,

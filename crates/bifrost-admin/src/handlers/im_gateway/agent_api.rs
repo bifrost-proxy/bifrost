@@ -1456,7 +1456,7 @@ fn active_external_worker_jobs_from(
                 job.operation.strip_prefix("external_cli.run:")
             }
             crate::worker_runtime::WorkerKind::Browser if job.operation == "browser.run" => {
-                Some(crate::im_gateway::chatgpt_web::ADAPTER_ID)
+                Some("chatgpt_web")
             }
             crate::worker_runtime::WorkerKind::Browser => {
                 job.operation.strip_prefix("external_cli.run:")
@@ -2465,10 +2465,7 @@ mod tests {
         let active = active_external_worker_jobs_from(jobs);
         assert_eq!(active.len(), 2);
         assert_eq!(active[session_key].adapter, "traex");
-        assert_eq!(
-            active[browser_session_key].adapter,
-            crate::im_gateway::chatgpt_web::ADAPTER_ID
-        );
+        assert_eq!(active[browser_session_key].adapter, "chatgpt_web");
 
         let mut unified = vec![
             serde_json::json!({
@@ -2645,7 +2642,7 @@ mod tests {
 
     #[test]
     fn external_runners_with_run_id_without_terminal_history_stay_running_for_remote_semantics() {
-        for adapter in ["codex", "chatgpt_web", "custom_cli"] {
+        for adapter in ["codex", "custom_cli", "custom_cli"] {
             let mut state = persisted_state("external-running", adapter, "running");
             state.latest_run_id = Some("run-123".to_string());
 
@@ -2661,7 +2658,7 @@ mod tests {
 
     #[test]
     fn external_runners_without_run_id_project_stale_running_to_completed() {
-        for adapter in ["codex", "chatgpt_web", "custom_cli"] {
+        for adapter in ["codex", "custom_cli", "custom_cli"] {
             let state = persisted_state("external-stale-running", adapter, "running");
 
             let projection = persisted_session_projection(&state, None);
@@ -2764,7 +2761,7 @@ mod tests {
         crate::im_gateway::session_state::remember_session_state(
             crate::im_gateway::session_state::ImAgentSessionState {
                 session_key: session_key.to_string(),
-                adapter: "chatgpt_web".to_string(),
+                adapter: "custom_cli".to_string(),
                 runner_id: Some("gpt".to_string()),
                 title: Some("Canonical detail".to_string()),
                 last_user_message: Some("stale user".to_string()),
@@ -2796,7 +2793,7 @@ mod tests {
             .block_on(external_runner_session_detail(session_key))
             .expect("detail");
 
-        assert_eq!(detail.runner_type.as_deref(), Some("chatgpt_web"));
+        assert_eq!(detail.runner_type.as_deref(), Some("custom_cli"));
         assert_eq!(detail.runner_id.as_deref(), Some("gpt"));
         assert_eq!(detail.message_count, 2);
         assert_eq!(detail.messages[0].content, "canonical user");
@@ -2945,13 +2942,13 @@ mod tests {
         for turn in 1..=5 {
             messages.push(crate::im_gateway::session_state::ImAgentSessionMessage {
                 role: "user".to_string(),
-                content: format!("ChatGPT Web round {turn}"),
+                content: format!("Custom Runner round {turn}"),
                 timestamp: Some(1_770_000_000 + turn * 2),
                 content_parts: None,
             });
             messages.push(crate::im_gateway::session_state::ImAgentSessionMessage {
                 role: "assistant".to_string(),
-                content: format!("ChatGPT Web answer {turn}"),
+                content: format!("Custom Runner answer {turn}"),
                 timestamp: Some(1_770_000_000 + turn * 2 + 1),
                 content_parts: None,
             });
@@ -2959,13 +2956,13 @@ mod tests {
 
         crate::im_gateway::session_state::remember_session_state(
             crate::im_gateway::session_state::ImAgentSessionState {
-                session_key: "chatgpt-web-five-turns".to_string(),
-                adapter: "chatgpt_web".to_string(),
+                session_key: "custom-runner-five-turns".to_string(),
+                adapter: "custom_cli".to_string(),
                 runner_id: Some("web".to_string()),
                 external_conversation_id: Some("conversation-123".to_string()),
-                title: Some("ChatGPT Web round 1".to_string()),
-                last_user_message: Some("ChatGPT Web round 5".to_string()),
-                last_response: Some("ChatGPT Web answer 5".to_string()),
+                title: Some("Custom Runner round 1".to_string()),
+                last_user_message: Some("Custom Runner round 5".to_string()),
+                last_response: Some("Custom Runner answer 5".to_string()),
                 status: Some("succeeded".to_string()),
                 messages,
                 updated_at: 1_770_000_020_000,
@@ -2976,11 +2973,11 @@ mod tests {
 
         let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
         let detail = runtime
-            .block_on(external_runner_session_detail("chatgpt-web-five-turns"))
+            .block_on(external_runner_session_detail("custom-runner-five-turns"))
             .expect("detail");
 
-        assert_eq!(detail.session_key, "chatgpt-web-five-turns");
-        assert_eq!(detail.runner_type.as_deref(), Some("chatgpt_web"));
+        assert_eq!(detail.session_key, "custom-runner-five-turns");
+        assert_eq!(detail.runner_type.as_deref(), Some("custom_cli"));
         assert_eq!(
             detail.external_conversation_id.as_deref(),
             Some("conversation-123")
@@ -2989,8 +2986,8 @@ mod tests {
         assert_eq!(detail.user_turn_count, 5);
         assert_eq!(detail.created_at, 1_770_000_002);
         assert_eq!(detail.last_active_at, 1_770_000_020);
-        assert_eq!(detail.messages[0].content, "ChatGPT Web round 1");
-        assert_eq!(detail.messages[9].content, "ChatGPT Web answer 5");
+        assert_eq!(detail.messages[0].content, "Custom Runner round 1");
+        assert_eq!(detail.messages[9].content, "Custom Runner answer 5");
     }
 
     #[test]
@@ -3140,7 +3137,7 @@ mod tests {
     }
 
     #[test]
-    fn active_history_detail_uses_chatgpt_web_binding_from_history_state() {
+    fn active_history_detail_uses_custom_cli_binding_from_history_state() {
         let _lock = AGENT_API_ENV_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -3151,7 +3148,7 @@ mod tests {
         let history_path = sessions_dir.join("session-active-web-runner-1779690000.jsonl");
         std::fs::write(
             &history_path,
-            r#"{"timestamp":1,"event_type":"session_start","session_key":"active-web-runner","content":{"source":"admin-api","runtime":"external_cli","adapter":"chatgpt_web","runner_id":"web","work_dir":"/tmp/work"}}"#
+            r#"{"timestamp":1,"event_type":"session_start","session_key":"active-web-runner","content":{"source":"admin-api","runtime":"external_cli","adapter":"custom_cli","runner_id":"web","work_dir":"/tmp/work"}}"#
                 .to_string()
                 + "\n"
                 + r#"{"timestamp":2,"event_type":"assistant_message","session_key":"active-web-runner","content":{"message":"web answer"}}"#
@@ -3161,7 +3158,7 @@ mod tests {
         crate::im_gateway::session_state::remember_session_state(
             crate::im_gateway::session_state::ImAgentSessionState {
                 session_key: "active-web-runner".to_string(),
-                adapter: "chatgpt_web".to_string(),
+                adapter: "custom_cli".to_string(),
                 runner_id: Some("web".to_string()),
                 external_conversation_id: Some("conversation-web".to_string()),
                 history_path: Some(history_path.display().to_string()),
@@ -3204,7 +3201,7 @@ mod tests {
         };
 
         enrich_detail_with_history_runner_metadata(&mut detail);
-        assert_eq!(detail.runner_type.as_deref(), Some("chatgpt_web"));
+        assert_eq!(detail.runner_type.as_deref(), Some("custom_cli"));
         assert_eq!(detail.runner_id.as_deref(), Some("web"));
         assert_eq!(
             detail.external_conversation_id.as_deref(),
@@ -3217,10 +3214,10 @@ mod tests {
     fn is_external_runner_metadata_requires_a_nonempty_type_or_id() {
         assert!(!is_external_runner_metadata(None, None));
         assert!(!is_external_runner_metadata(Some(""), Some("  ")));
-        assert!(is_external_runner_metadata(Some("chatgpt_web"), None));
+        assert!(is_external_runner_metadata(Some("custom_cli"), None));
         assert!(is_external_runner_metadata(None, Some("web-main")));
         assert!(is_external_runner_metadata(
-            Some("chatgpt_web"),
+            Some("custom_cli"),
             Some("bifrost")
         ));
     }
@@ -3228,7 +3225,7 @@ mod tests {
     #[test]
     fn merge_history_runner_metadata_prefers_external_history() {
         let summary = bifrost_agent::persistence::SessionFileSummary {
-            runner_type: Some("chatgpt_web".to_string()),
+            runner_type: Some("custom_cli".to_string()),
             runner_id: Some("web-main".to_string()),
             ..Default::default()
         };
@@ -3238,21 +3235,20 @@ mod tests {
             Some("Codex".to_string()),
             Some(&summary),
         );
-        assert_eq!(r_type.as_deref(), Some("chatgpt_web"));
+        assert_eq!(r_type.as_deref(), Some("custom_cli"));
         assert_eq!(r_id.as_deref(), Some("web-main"));
 
         let (r_type2, r_id2) = merge_history_runner_metadata(
-            Some("chatgpt_web".to_string()),
+            Some("custom_cli".to_string()),
             Some("web-main".to_string()),
             None,
         );
-        assert_eq!(r_type2.as_deref(), Some("chatgpt_web"));
+        assert_eq!(r_type2.as_deref(), Some("custom_cli"));
         assert_eq!(r_id2.as_deref(), Some("web-main"));
 
         // No history -> original values preserved.
-        let (r_type3, r_id3) =
-            merge_history_runner_metadata(Some("chatgpt_web".into()), None, None);
-        assert_eq!(r_type3.as_deref(), Some("chatgpt_web"));
+        let (r_type3, r_id3) = merge_history_runner_metadata(Some("custom_cli".into()), None, None);
+        assert_eq!(r_type3.as_deref(), Some("custom_cli"));
         assert!(r_id3.is_none());
     }
 }
@@ -3958,7 +3954,7 @@ mod coverage_boost_v2 {
         crate::im_gateway::session_state::remember_session_state(
             crate::im_gateway::session_state::ImAgentSessionState {
                 session_key: "summary-persisted-messages".to_string(),
-                adapter: "chatgpt_web".to_string(),
+                adapter: "custom_cli".to_string(),
                 runner_id: Some("chatgpt".to_string()),
                 title: Some("Persisted messages".to_string()),
                 latest_run_id: Some("run-summary-messages".to_string()),

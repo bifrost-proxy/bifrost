@@ -90,16 +90,7 @@ http://127.0.0.1:9900/_bifrost/
 bifrost install-skill -y
 ```
 
-ASR Daily Agent 支持把一篇日报拆成多个独立研究问题，并由 ChatGPT Web 分别创建会话。研究 fan-out 可选配置 `chatgpt_project_url`；配置后，新会话会归档到指定 ChatGPT Project，同时仍强制使用 Chat 模式和 Pro 模型：
-
-```json
-{
-  "max_questions": 8,
-  "chatgpt_interface_mode": "chat",
-  "chatgpt_model": "pro",
-  "chatgpt_project_url": "https://chatgpt.com/g/g-p-<project-id>/project"
-}
-```
+ASR Daily Agent 支持把日报拆成独立研究问题，由明确配置的 Codex、Traex、Claude Code 或自定义 CLI Runner 执行。ChatGPT Web Runner 已移除；[迁移说明](design/remove-chatgpt-web-runner.md)。
 
 完整 Agent 组合、研究 manifest 和失败边界见 [`design/asr-daily-agent-pipeline.md`](design/asr-daily-agent-pipeline.md)。
 

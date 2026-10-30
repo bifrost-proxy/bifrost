@@ -667,10 +667,7 @@
    ```bash
    rg -n "IM delivery|IM Channel|im_delivery.channel|Send policy|IM 发送逻辑|未绑定 IM|绑定 IM" design/asr-daily-agent-runner.md
    ```
-7. 检查方案覆盖 ChatGPT Web 无法读取 `AGENTS.md`、但需要保持同一个长期 conversation 的特殊消息组织：
-   ```bash
-   rg -n "Runner 消息组织差异|ChatGPT Web 不能读本地|每个 ASR 任务一个固定 conversation|第一条消息|第二条消息|asr-daily:<task_id>|Reset ChatGPT Web conversation" design/asr-daily-agent-runner.md
-   ```
+
 8. 检查方案覆盖已处理文档记录、变更整理和不同 Runner 的投递策略：
    ```bash
    rg -n "DailyAgentChangePlanner|daily_agent_processed.json|已处理文档记录|unchanged|appended|rewritten|IncrementalPayload|FileList|增量文本|文件清单" design/asr-daily-agent-runner.md
@@ -685,7 +682,6 @@
 - 方案明确 ASR run 仍在 processing 时不会启动 Daily Agent；如果本轮没有 daily markdown 新增或变更，Daily Agent 只记录 skipped，不调用外部 Runner。
 - 方案明确通过 `DailyAgentChangePlanner` 和 `daily_agent_processed.json` 记录之前处理过的 `YYYY-MM-DD.md`，相同 source hash 的 unchanged 文档不会再次发进 Runner loop。
 - 方案明确 daily 文件 append-only 增长时只投递新增 tail；hash 变化但不是 append 时投递 diff/changed ranges；Runner 成功后才更新 processed state。
-- 方案明确 ChatGPT Web 不能读本地文件，所以只接收 change plan 中新增/变更的增量文本或 diff，不重复发送 unchanged 文档。
 - 方案明确 Codex 等文件型外部 Runner 可以读工作目录，所以只给它们更新文件清单、变化类型、hash 和目标 report 路径，由它们自行检查文件并刷新任务。
 - 方案明确手动 `Run now` 是补跑/调试入口，不替代默认的 ASR completion hook。
 - 方案明确 WebUI 和 API 都只使用单一 `runner` 字段，选项来自 AI -> Agent -> Runners 中已配置的 External CLI Runner，并说明 trigger policy、timeout、session key 的保存方式。
@@ -696,8 +692,6 @@
 - 方案明确 WebUI 和 API 都只使用单一 `im_delivery.channel` 字段绑定可发送通道，成功处理后的结论按 send policy 通过 IM Gateway 发送出去。
 - 方案明确 IM 发送失败只记录 `last_send_error` 和 run detail，不回滚 report，不影响 ASR 转写状态。
 - 方案明确 Codex 等文件型外部 Runner 可以直接读取 daily 目录里的 `AGENTS.md`，不需要每次把全文塞进消息。
-- 方案明确 ChatGPT Web 不能读取本地 `AGENTS.md`，但默认每个 ASR 任务保持同一个长期 conversation。
-- 方案明确 ChatGPT Web 第一次处理该任务时第一条消息注入 `AGENTS.md` 全文，第二条消息发送 change plan 中需要处理的新增/变更内容；后续每天只发送新增 tail、diff 或 changed ranges。
 - 方案明确只有用户手动 reset、切换 session key 或显式要求新对话时才切换 conversation。
 
 ### TC-ASPB-30 Daily Agent Runner 实现闭环回归
@@ -723,7 +717,7 @@
    pnpm --dir web exec playwright test tests/ui/asr-daily-agent-runner.spec.ts
    pnpm --dir web run build
    ```
-5. 复核任务创建、failed chunk retry、IM 配置、ChatGPT Web/Codex 投递策略相关 diff：
+5. 复核任务创建、failed chunk retry、IM 配置/Codex 投递策略相关 diff：
    ```bash
    git diff -- crates/bifrost-admin/src/handlers/asr_jobs/api.rs crates/bifrost-admin/src/handlers/asr_jobs/retry.rs crates/bifrost-admin/src/handlers/asr_jobs/daily_agent.rs crates/bifrost-admin/src/handlers/asr_jobs/daily_agent_im.rs crates/bifrost-admin/src/handlers/asr_jobs/daily_agent_api.rs web/src/pages/ASR/components/DailyAgentTab.tsx web/src/api/asr.ts
    ```
@@ -759,7 +753,6 @@
 
 - `daily_agent.rs` 小于 1500 行，API handler 和 IM 发送逻辑拆分到独立文件。
 - 已配置的外部 runner 可进入统一执行路径，不再返回 `not yet fully integrated`。
-- External CLI `codex` 等文件型 runner 只接收文件清单、变化类型、hash 和目标 report；ChatGPT Web 首轮注入 `AGENTS.md`，后续只发送新增/变更内容。
 - Runner 成功返回但未生成 report 时不会写入 `daily_agent_processed.json`，下次不会被误判为 unchanged。
 - failed chunk retry 刷新 daily markdown 后会排队 Daily Agent。
 - 创建 ASR 任务时初始化 `daily/`、`daily/report/`、`daily/AGENTS.md`，并 best-effort `git init`。
@@ -784,41 +777,6 @@
 - `Agent Instructions (AGENTS.md)` 编辑框不再使用固定 `rows` 高度。
 - 长 `AGENTS.md` 内容会撑高编辑框，页面外层滚动承接长内容。
 - 编辑框内部不出现独立滚动条，用户不需要在输入框内部滚动阅读或编辑。
-
-### TC-ASPB-34 默认目录多文件 ChatGPT Web Daily Agent 与 FullReport IM 分片回归
-
-操作步骤：
-
-1. 使用默认数据目录重启源码服务：
-   ```bash
-   BIFROST_DATA_DIR=/Users/eden/.bifrost cargo run --bin bifrost -- start -p 9900 --unsafe-ssl --no-system-proxy
-   ```
-2. 查询默认任务：
-   ```bash
-   curl -sS 'http://127.0.0.1:9900/_bifrost/api/asr/tasks/76612de33e9740bc92440ce64a98a4cb' | jq '{id,name,daily_agent}'
-   ```
-3. 确认 `daily/` 下存在多个源文件：
-   ```bash
-   find /Users/eden/.bifrost/asr/data/text/76612de33e9740bc92440ce64a98a4cb/daily -maxdepth 1 -name '*.md' -print | sort
-   ```
-4. 强制运行默认任务：
-   ```bash
-   curl -sS -X POST 'http://127.0.0.1:9900/_bifrost/api/asr/tasks/76612de33e9740bc92440ce64a98a4cb/daily-agent/run?force=true'
-   ```
-5. 轮询任务详情，直到 `daily_agent.last_status` 变为 `success` 或 `failed`。
-6. 检查本轮 ChatGPT Web run artifacts：
-   ```bash
-   find /Users/eden/.bifrost/im_gateway/runs -maxdepth 1 -type d -name '<run-prefix>*' -print | sort
-   ```
-7. 检查 `daily/report/*-report.md` 与 IM provider message log。
-
-预期结果：
-
-- 默认任务配置为 `runner=web`，IM delivery 为 `channel=owner:acc`、`mode=full_report`。
-- 强制运行按 daily 文件日期升序逐个处理；每个 ChatGPT Web prompt 只包含一个 `YYYY-MM-DD.md`，不会把多个大文件合成一个巨型 prompt。
-- 每个 ChatGPT Web run 的 `result.json.status` 为 `succeeded`，最终生成对应 `YYYY-MM-DD-report.md`。
-- `full_report` 发送失败时不再降级成 `ASR Daily Agent 完成报告整理` 摘要；超长报告按 `ASR Daily Agent Report X/N` 分片发送，失败时 `last_send_error` 指向具体分片。
-- 如果 Weixin provider 返回 `ret=-2`，任务本身仍可为 `success`，但 `daily_agent.im_delivery.last_send_error` 必须保留真实 IM 失败原因，message log 预览必须是原文报告分片而不是摘要。
 
 ### TC-ASPB-35 Daily Agent Processed Documents report 全屏 Markdown 详情
 
@@ -1117,10 +1075,8 @@ rm -rf ./.bifrost-test-planb
 | 2026-05-18 | TC-ASPB-01 / TC-ASPB-07A / TC-ASPB-07B / TC-ASPB-10 / TC-ASPB-13 | `cargo test -p bifrost-admin asr_cli_invoke --lib`；`cargo test -p bifrost-admin asr_jobs --lib` | PASS：10 个 `asr_cli_invoke` 测试通过，覆盖模型感知 footprint 阈值、`vmmap` 单位解析、physical-footprint 采样间隔边界和 abort check kill 长跑 CLI 子进程；43 个 `asr_jobs` 测试通过，覆盖 force-pause 查询参数、force-pause 必须结合持久 paused 状态、memory-limit event 合并为 root chunk hint、30 秒 chunk/timeline 回归、可中断 ffmpeg 和 normalize/split timeout |
 | 2026-05-18 | TC-ASPB-14 真实 30 分钟 CLI 性能基准 | `cargo build --bin bifrost`；`/usr/bin/time -p target/debug/bifrost ai asr stream-file ~/Downloads/we/TX01_MIC007_20260514_183241_orig.wav --model Qwen3-ASR-1.7B --language chinese >/tmp/bifrost-asr-cli-bench-grace-20260518155114.jsonl 2>/tmp/bifrost-asr-cli-bench-grace-20260518155114.err`；`ps -axo ... | rg 'qwen3_asr_rs/asr|target/debug/bifrost ai asr stream-file'` | PASS：stderr 显示 `Split into 65 chunks (30s each, 2s overlap)`；1801s audio 处理为 65 chunks，内部统计 `210.2s total, RTF=0.117`，`/usr/bin/time` wall time `real 216.77`，低于 5 分钟目标；修复前旧逻辑同样 30s 窗口但第 1 个 chunk 因立即 `vmmap -summary` 采样从 3.5s 膨胀到 9.9s，现已通过首采样 grace 修复；结束后未发现遗留 ASR 子进程 |
 | 2026-05-18 | TC-ASPB-07C 托管 asr-server 启动内存保护 | 默认服务 `target/debug/bifrost start -p 9900 --no-system-proxy`；`POST /api/asr/tasks/a911c68b0f7a43afa29d1863cc02229a/pause?force=true`；`POST /api/asr/service/start?model=Qwen3-ASR-1.7B&language=chinese`；检查 `~/.bifrost/asr/service.json` 与 `ps -o pid,pgid,rss,command -p <pid>`；`POST /api/asr/service/stop`；resume 目录任务 | PASS：目录任务 force-pause 后 running=false 且 processed=2/pending=40/failed=0；Start Service 返回 ready/managed=true，`service.json` 写入 pid=71667、port=51885、managed_by=webui；`ps` 显示 PGID=PID=71667，确认托管 `asr-server` 独立进程组；Stop Service 成功，随后目录任务 resume 为 running=true |
-| 2026-05-18 | 工作区回归复测 | `pnpm --dir web exec tsc -b --pretty false`；`cargo clippy --workspace --all-targets --all-features -- -D warnings`；`cargo test --workspace --all-features`；`cargo fmt --all -- --check` | PASS/PARTIAL：前端类型检查通过；clippy 全绿；workspace all-features 全量测试通过；fmt check 仅被既有非 ASR 文件 `crates/bifrost-admin/src/im_gateway/chatgpt_web/interaction.rs` 的格式差异阻塞，ASR 修改文件已用 rustfmt 2021 格式化 |
 | 2026-05-18 | TC-ASPB-13 真实服务 API 链路 | 临时 `BIFROST_DATA_DIR=/tmp/bifrost-asr-force-pause.* BIFROST_ASR_MAX_FOOTPRINT_MB=3000 cargo run --bin bifrost -- start -p 18892 --unsafe-ssl --no-system-proxy`，创建 `~/Downloads/we` 目录任务，手动 Run 后调用 `POST /_bifrost/api/asr/tasks/<task_id>/pause?force=true` | PASS：pause 响应包含 `force:true`、`paused:true`、`running:true` 和 force-pause 文案；后台清理后 `summary.running=false`。该次在模型 CLI 推理前完成暂停，原生推理中 kill 路径由 `abort_check_kills_running_cli_child` 单测覆盖 |
 | 2026-05-18 | WebUI Force Pause 控制 | `pnpm --dir web exec tsc -b --pretty false`；`pnpm --dir web run build` | PASS：ASR Directory Tasks 列表和详情页新增 Force Pause 按钮，前端类型检查和生产构建通过 |
-| 2026-05-18 | 工作区回归 | `cargo test --workspace --all-features`；`cargo clippy --workspace --all-targets --all-features -- -D warnings`；`cargo fmt --all -- --check` | PARTIAL PASS：workspace all-features 测试全绿，clippy 全绿；fmt check 仅被既有非 ASR 文件 `crates/bifrost-admin/src/im_gateway/chatgpt_web/interaction.rs` 的格式差异阻塞，ASR 修改文件已用 rustfmt 2021 格式化 |
 | 2026-05-18 | TC-ASPB-15 任务详情表开始时间/耗时 | `pnpm --dir web exec tsc -b --pretty false`；Playwright 打开 `http://127.0.0.1:9900/_bifrost/ai?aiSection=tools-asr&asrTask=a911c68b0f7a43afa29d1863cc02229a`；截图 `/tmp/bifrost-asr-task-detail-timing.png` | PASS：任务文件表列头包含 `Audio`、`Started`、`Elapsed`、`Finished`；真实 API 中当前 processing 文件包含新的 `started_at_ms`，UI 表格可显示耗时 |
 | 2026-05-19 | TC-ASPB-16A 任务详情默认优先展示未完成文件并支持状态筛选 | `cargo test -p bifrost-admin task_detail_sorts_unfinished_files_before_successes --lib`；`pnpm --dir web exec tsc -b --pretty false`；`pnpm --dir web build`；`cargo build --bin bifrost`；重启 9900 后打开 `http://127.0.0.1:9900/_bifrost/ai?aiSection=tools-asr&asrTask=a911c68b0f7a43afa29d1863cc02229a`；切换 `Pending (30)`、`Completed (42)`、`Failed (0)`、`All (72)` | PASS：API 返回 `paused=true`、`summary.discovered=72/processed=42/pending=30/failed=0/running=false`，`files[0..5]` 均为 `pending`；WebUI 顶部显示 `Processing (0)`、`Pending (30)`、`Completed (42)`、`Failed (0)`、`All (72)`；默认 `All` 显示 `Showing 72 of 72 files` 且第一页展示未处理录音；切到 `Pending` 显示 `Showing 30 of 72 files`；切到 `Completed` 显示 `Showing 42 of 72 files`；切到 `Failed` 显示 `Showing 0 of 72 files` 和空态 |
 | 2026-05-18 | TC-ASPB-16 服务重启后孤儿 processing 恢复 pending | `cargo build --bin bifrost`；使用临时 `BIFROST_DATA_DIR=/tmp/bifrost-asr-orphan.*` 和随机端口启动 `target/debug/bifrost start --unsafe-ssl --no-system-proxy`，预置 `files.json` 中 `status=processing/started_at_ms=123/progress=29/65/error=old transient error` 后访问 `/api/asr/tasks/orphan-task` | PASS：启动后的 API 返回该文件 `status=pending`，`started_at_ms/progress_current/progress_total/error` 均为 null，`summary.running=false` 且 `summary.pending=1`；临时服务和数据目录已清理 |
@@ -1128,10 +1084,8 @@ rm -rf ./.bifrost-test-planb
 | 2026-05-18 | TC-ASPB-17 默认性能策略切换 | `cargo test -p bifrost-admin runtime_strategy_defaults_to_reuse_per_file_for_old_task_json --lib`；临时 `BIFROST_DATA_DIR=/tmp/bifrost-asr-default-runtime.* cargo run --quiet --bin bifrost -- start -p 61973 --unsafe-ssl --no-system-proxy` 后创建未显式传 `runtime_strategy` 的空目录任务；`BIFROST_QWEN3_ASR_E2E_ONLINE=0 bash e2e-tests/tests/test_qwen3_asr_local_server.sh` | PASS：未显式传 `runtime_strategy` 的目录任务创建响应和详情默认返回 `reuse_per_file`；旧任务 JSON 缺少该字段时也进入 `reuse_per_file`；WebUI 表单默认选中 `Reuse / file`；CLI `stream-file` 默认启动/复用 `asr-server` 做文件级复用，保留 fork 路径作为可显式选择的对照策略 |
 | 2026-05-19 | TC-ASPB-23 WebUI 批量排队重试所有 failed chunks | `cargo test -p bifrost-admin bulk_retry_targets_include_only_files_with_failed_chunks_in_path_order --lib`；`pnpm --dir web test:ui asr-microphone-meter.spec.ts -g "bulk retry"` | PASS：后端目标选择只包含 `failed_chunks` 非空文件且按路径稳定排队；WebUI 任务详情点击 `Retry all failed chunks` 后调用任务级 `POST /retry-failed-chunks`，返回 queued 状态并展示 `Bulk chunk retry`、`0/2 files`、`0/3 chunks recovered`，验证按钮与状态区链路 |
 | 2026-05-19 | TC-ASPB-24 ASR jobs 模块拆分后任务 API 行为不变 | `BIFROST_DATA_DIR=/tmp/bifrost-asr-split-human.* cargo run --bin bifrost -- start -p 18894 --unsafe-ssl --no-system-proxy`；跳过临时 CA 安装；创建空目录任务；查询列表/详情；调用 `POST /_bifrost/api/asr/tasks/<task_id>/retry-failed-chunks` | PASS：任务 `6f353a0f66a54862a93649865bd05bbc` 创建成功，列表 `list_count=1`，详情 `runtime_strategy=reuse_per_file`、`summary_discovered=0`、`summary_failed_chunk_count=0`；bulk retry no-op 返回 `status=completed`、`queued_files=0`；临时服务已 Ctrl+C 停止，临时数据目录和临时 JSON 响应文件已清理 |
-| 2026-05-19 | TC-ASPB-25 Daily Agent Runner 方案文档验收 | `test -f design/asr-daily-agent-runner.md`；`rg -n "ASR 创建/编辑页面|Daily Agent Runner|Runner type|Runner ID|Instructions / AGENTS.md" design/asr-daily-agent-runner.md`；`rg -n "内置 AGENTS.md 模板|assets/asr_daily_agents_default.md|PUT /api/asr/tasks/\\{task_id\\}/daily-agent/agents|instructions_source" design/asr-daily-agent-runner.md`；`rg -n "Daily Workspace 初始化|daily/report|git init|Git 是增强能力|git unavailable" design/asr-daily-agent-runner.md`；`rg -n "Runner 执行逻辑|Run now|ASR 完成后触发|maybe_enqueue_daily_agent_after_asr_run|测试计划" design/asr-daily-agent-runner.md`；`rg -n "IM delivery|provider_id|target_id|Send policy|IM 发送逻辑|未绑定 IM|绑定 IM" design/asr-daily-agent-runner.md`；`rg -n "Runner 消息组织差异|ChatGPT Web 不能读本地|每个 ASR 任务一个固定 conversation|第一条消息|第二条消息|asr-daily:<task_id>|Reset ChatGPT Web conversation" design/asr-daily-agent-runner.md`；`rg -n "ASR 定时任务内部|父级 ASR task schedule|音频处理、failed chunk retry|daily markdown 刷新|skipped_no_daily_changes|trigger_source=asr_completion" design/asr-daily-agent-runner.md human_tests/asr-scheduled-task-plan-b.md human_tests/readme.md`；`rg -n "DailyAgentChangePlanner|daily_agent_processed.json|已处理文档记录|unchanged|appended|rewritten|IncrementalPayload|FileList|增量文本|文件清单" design/asr-daily-agent-runner.md` | PASS：方案文档存在；覆盖 ASR 创建/编辑页面 Daily Agent Runner 配置、Runner type/Runner ID、`Instructions / AGENTS.md`、内置默认手册、用户可编辑 agents API、daily workspace/report/Git 初始化和 Git 不可用降级；明确 Runner 放在 ASR 定时任务内部，跟随父级 ASR task schedule，不维护独立 scheduler；明确 ASR 音频处理、failed chunk retry 合并、daily markdown 刷新和 ASR 状态持久化完成后才排队 Daily Agent；明确 processing 期间不启动 Runner，无 daily 变更时记录 skipped；明确 `DailyAgentChangePlanner` 使用 `daily_agent_processed.json` 记录已处理文档，unchanged 不再投递；ChatGPT Web 只接收新增/变更增量文本或 diff；Codex 等文件型外部 Runner 只接收更新文件清单、变化类型、hash 和目标 report 路径；覆盖手动 Run now、可选 IM 绑定、provider/target、send policy、未绑定只落盘、绑定后发送结论、ChatGPT Web 任务级固定 conversation、首次注入 `AGENTS.md`、后续只发送新增/变更内容与测试计划 |
 | 2026-05-20 | TC-ASPB-32 Directory Tasks 新建弹窗回归 | `pnpm --dir web exec tsc -b --pretty false`；`pnpm --dir web exec eslint src/pages/ASR/components/DirectoryTasksPanel.tsx src/pages/ASR/index.tsx tests/ui/asr-microphone-meter.spec.ts`；`pnpm --dir web exec playwright test tests/ui/asr-microphone-meter.spec.ts -g "ASR directory tasks can be created and refreshed in the tools panel"` | PASS：`/_bifrost/ai?aiSection=tools-asr` 的 Directory Tasks 卡片正文不再常驻展示 Name / Audio Directory 创建表单；右上角只展示 `New` 按钮；点击 `New` 后弹出 `New Directory Task` Modal，填写 Name 和 Audio Directory 后点击 `Create` 成功创建任务并关闭弹窗，任务列表仍展示 `Recordings`、`/tmp/asr-audio`、`Daily at 02:00` 和处理进度 |
 | 2026-05-20 | TC-ASPB-33 Daily Agent Instructions 自适应高度回归 | `pnpm --dir web exec tsc -b --pretty false`；`pnpm --dir web exec eslint src/pages/ASR/components/DailyAgentTab.tsx tests/ui/asr-daily-agent-runner.spec.ts`；`pnpm --dir web exec playwright test tests/ui/asr-daily-agent-runner.spec.ts` | PASS：mock 返回 36 段长 `AGENTS.md` 后，`Agent Instructions (AGENTS.md)` 编辑框 `clientHeight + 2 >= scrollHeight` 且 `overflow-y=hidden`；编辑框自适应撑高，内部不出现独立滚动条，Runner / IM Channel 单下拉回归仍通过 |
-| 2026-05-20 | TC-ASPB-34 默认目录多文件 ChatGPT Web Daily Agent 与 FullReport IM 分片回归 | `BIFROST_DATA_DIR=/Users/eden/.bifrost cargo run --bin bifrost -- start -p 9900 --unsafe-ssl --no-system-proxy`；`curl -sS -X POST 'http://127.0.0.1:9900/_bifrost/api/asr/tasks/76612de33e9740bc92440ce64a98a4cb/daily-agent/run?force=true'`；轮询任务详情；检查 `/Users/eden/.bifrost/im_gateway/runs/1779216503662-*`、`1779216632038-*`、`1779216764881-*`、`1779216872746-*`；检查 `/Users/eden/.bifrost/asr/data/text/76612de33e9740bc92440ce64a98a4cb/daily/report/*-report.md`；查询 `/_bifrost/api/im-gateway/providers/acc/messages` | PASS/PARTIAL：默认任务 `day` 配置为 `runner=web`、`channel=owner:acc`、`mode=full_report`；daily 目录包含 `2026-05-14.md`、`2026-05-15.md`、`2026-05-16.md`、`2026-05-17.md` 四个源文件；force run 生成四个 ChatGPT Web run，prompt 分别只包含单日文件且按日期升序处理，大小约 217KB、262KB、267KB、149KB；四个 run 的 `result.json.status=succeeded`，四个 report 均生成（约 24.7KB、23.5KB、25.6KB、21.6KB）；ASR Daily Agent `last_status=success`。IM provider `acc` 当前即使发送短文本和上线通知也返回 `weixin sendmessage failed: ret=-2`，因此 FullReport 分片第 1/4 条发送失败；message log 预览为 `ASR Daily Agent Report 1/4` 加报告原文，确认不再降级为摘要。 |
 | 2026-05-20 | TC-ASPB-35 Daily Agent Processed Documents report 全屏 Markdown 详情 | `BIFROST_DATA_DIR=/Users/eden/.bifrost cargo run --bin bifrost -- start -p 9900 --unsafe-ssl --no-system-proxy --daemon -y`；`curl -sS 'http://127.0.0.1:9900/_bifrost/api/asr/tasks/76612de33e9740bc92440ce64a98a4cb/daily-agent/reports/2026-05-14'`；`curl -i 'http://127.0.0.1:9900/_bifrost/api/asr/tasks/76612de33e9740bc92440ce64a98a4cb/daily-agent/reports/%2E%2E%2Fsecret'`；`pnpm --dir web exec node --input-type=module` 使用 Playwright 打开真实 9900 页面、进入 Daily Agent、刷新 tab、点击 `2026-05-14-report.md`、刷新 report 详情、检查 Markdown DOM 并返回 | PASS：真实 API 返回 `runner=web`、report 路径 `/Users/eden/.bifrost/asr/data/text/76612de33e9740bc92440ce64a98a4cb/daily/report/2026-05-14-report.md` 和 Markdown 正文；路径穿越日期返回 400；真实页面进入 Daily Agent 后 URL 增加 `asrTaskTab=daily-agent`，刷新后 tab 仍选中；点击 report 后 URL 增加 `asrDailyReport=2026-05-14`，出现 `asr-daily-agent-report-page` 和 `asr-daily-agent-report-content`；刷新 report 详情后仍恢复全屏 Markdown；Markdown 渲染出 H1 `2026-05-14 日报（Force 更新版）`、多级标题与 140 个列表项，`preCount=0`；点击返回后 URL 移除 `asrDailyReport` 并保留 `asrTaskTab=daily-agent` |
 | 2026-05-21 | TC-ASPB-36 Directory Task Runtime 选项说明 | `pnpm --dir web exec tsc -b --pretty false`；临时 `BIFROST_DATA_DIR=/tmp/bifrost-runtime-desc.stX3OY CARGO_TARGET_DIR=/tmp/bifrost-runtime-desc-target cargo run --bin bifrost -- start -p 18897 --unsafe-ssl --no-system-proxy --skip-cert-check --access-mode allow_all`；`BIFROST_UI_TEST_RUN_ID=manual-runtime-desc BIFROST_UI_TEST_PORT=18897 BACKEND_PORT=18897 WEB_PORT=53990 ... pnpm --dir web exec playwright test tests/ui/asr-microphone-meter.spec.ts -g "ASR directory tasks can be created and refreshed in the tools panel" --reporter=line --timeout=60000` | PASS：Runtime 下拉展示 `Reuse / file`、`Fork / chunk`、`Reuse server`、`Auto fallback`、`Compare` 及各自说明；下拉菜单加宽后五个策略均可直接看到；选中态保持短标题 `Reuse / file`；创建任务流程仍通过，默认提交 `runtime_strategy=reuse_per_file`；临时后端通过 `--no-system-proxy` 启动且由 Playwright teardown 停止 |
 | 2026-05-21 | TC-ASPB-37 服务重启后中断 ASR run 自动恢复且不假 Running | `cargo test -p bifrost-admin startup_recovery --lib`；`bash e2e-tests/tests/test_asr_task_startup_recovery.sh` | PASS：单测覆盖 enabled 未暂停任务从 stale run.lock + processing 恢复后进入 startup recovery 计划、paused 任务不自动 requeue、live owner lock 不被抢占、RAII running guard drop 后释放内存 running 标记；E2E 使用临时数据目录预置 paused stale run，启动最新 bifrost 后 API 返回文件 `pending`、旧进度清空、`summary.running=false` 且 run.lock 已删除 |

@@ -275,7 +275,6 @@ fn start_im_gateway_runtime(admin_state: &AdminState, admin_host: String, admin_
         if let Some(im_service) = admin_state.im_gateway_service() {
             // Browser authentication is a main-process control-plane action;
             // the heavy browser work is delegated to the Browser worker.
-            im_service.spawn_chatgpt_web_startup_auth_check();
             im_service.spawn_feishu_setup_supervisor();
         }
         return;
@@ -284,10 +283,6 @@ fn start_im_gateway_runtime(admin_state: &AdminState, admin_host: String, admin_
     bifrost_admin::worker_runtime::im_gateway::stop_runtime_controller();
     if let Some(im_service) = admin_state.im_gateway_service() {
         im_service.start_scheduler();
-        // The check itself is cheap when no ChatGPT Web runner exists. When a
-        // runner is configured it delegates to the isolated Browser worker,
-        // preserving lazy startup without silently skipping login readiness.
-        im_service.spawn_chatgpt_web_startup_auth_check();
         im_service.spawn_feishu_setup_supervisor();
         let im_service_clone = im_service.clone();
         tokio::spawn(async move {
@@ -2534,7 +2529,6 @@ pub fn run_foreground(
             // Kill managed ASR service to prevent orphan processes.
             bifrost_admin::shutdown_managed_asr_service().await;
             // Kill all managed browser processes to prevent orphans.
-            bifrost_admin::im_gateway::chatgpt_web::kill_all_managed_browsers();
             Ok(())
         }
         .await;
@@ -3595,7 +3589,6 @@ pub fn run_daemon(
                 // Kill managed ASR service to prevent orphan processes.
                 bifrost_admin::shutdown_managed_asr_service().await;
                 // Kill all managed browser processes to prevent orphans.
-                bifrost_admin::im_gateway::chatgpt_web::kill_all_managed_browsers();
                 // Stop isolated workers through their native transport before
                 // the service runtime is dropped; hard kill remains bounded.
                 bifrost_admin::im_gateway::external_cli::shutdown_all_active_runs().await;

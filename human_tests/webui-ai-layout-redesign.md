@@ -52,7 +52,7 @@
 - Codex Runner 可用时，默认值为 `Codex Runner`。
 - Codex Runner 不可用时，默认值显示真实 fallback runner，不能显示 Codex 但实际使用其它 runner。
 - 下拉列表只包含 enabled runner，或 disabled runner 置灰且不可提交。
-- 可用 runner 至少按产品排序展示：Codex Runner、Claude Code、Trae X、ChatGPT Web、自定义 runner。
+- 可用 runner 至少按产品排序展示：Codex Runner、Claude Code、Trae X、自定义 runner。
 - 切换 runner 后，当前新建对话输入态保持不变，输入内容不丢失。
 
 ### TC-AILR-03 首条消息创建新线程

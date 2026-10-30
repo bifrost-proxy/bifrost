@@ -180,7 +180,7 @@ function TaskDailyAgentTab({ taskId }: DailyAgentTabProps) {
   }, [routeDetailAgentId]);
 
   const handleConfigUpdate = async (
-    updates: Partial<AsrDailyAgentConfig>
+    updates: Partial<AsrDailyAgentConfig> & { remove_retired_project_urls?: boolean }
   ) => {
     setSaving(true);
     try {
@@ -197,9 +197,9 @@ function TaskDailyAgentTab({ taskId }: DailyAgentTabProps) {
   };
 
   const runnerOptions = useMemo(() => {
-    const runnerIds = Object.keys(runnerConfig?.runners || {}).sort();
+    const runnerIds = imGatewayApi.selectableRunnerIds(runnerConfig);
     return runnerIds.map((id) => ({ label: id, value: id }));
-  }, [runnerConfig?.runners]);
+  }, [runnerConfig]);
 
   const agents = useMemo(
     () => configData?.config.agents || [],
@@ -671,9 +671,6 @@ function TaskDailyAgentTab({ taskId }: DailyAgentTabProps) {
                     research_fanout: enabled
                       ? {
                           max_questions: 8,
-                          chatgpt_interface_mode: "chat",
-                          chatgpt_model: "pro",
-                          chatgpt_project_url: undefined,
                           allowed_runners: selectedAgent.runner
                             ? [selectedAgent.runner]
                             : [],
@@ -701,37 +698,6 @@ function TaskDailyAgentTab({ taskId }: DailyAgentTabProps) {
                         },
                       })
                     }
-                  />
-                </Descriptions.Item>
-                <Descriptions.Item label={t("asrTasks.dailyAgent.chatgptProjectUrl")} span={2}>
-                  <Input
-                    key={`${selectedAgent.id}-project-url-${
-                      selectedAgent.research_fanout.chatgpt_project_url || ""
-                    }`}
-                    data-testid="asr-daily-agent-research-project-url"
-                    size="small"
-                    defaultValue={
-                      selectedAgent.research_fanout.chatgpt_project_url || ""
-                    }
-                    placeholder="https://chatgpt.com/g/g-p-.../project"
-                    onBlur={(event) => {
-                      const chatgptProjectUrl = event.target.value.trim();
-                      if (
-                        chatgptProjectUrl ===
-                        (selectedAgent.research_fanout!
-                          .chatgpt_project_url || "")
-                      ) {
-                        return;
-                      }
-                      updateAgent(selectedAgent.id, {
-                        research_fanout: {
-                          ...selectedAgent.research_fanout!,
-                          chatgpt_project_url:
-                            chatgptProjectUrl || undefined,
-                        },
-                      });
-                    }}
-                    onPressEnter={(event) => event.currentTarget.blur()}
                   />
                 </Descriptions.Item>
                 <Descriptions.Item label={t("asrTasks.dailyAgent.allowedResearchRunners")} span={2}>
@@ -1281,6 +1247,24 @@ function TaskDailyAgentTab({ taskId }: DailyAgentTabProps) {
 
   return (
     <Space direction="vertical" size={16} style={{ width: "100%" }}>
+      {agents.some((agent) => agent.research_fanout?.chatgpt_project_url) && (
+        <Alert
+          type="warning"
+          showIcon
+          message={t("asrTasks.dailyAgent.retiredProjectMigration")}
+          action={
+            <Button
+              data-testid="remove-retired-project-urls"
+              loading={saving}
+              onClick={() =>
+                handleConfigUpdate({ remove_retired_project_urls: true })
+              }
+            >
+              {t("asrTasks.dailyAgent.removeRetiredProjectUrls")}
+            </Button>
+          }
+        />
+      )}
       <Card size="small" title={t("asrTasks.dailyAgent.dailyAgents")} loading={loading && !config}>
         <Space direction="vertical" size={8} style={{ width: "100%", marginBottom: 12 }}>
           <Space

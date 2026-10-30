@@ -918,7 +918,7 @@ previous runtime settings."
             "Run an AI agent (external CLI runner) interactively from the terminal.\n",
             "\n",
             "The agent executes through the chat-gateway system, using the configured\n",
-            "runner and adapter (e.g. codex, chatgpt-web). The result is streamed back\n",
+            "runner and adapter (e.g. codex, claude_code, traex). The result is streamed back\n",
             "and rendered as Markdown in the terminal.\n",
             "\n",
             "If the runner produces images, they are saved to files and their paths\n",
@@ -926,9 +926,6 @@ previous runtime settings."
             "\n",
             "EXAMPLES:\n",
             "  bifrost agent run \"What is Bifrost?\"\n",
-            "  bifrost agent run --runner chatgpt-web \"Draw a cat\"\n",
-            "  bifrost agent run --runner chatgpt-web --new \"Hello\"\n",
-            "  bifrost agent run --runner chatgpt-web --session my-session \"Continue\"\n",
         )
     )]
     Agent {

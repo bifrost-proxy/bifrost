@@ -111,44 +111,9 @@ struct AsrDailyResearchExecution {
     metadata: DailyAgentBTreeMap<String, String>,
 }
 
-fn daily_research_runner_adapter(runner_id: &str) -> Option<String> {
-    let store = crate::im_gateway::external_cli::ExternalCliConfigStore::new(
-        &bifrost_storage::data_dir(),
-    );
-    let config = store.load();
-    config
-        .runners
-        .get(runner_id)
-        .map(|runner| runner.adapter.trim().to_string())
-}
 
-fn enforce_daily_research_chatgpt_surface(
-    config: &mut crate::im_gateway::external_cli::ExternalCliAdapterConfig,
-    fanout: &AsrDailyAgentResearchFanoutConfig,
-) {
-    let mut chatgpt = config
-        .extra
-        .remove("chatgpt")
-        .and_then(|value| value.as_object().cloned())
-        .unwrap_or_default();
-    chatgpt.insert(
-        "interfaceMode".to_string(),
-        serde_json::Value::String(fanout.chatgpt_interface_mode.clone()),
-    );
-    chatgpt.insert(
-        "model".to_string(),
-        serde_json::Value::String(fanout.chatgpt_model.clone()),
-    );
-    if let Some(project_url) = fanout.chatgpt_project_url.as_deref() {
-        chatgpt.insert(
-            "projectUrl".to_string(),
-            serde_json::Value::String(project_url.to_string()),
-        );
-    }
-    config
-        .extra
-        .insert("chatgpt".to_string(), serde_json::Value::Object(chatgpt));
-}
+
+
 
 fn parse_daily_research_manifest(content: &str) -> Result<AsrDailyResearchManifest, String> {
     let trimmed = content.trim();
@@ -370,7 +335,7 @@ fn build_daily_research_child_prompt(
             prompt.push_str(&format!("- `{}`\n", repository.trim()));
         }
         prompt.push_str(
-            "请通过 ChatGPT 已连接的 GitHub Connector 实际检索这些仓库。报告必须列出实际读取的仓库文件路径；如果仓库不可见、未授权或尚未索引，明确输出 `GITHUB_CONNECTOR_STATUS: unavailable`，不要凭空推测仓库内容。成功读取时输出 `GITHUB_CONNECTOR_STATUS: verified`。\n",
+            "请通过 Runner 显式授权的 GitHub 工具 实际检索这些仓库。报告必须列出实际读取的仓库文件路径；如果仓库不可见、未授权或尚未索引，明确输出 `GITHUB_CONNECTOR_STATUS: unavailable`，不要凭空推测仓库内容。成功读取时输出 `GITHUB_CONNECTOR_STATUS: verified`。\n",
         );
     }
     if let Some(context) = context {
@@ -479,7 +444,7 @@ fn validate_daily_research_response(
             ));
         }
     }
-    if chatgpt_web_response_is_placeholder(chatgpt_web_normalized_response(trimmed)) {
+    if markdown_response_is_placeholder(normalized_markdown_response(trimmed)) {
         return Err(format!(
             "research response for '{}' is a status/error placeholder",
             question.id
@@ -488,18 +453,7 @@ fn validate_daily_research_response(
     Ok(())
 }
 
-fn daily_research_retry_prompt(question: &AsrDailyResearchQuestion) -> String {
-    let mut prompt = format!(
-        "上一条回复不是最终研究报告。请不要说明计划，不要再说你将要做什么，立即基于本会话中已经完成的检索和证据，重新输出完整 Markdown 研究报告。\n\n原始问题：\n{}\n\n必须逐字保留原始问题，并包含以下全部章节：`## 原始问题`、`## 核心结论`、`## 事实与证据`、`## 推断与不确定性`、`## 对原始问题的直接回答`。事实附可复查来源链接；没有验证到的内容明确写为未验证。不要使用代码块包装。",
-        question.original_question.trim()
-    );
-    if !question.github_repositories.is_empty() {
-        prompt.push_str(
-            "\n本题要求使用 GitHub Connector；最终报告仍必须输出 `GITHUB_CONNECTOR_STATUS: verified` 或 `GITHUB_CONNECTOR_STATUS: unavailable`，并列出实际读取的仓库文件路径，不能省略状态。",
-        );
-    }
-    prompt
-}
+
 
 async fn run_daily_research_child(
     task: &AsrDirectoryTask,
@@ -563,31 +517,7 @@ async fn run_daily_research_child_request(
         return Err(format!("research child runner '{runner_id}' is disabled"));
     }
     let adapter = effective.settings.adapter.as_str();
-    let request_session_key = (adapter != "chatgpt_web").then(|| session_key.to_string());
-    let continues_chatgpt_conversation = adapter == "chatgpt_web"
-        && ["conversationId", "conversation_id"].iter().any(|key| {
-            params
-                .get(*key)
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(|value| !value.trim().is_empty())
-        });
-    if adapter == "chatgpt_web" && !continues_chatgpt_conversation {
-        crate::im_gateway::chatgpt_web::clear_session_conversation(session_key).await;
-    }
     let operation = operation_override.unwrap_or(if adapter == "codex" { "run" } else { "send" });
-    let mut adapter_config = daily_agent_external_runner_adapter_config(
-        adapter,
-        &effective.settings.adapter_config,
-        task.daily_agent.timeout_ms,
-    );
-    if adapter == "chatgpt_web" {
-        let fanout = task
-            .daily_agent
-            .research_fanout
-            .as_ref()
-            .ok_or_else(|| "research fan-out config is missing".to_string())?;
-        enforce_daily_research_chatgpt_surface(&mut adapter_config, fanout);
-    }
     let agent_work_dir = daily_agent_work_dir(task);
     let daily_dir = daily_dir_for_task(&task.id);
     let mut allow_work_dirs = vec![
@@ -605,12 +535,12 @@ async fn run_daily_research_child_request(
         params,
         provider_id: None,
         runner_id: Some(runner_id.to_string()),
-        session_key: request_session_key,
+        session_key: Some(session_key.to_string()),
         runtime: "external_cli".to_string(),
         adapter: effective.settings.adapter.clone(),
         work_dir: Some(work_dir.to_path_buf()),
         instructions: None,
-        adapter_config,
+        adapter_config: effective.settings.adapter_config.clone(),
         allow_work_dirs,
         inject_bifrost_tools: effective.settings.inject_bifrost_tools,
         skill_paths: effective.settings.skill_paths.clone(),
@@ -645,95 +575,22 @@ async fn run_daily_research_child_request(
 }
 
 async fn ensure_complete_daily_research_execution(
-    task: &AsrDirectoryTask,
-    runner_id: &str,
+    _task: &AsrDirectoryTask,
+    _runner_id: &str,
     question: &AsrDailyResearchQuestion,
-    work_dir: &Path,
-    session_key: &str,
+    _work_dir: &Path,
+    _session_key: &str,
     execution: AsrDailyResearchExecution,
 ) -> Result<AsrDailyResearchExecution, String> {
-    let Err(first_error) = validate_daily_research_response(&execution.response, question) else {
-        return Ok(execution);
-    };
-    if execution.adapter != "chatgpt_web" {
-        return Err(first_error);
-    }
-    let conversation_id = metadata_value(
-        &execution.metadata,
-        &["conversationId", "conversation_id"],
-    )
-    .ok_or_else(|| format!("{first_error}; ChatGPT Web did not return a conversation id"))?;
-    tracing::warn!(
-        question_id = %question.id,
-        conversation_id = %conversation_id,
-        error = %first_error,
-        "daily research response failed validation; waiting for the same ChatGPT conversation"
-    );
-    let waited = run_daily_research_child_request(
-        task,
-        runner_id,
-        String::new(),
-        work_dir,
-        session_key,
-        serde_json::json!({ "conversationId": conversation_id }),
-        Some("wait"),
-    )
-    .await;
-    if let Ok(waited) = waited {
-        if validate_daily_research_response(&waited.response, question).is_ok() {
-            tracing::info!(
-                question_id = %question.id,
-                conversation_id = %conversation_id,
-                "same-conversation wait produced a complete daily research report"
-            );
-            return Ok(waited);
-        }
-        tracing::warn!(
-            question_id = %question.id,
-            conversation_id = %conversation_id,
-            waited_len = waited.response.trim().len(),
-            "same-conversation wait still returned an incomplete research report; sending one final-output retry"
-        );
-    } else if let Err(wait_error) = waited {
-        tracing::warn!(
-            question_id = %question.id,
-            conversation_id = %conversation_id,
-            error = %wait_error,
-            "same-conversation wait failed; sending one final-output retry"
-        );
-    }
-    let retry = run_daily_research_child_with_params(
-        task,
-        runner_id,
-        daily_research_retry_prompt(question),
-        work_dir,
-        session_key,
-        serde_json::json!({ "conversationId": conversation_id }),
-    )
-    .await?;
-    validate_daily_research_response(&retry.response, question).map_err(|retry_error| {
-        format!(
-            "initial research response failed validation ({first_error}); same-conversation retry failed validation ({retry_error})"
-        )
-    })?;
-    Ok(retry)
+    crate::im_gateway::external_cli::validate_supported_adapter(&execution.adapter)?;
+    validate_daily_research_response(&execution.response, question)?;
+    Ok(execution)
 }
 
 fn daily_research_conversation_link(
     execution: &AsrDailyResearchExecution,
 ) -> (Option<String>, Option<String>) {
-    let conversation_id = metadata_value(
-        &execution.metadata,
-        &["conversationId", "conversation_id"],
-    );
-    let link = (execution.adapter == "chatgpt_web")
-        .then(|| {
-            conversation_id
-                .as_deref()
-                .map(|id| format!("https://chatgpt.com/c/{id}"))
-        })
-        .flatten();
-    (conversation_id, link)
+    (metadata_value(&execution.metadata, &["conversationId", "conversation_id"]), None)
 }
 
 fn daily_research_github_connector_status(
@@ -781,7 +638,7 @@ fn render_daily_research_index(
             report.push_str(&format!("- GitHub Connector：{status}\n"));
         }
         if let Some(link) = result.full_report_link.as_deref() {
-            report.push_str(&format!("- 完整研究：[打开独立 ChatGPT 会话]({link})\n"));
+            report.push_str(&format!("- 完整研究：[打开研究记录]({link})\n"));
         } else if let Some(path) = result.result_path.as_deref() {
             let display_name = Path::new(path)
                 .file_name()
@@ -813,6 +670,22 @@ async fn run_daily_agent_research_fanout(
         .research_fanout
         .as_ref()
         .ok_or_else(|| "research fan-out config is missing".to_string())?;
+    // Reject retired bindings before consulting cached outputs; history is still retained.
+    let config = crate::im_gateway::external_cli::ExternalCliConfigStore::new(
+        &bifrost_storage::data_dir(),
+    ).load();
+    for runner_id in std::iter::once(task.daily_agent.runner.as_str())
+        .chain(fanout.allowed_runners.iter().map(String::as_str))
+        .chain(fanout.context_profiles.values().map(|profile| profile.runner.as_str()))
+    {
+        let effective = crate::im_gateway::external_cli::effective_config_for_provider_and_runner(
+            &config, None, Some(runner_id),
+        );
+        crate::im_gateway::external_cli::validate_supported_adapter(&effective.settings.adapter)?;
+        if !effective.settings.enabled {
+            return Err(format!("Runner '{runner_id}' is disabled; cached research cannot bypass Runner validation."));
+        }
+    }
     let agent_work_dir = daily_agent_work_dir(task);
     for entry in plan
         .entries
@@ -851,12 +724,8 @@ async fn run_daily_agent_research_fanout(
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
                 .and_then(|key| fanout.context_profiles.get(key).map(|profile| (key, profile)));
-            let final_adapter = daily_research_runner_adapter(&final_runner)
-                .unwrap_or_else(|| final_runner.clone());
-            let context_adapter = context_profile
-                .and_then(|(_, profile)| daily_research_runner_adapter(profile.runner.trim()));
             let direct_context_access = context_profile.is_some_and(|(_, profile)| {
-                profile.runner.trim() == final_runner && final_adapter != "chatgpt_web"
+                profile.runner.trim() == final_runner
             });
             let final_work_dir = if direct_context_access {
                 PathBuf::from(context_profile.expect("checked context profile").1.work_dir.trim())
@@ -884,11 +753,7 @@ async fn run_daily_agent_research_fanout(
                 let mut context_content = None;
                 if let Some((profile_key, profile)) = context_profile {
                     if !direct_context_access {
-                        if context_adapter.as_deref() == Some("chatgpt_web") {
-                            return Err(format!(
-                                "context profile '{profile_key}' must use a local file-capable runner, not ChatGPT Web"
-                            ));
-                        }
+
                         let context_work_dir = PathBuf::from(profile.work_dir.trim());
                         if !context_work_dir.is_dir() {
                             return Err(format!(

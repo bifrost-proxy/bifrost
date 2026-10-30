@@ -42,6 +42,8 @@ async fn put_daily_agent_config_response(
         #[serde(default)]
         enabled: Option<bool>,
         #[serde(default)]
+        remove_retired_project_urls: bool,
+        #[serde(default)]
         agents: Option<Vec<AsrDailyAgentItem>>,
         #[serde(default)]
         runner: Option<String>,
@@ -90,11 +92,19 @@ async fn put_daily_agent_config_response(
         return error_response(StatusCode::NOT_FOUND, "ASR task not found");
     };
 
+    // Explicit migration only removes the obsolete project URL. Preserve all
+    // Runner selections, enabled flags, reports, credentials and history.
+    if update.remove_retired_project_urls {
+        clear_retired_daily_agent_project_urls(&mut task.daily_agent);
+    }
     if let Some(enabled) = update.enabled {
         task.daily_agent.enabled = enabled;
     }
     if let Some(agents) = update.agents {
         task.daily_agent.agents = agents.into_iter().map(normalize_daily_agent_item).collect();
+        if update.remove_retired_project_urls {
+            clear_retired_daily_agent_project_urls(&mut task.daily_agent);
+        }
         if let Err(error) = validate_daily_agent_config(&task.daily_agent) {
             return error_response(StatusCode::BAD_REQUEST, &error);
         }
@@ -712,4 +722,15 @@ fn get_daily_agent_report_response(task_id: &str, date: &str, req: Request<Incom
         "runner": processed_document.map(|document| document.runner.as_str()),
         "last_run_id": processed_document.map(|document| document.last_run_id.as_str()),
     }))
+}
+
+fn clear_retired_daily_agent_project_urls(config: &mut AsrDailyAgentConfig) {
+    if let Some(fanout) = &mut config.research_fanout {
+        fanout.chatgpt_project_url = None;
+    }
+    for agent in &mut config.agents {
+        if let Some(fanout) = &mut agent.research_fanout {
+            fanout.chatgpt_project_url = None;
+        }
+    }
 }

@@ -2,7 +2,6 @@
 
 ## Goal
 
-Remove the built-in `Bifrost Agent` runtime and every product entry point that can select or execute it. Agent Chat, IM providers, scheduled Agent tasks, runner calls, and ASR Daily Agent continue through configured external runners such as Codex, Trae X, Claude Code, and ChatGPT Web.
 
 ## Boundaries
 

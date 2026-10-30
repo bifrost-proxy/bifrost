@@ -148,7 +148,7 @@
 
 **预期结果**：
 - 终端可见输出集中在启动帮助、`SERVER STATUS`、`MOBILE AVAILABILITY CHECK` 和必要的交互提示。
-- 不出现与本面板无关的 Demo 进程检查、浏览器检查、ChatGPT Web 检查等后台诊断日志。
+- 不出现与本面板无关的 Demo 进程检查、浏览器检查 检查等后台诊断日志。
 
 ### TC-MAT-08B：非 TTY/CI 重定向启动不输出移动面板
 
@@ -299,7 +299,6 @@
 
 | 日期 | 用例 | 执行方式 | 结果 |
 | --- | --- | --- | --- |
-| 2026-06-08 | TC-MAT-01 / TC-MAT-02 / TC-MAT-06 / TC-MAT-08 / TC-MAT-08B | 执行 `e2e-tests/tests/test_mobile_availability_terminal_panel.sh`，使用临时数据目录、`BIFROST_MOBILE_AVAILABILITY_PANEL_FORCE=1` 和真实 `bifrost start -p <random> --unsafe-ssl --skip-cert-check --no-system-proxy` 重定向启动，断言强制输出 `MOBILE AVAILABILITY CHECK`、不展示 loopback target、Access Control 显示 `shortcut: y = allow current, n = deny current`、启动控制台不包含 Demo/process check/ChatGPT Web 噪声；执行 `cargo test -p bifrost-admin mobile_availability --lib` 覆盖非 TTY 默认跳过、force env 才输出；使用当前 `target/release/bifrost` 真实重定向启动并 grep 日志，确认未设置 force 时不输出 `MOBILE AVAILABILITY CHECK` 或二维码块 | 通过 |
 | 2026-06-08 | TC-MAT-01 / TC-MAT-04 / TC-MAT-06 二维码、刷新去重、颜色与输入保护回归 | 执行 `cargo test -p bifrost-admin mobile_availability --lib`，覆盖 `terminal_qr_uses_compact_short_url_without_quiet_zone`、`dedupe_recent_devices_collapses_refreshes_from_same_client_ip_and_host`、`render_panel_colors_status_values_only_for_terminal_output` 和 `pending_panel_suppresses_automatic_rerender_with_same_pending_ip`：终端二维码使用短入口且宽高小于长 URL 二维码；同一 host 下同一 client IP 的两条 iOS 最近设备记录合并为一条；TTY 输出状态值上色而普通输出无 ANSI；同一 pending IP 存在时自动重绘被抑制，force render 或 pending IP 变化仍会刷新 | 通过 |
 | 2026-06-08 | TC-MAT-10 | 执行 `cargo test -p bifrost-admin recent_device_status_texts_are_device_scoped --lib`，覆盖设备级 certificate/network/proxy access/proxy config 状态函数只按设备状态输出，不使用 session 聚合状态兜底 | 通过 |
 | 2026-06-08 | TC-MAT-11 | 执行 `cargo test -p bifrost-admin device_status_is_tracked_per_local_storage_device_id --lib`，覆盖 WebView `session.devices` 按 `192.168.1.20`、`192.168.1.21` IP 顺序输出；执行 `cargo test -p bifrost-admin recent_devices_are_sorted_by_client_ip_not_last_seen --lib`，覆盖终端 `Recent devices` 不按 `last_seen_seconds_ago` 排序 | 通过 |

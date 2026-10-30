@@ -507,12 +507,6 @@ pub struct ImGatewayService {
     pub(super) feishu_setup_pending: Arc<RwLock<HashMap<String, PendingFeishuSetup>>>,
 }
 
-#[derive(Clone)]
-pub struct ChatGptWebStartupAuthRunner {
-    pub runner_id: String,
-    pub settings: crate::im_gateway::external_cli::ExternalCliAgentSettings,
-}
-
 impl ImGatewayService {
     pub fn new(data_dir: &std::path::Path) -> Self {
         Self::new_with_agent_proxy_port(data_dir, None)
@@ -672,67 +666,6 @@ impl ImGatewayService {
         drop(sink);
         task.abort();
         let _ = task.await;
-    }
-
-    pub fn chatgpt_web_startup_auth_runners(&self) -> Vec<ChatGptWebStartupAuthRunner> {
-        self.external_cli_config_store
-            .load()
-            .runners
-            .into_iter()
-            .filter(|(_, settings)| settings.adapter == crate::im_gateway::chatgpt_web::ADAPTER_ID)
-            .map(|(runner_id, settings)| ChatGptWebStartupAuthRunner {
-                runner_id,
-                settings,
-            })
-            .collect()
-    }
-
-    pub fn spawn_chatgpt_web_startup_auth_check(self: &Arc<Self>) {
-        let service = self.clone();
-        tokio::spawn(async move {
-            service.ensure_chatgpt_web_startup_auth_ready().await;
-        });
-    }
-
-    pub async fn ensure_chatgpt_web_startup_auth_ready(self: &Arc<Self>) {
-        let runners = self.chatgpt_web_startup_auth_runners();
-        if runners.is_empty() {
-            debug!("chatgpt_web startup auth: no chatgpt_web runners configured");
-            return;
-        }
-        for runner in runners {
-            match crate::im_gateway::chatgpt_web::ensure_startup_auth_ready(
-                &runner.runner_id,
-                &runner.settings,
-            )
-            .await
-            {
-                Ok(status) if status.logged_in => {
-                    info!(
-                        runner_id = %status.runner_id,
-                        opened_login = status.opened_login,
-                        dry_run = status.dry_run,
-                        "chatgpt_web startup auth: login ready"
-                    );
-                }
-                Ok(status) => {
-                    warn!(
-                        runner_id = %status.runner_id,
-                        state = %status.state,
-                        dry_run = status.dry_run,
-                        message = ?status.message,
-                        "chatgpt_web startup auth: login still required"
-                    );
-                }
-                Err(error) => {
-                    warn!(
-                        runner_id = %runner.runner_id,
-                        error = %error,
-                        "chatgpt_web startup auth: check failed"
-                    );
-                }
-            }
-        }
     }
 
     pub fn spawn_feishu_setup_supervisor(self: &Arc<Self>) {

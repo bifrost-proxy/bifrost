@@ -66,20 +66,19 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
 ### TC-IH-07: 外部 Runner 上线帮助只展示可用命令
 
 **操作步骤**：
-1. 创建或使用绑定外部 Runner 的 Provider，例如 `chatgpt_web`、`codex`、`traex` 或 `Claude-Code`。
 2. 触发 Provider connect 或重启服务。
 3. 检查上线通知帮助区。
 
 **预期结果**：
 - 帮助区包含 `IM 通道命令（所有 Runner）:`，展示 `/cwd`、`/runner`、`/q`、`/rq`。
 - 帮助区不展示已删除的 `/remember`、`/memories`、`/forget`、`/goal`、`/skill`、`/compact` 命令。
-- 所有 Runner 都不展示冗余的 `/g <引导内容>`；Codex/Traex/Claude Code 等非 ChatGPT Web Runner 提示普通后续消息默认按 Guide 处理、使用 `/q` 才排队。
+- 所有 Runner 都不展示冗余的 `/g <引导内容>`；Codex/Traex/Claude Code 等其他 Runner 提示普通后续消息默认按 Guide 处理、使用 `/q` 才排队。
 - Codex/Traex/Claude Code 这类 Runner 展示它们支持的 `/models`、`/model`、`/effort` 或对应 runner-specific 控制命令。
 
 ### TC-IH-08: Runner-aware `/help` 与上线帮助保持一致
 
 **操作步骤**：
-1. 在 Codex 与 ChatGPT Web Provider 上分别通过 IM 发送 `/help`。
+1. 在 Codex Provider 上分别通过 IM 发送 `/help`。
 2. 对比各自 `/help` 响应与该 Provider 上线通知中的帮助区。
 
 **预期结果**：

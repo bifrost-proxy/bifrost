@@ -4,15 +4,7 @@ pub(super) fn build_command_spec(
     request: &ExternalCliRunRequest,
     last_message_path: &Path,
 ) -> Result<CommandSpec, String> {
-    if request.adapter == crate::im_gateway::chatgpt_web::ADAPTER_ID {
-        return Ok(CommandSpec {
-            executable: crate::im_gateway::chatgpt_web::ADAPTER_ID.to_string(),
-            args: vec![request.operation.clone()],
-            env: BTreeMap::new(),
-            work_dir: None,
-            timeout_secs: request.adapter_config.timeout_secs.or(Some(7200)),
-        });
-    }
+    validate_supported_adapter(&request.adapter)?;
     let config = &request.adapter_config;
     let executable = config
         .executable

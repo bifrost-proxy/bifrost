@@ -43,7 +43,6 @@ pub use worker_stdio::{run_worker_stdio, WorkerStdioContext};
 
 pub fn run_auxiliary_worker(kind: &str, admin_host: &str, admin_port: u16) -> Result<(), String> {
     match kind.trim().to_ascii_lowercase().as_str() {
-        "browser" => crate::im_gateway::chatgpt_web::worker::run_browser_worker_stdio(),
         "asr" => asr::run_asr_worker_stdio(),
         "im_gateway" | "im-gateway" => {
             im_gateway::run_im_gateway_worker_stdio(admin_host, admin_port)

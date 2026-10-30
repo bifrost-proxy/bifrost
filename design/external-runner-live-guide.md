@@ -5,8 +5,6 @@
 Bifrost 已支持通过 Chat Gateway、IM Gateway 与 `bifrost agent run` 启动 Codex、Traex 等 external CLI runner。当前 Codex/Traex adapter 使用 `exec --json ... -`：Bifrost 只在进程启动时把首条 prompt 写入 stdin，随后关闭 stdin 并等待 JSONL 输出。相同 `session_key` 在任务运行期间收到的新消息会进入 FIFO queue，必须等当前 turn 结束后再通过 `exec resume` 启动下一轮。
 
 
-本方案让内置 Codex、Traex runner 默认使用每轮独立的 stdio app-server transport，让 Claude Code 默认使用长连接 stream-json transport，并把 worker 控制协议扩展为 `Run` / `Guide` / `Stop`。WebUI 在会话忙碌时可选择 Guide/Queue，普通输入默认采用 Guide；IM 的普通后续消息统一 FIFO 排队，只有显式 `/g` 才尝试注入当前 turn。ChatGPT Web 因浏览器对话链路无法安全注入当前生成过程，继续只支持 Queue。Claude Code、自定义 CLI 和显式 exec transport 收到显式 `/g` 时会先尝试 worker guide capability，无法实时注入时明确降级到 FIFO queue，不能伪装成已注入。
-
 ## 用户目标验证清单
 
 ### 必须实现
@@ -29,11 +27,9 @@ Bifrost 已支持通过 Chat Gateway、IM Gateway 与 `bifrost agent run` 启动
 
 - 自定义 `adapterConfig.args` 的 Codex/Traex runner 继续使用原始 exec transport。
 - 配置 `adapterConfig.transport=exec` 时强制使用 exec；Claude Code 在该路径保持 `--input-format text`，因为一次性 exec 会把原始 prompt 文本写入 stdin，不能沿用 stream-json 输入参数。旧配置没有 transport 字段时，内置 Codex/Traex、没有 custom args，且 executable 未覆盖或 basename 是 `codex` / `traex` / `traecli` 时才默认 app-server。自定义 wrapper 继续 exec，除非显式声明 `transport=app_server`。
-- ChatGPT Web 保持默认排队语义；Claude Code 默认使用 stream-json 实时通道，显式 text/custom args/exec 与自定义 adapter 在缺少 live guide transport 时必须明确降级排队并保留原消息。
 - `/stop`、run stop marker、超时、worker process group 清理与服务退出清理继续有效。
 - model、reasoning effort、sandbox/approval、service tier、config override、feature flag、work dir、图片路径和 session resume 语义不因 transport 迁移丢失。
 - 现有 `run_started`、progress、`run_finished` NDJSON 消费方兼容；只允许增加字段与 guide 专用响应。
-- 同一 session 只允许一个 active turn；除 ChatGPT Web 外，新普通文本消息默认请求 guide，显式 `/q` 才排队。
 - 真正的 external-runner worker 继续显式设置 `BIFROST_EXTERNAL_CLI_WORKER=1`；清理长期进程环境不得造成 worker 递归派生，也不得改变 worker process-group、Stop 或超时回收语义。
 
 ### 必须真实验证
@@ -59,10 +55,8 @@ Bifrost 已支持通过 Chat Gateway、IM Gateway 与 `bifrost agent run` 启动
 
 - `guide`：要求当前 active runner 立即改变执行方向。Codex/Traex 通过 `turn/steer` 修改当前 turn；Claude Code 通过官方 interrupt control request 中断当前响应，再在同一进程与同一 session 中接续处理 guide。
 - `queue`：当前 turn 结束后作为新 turn 执行。
-- 除 ChatGPT Web 外，WebUI 的普通 busy text 按界面当前模式处理且默认 Guide；IM 普通 busy text 默认 Queue，`/g` 才显式请求 Guide。
 - busy 状态下 `/efforts` 与 `/effort` 继续走 Bifrost session 命令处理：查询即时返回，设置只影响下一轮，不改变已运行中的 turn。
 - Codex/Traex app-server RPC 成功 ack 后展示当前 turn 已引导。Claude Code 必须先收到 interrupt control response，再发送 guide user frame，并在 `--replay-user-messages` 回显确认后展示 session 已重定向；单独的 user-frame 回显只代表排队确认，不得伪装成当前响应已被引导。自定义/exec transport 或 turn-end race 无法 ack 时展示降级原因并排队。
-- ChatGPT Web 始终默认 Queue，WebUI 不展示 Guide 切换，IM 普通 busy message 直接排队。
 - 图片暂不进入 `turn/steer` 文本协议；external runner 忙碌时收到图片必须保留附件并明确降级排队，不能只注入占位文本或丢失图片。
 - 调用方收到 `delivery=steered` 才能展示实时引导已生效；有 `turnId` 表示当前 turn steer，无 `turnId` 表示同一 runner session interrupt-and-continue。`delivery=queued` 必须展示降级原因。
 
@@ -79,7 +73,6 @@ worker process: session_key -> thread_id + turn_id + guide_tx
 
 ### 可靠降级
 
-1. CLI、IM 或 WebUI 生成/请求 `guideId`；IM/WebUI 对除 ChatGPT Web 外的普通 busy text 使用同一路径。
 2. registry 解析当前 `threadId + turnId` 并把 `Guide` 发给 worker。
 3. worker 调用 app-server `turn/steer`，使用 `guideId` 作为 `clientUserMessageId`。
 4. 收到成功 response：返回 `delivery=steered`。
@@ -214,7 +207,6 @@ bifrost agent guide --session cli-Codex "先检查失败日志"
 
 所有模拟 Claude Code stream-json 的测试夹具必须读取一条初始 user JSONL frame 后开始输出，不能通过 `cat` 等待 stdin EOF。需要验证 guide 的夹具还必须依次校验 interrupt control request、返回匹配 request id 的 control response、读取 guide user frame，并模拟旧响应的 interrupted result 与 guide 的最终 success result。真实 transport 会保持 stdin 打开；等待 EOF 会让夹具在正确的产品行为下永久阻塞并最终误报 30 秒超时。
 
-Web Playwright 同时覆盖 Codex/Traex/Claude Code 默认 Guide、显式 Queue、ChatGPT Web 只展示 Queue，以及 Guide 降级后刷新队列状态。IM mock inbound 覆盖普通 busy text 默认排队、显式 `/g` steer、`/q` 显式排队、busy Codex/Traex 的 `/efforts` 与 `/effort` 不透传、微信引用上下文，以及 ChatGPT Web 默认排队。
 
 `e2e-tests/tests/test_upgrade_admin_api_restart_e2e.sh` 以真实本地 release 归档启动独立 daemon，再执行 `BIFROST_EXTERNAL_CLI_WORKER=1 bifrost upgrade`：断言 worker CLI 在 10 秒内返回委托成功、后台进度持续到 completed、旧 PID 被新 PID 替换且新 daemon 使用升级后的安装路径。该链路同时证明 updater 不依赖发起升级的 worker/Codex 调用者继续存活。
 

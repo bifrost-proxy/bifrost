@@ -1924,10 +1924,9 @@ export interface AsrDailyAgentDependency {
 }
 
 export interface AsrDailyAgentResearchFanoutConfig {
-  max_questions: number;
-  chatgpt_interface_mode: "chat";
-  chatgpt_model: "pro";
+  /** Read-only legacy field; remove explicitly using the migration action. */
   chatgpt_project_url?: string;
+  max_questions: number;
   allowed_runners: string[];
   context_profiles: Record<string, AsrDailyAgentResearchContextProfile>;
 }
@@ -2052,7 +2051,7 @@ export async function getDailyAgentConfig(
 
 export async function updateDailyAgentConfig(
   taskId: string,
-  config: Partial<AsrDailyAgentConfig>,
+  config: Partial<AsrDailyAgentConfig> & { remove_retired_project_urls?: boolean },
 ): Promise<{ ok: boolean; config: AsrDailyAgentConfig }> {
   const response = await asrFetch(`/asr/tasks/${taskId}/daily-agent`, {
     method: "PUT",

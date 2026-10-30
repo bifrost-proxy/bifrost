@@ -61,23 +61,7 @@ export interface ExternalCliAdapterConfig {
   search?: boolean;
   ephemeral?: boolean;
   timeoutSecs?: number;
-  browser?: {
-    channel?: "edge" | "chrome" | string;
-    executable?: string;
-    profileDir?: string;
-    openOnAuthRequired?: boolean;
-    keepBrowserOpenAfterLogin?: boolean;
-    executionMode?: "headless" | "headed" | string;
-    closeTargetAfterRun?: boolean;
-  };
-  chatgpt?: {
-    baseUrl?: string;
-    pollIntervalMs?: number;
-    timeoutSecs?: number;
-  };
-  auth?: {
-    statePath?: string;
-  };
+
 }
 
 export interface ExternalCliAgentSettings {
@@ -133,19 +117,6 @@ export interface ExternalCliRunResult {
     normalizedEvents: string;
     lastMessage: string;
   };
-}
-
-export interface ChatGptWebAuthStatus {
-  state: string;
-  loggedIn: boolean;
-  identityComplete: boolean;
-  accountCheckOk: boolean;
-  accountStatus?: number;
-  cookieCount: number;
-  capturedHeaderNames: string[];
-  profileDir: string;
-  statePath: string;
-  message?: string;
 }
 
 export interface ImTarget {
@@ -491,24 +462,11 @@ export async function runExternalCliChat(data: {
   return post(`${BASE}/chat`, data);
 }
 
-export async function getChatGptWebAuthStatus(
-  runnerId?: string,
-): Promise<ChatGptWebAuthStatus> {
-  const query = runnerId ? `?runnerId=${encodeURIComponent(runnerId)}` : "";
-  return get(`${BASE}/chat/adapters/chatgpt-web/auth/status${query}`);
-}
 
-export async function openChatGptWebLogin(
-  runnerId?: string,
-): Promise<ChatGptWebAuthStatus> {
-  return post(`${BASE}/chat/adapters/chatgpt-web/auth/open`, { runnerId }, { timeout: 0 });
-}
 
-export async function stopChatGptWebLogin(
-  runnerId?: string,
-): Promise<ChatGptWebAuthStatus> {
-  return post(`${BASE}/chat/adapters/chatgpt-web/auth/stop`, { runnerId });
-}
+
+
+
 
 // Targets
 export async function listTargets(): Promise<ImTarget[]> {
@@ -626,4 +584,19 @@ export async function listHistoryEvents(): Promise<ImEvent[]> {
 
 export async function listHistoryRuns(): Promise<ImTaskRun[]> {
   return get(`${BASE}/history/runs`);
+}
+// Legacy records remain visible for migration/history, but are never offered for execution.
+export function isRetiredRunnerAdapter(adapter: string): boolean {
+  return ["chatgpt_web", "gpt_web", "chatgptweb", "gptweb"].includes(
+    adapter.trim().toLowerCase().replace(/[- ]/g, "_"),
+  );
+}
+
+export function selectableRunnerIds(
+  config: ExternalCliGatewayConfig | null | undefined,
+): string[] {
+  return Object.entries(config?.runners || {})
+    .filter(([, runner]) => !isRetiredRunnerAdapter(runner.adapter))
+    .map(([id]) => id)
+    .sort();
 }

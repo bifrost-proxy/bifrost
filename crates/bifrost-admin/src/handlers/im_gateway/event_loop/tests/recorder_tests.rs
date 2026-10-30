@@ -1301,10 +1301,7 @@ async fn external_runner_spawn_error_control_flow_sends_failure_terminal_card() 
 
 #[tokio::test]
 async fn external_runner_small_branches_keep_safe_defaults() {
-    assert_eq!(
-        external_cli_adapter_label(crate::im_gateway::chatgpt_web::ADAPTER_ID),
-        "ChatGPT Web"
-    );
+    assert_eq!(external_cli_adapter_label("custom_cli"), "Runner");
     assert_eq!(external_cli_adapter_label("traex"), "Runner");
 
     let mut without_message = group_test_event("provider", "missing", "", false, 1);

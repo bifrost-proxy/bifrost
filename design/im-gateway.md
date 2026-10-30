@@ -195,9 +195,8 @@ Scheduler：`ImGatewayService::start_scheduler()` 在启动时开常驻 loop；i
 
 Schedule 通道绑定必须显式；`message_channel.target_mode` 覆盖 `SourceThread` / `SourceUser` / `Owner` / `ConfiguredTarget`。执行完成后使用绑定通道的默认接收者发送通知，Agent 任务优先使用 `agent_final_response`。
 
-ChatGPT Web Runner 与 Codex Runner 在 schedule 首次执行成功后把 `conversation_id` / `thread_id` 回写到 `agent.conversation_ref`，后续 run 复用同一会话，除非显式重置 schedule。
 
-IM 内的 Codex、Traex、Claude Code、ChatGPT Web 共用 Bifrost schedule 控制面，不接入各自私有 scheduler。Gateway 在可信 runtime context 中固定当前 provider 与 destination，Agent 必须先调用 `schedule preview`，向用户展示规范化参数和未来三次运行时间，获得当前会话的明确确认后才可调用 `schedule add`。create 使用稳定 `idempotency_key` 去重；同 key 同请求返回既有 schedule，同 key 不同请求返回冲突。`agent.system_prompt` 会合并进实际 External Runner instructions。
+IM 内的 Codex、Traex、Claude Code 共用 Bifrost schedule 控制面，不接入各自私有 scheduler。Gateway 在可信 runtime context 中固定当前 provider 与 destination，Agent 必须先调用 `schedule preview`，向用户展示规范化参数和未来三次运行时间，获得当前会话的明确确认后才可调用 `schedule add`。create 使用稳定 `idempotency_key` 去重；同 key 同请求返回既有 schedule，同 key 不同请求返回冲突。`agent.system_prompt` 会合并进实际 External Runner instructions。
 
 ### Remote Invoke 协议扩展
 
@@ -261,7 +260,6 @@ pub enum RemoteImGatewayAction {
 - **Connections**：Provider 列表，卡片单列 + 居中 750px；卡片顶部展示名称、类型、连接状态、启用、连接模式；正文一行一个字段展示 Secret / App ID / Owner ID / Agent Runner / Agent Work Dir；App ID / Owner ID / Work Dir 悬浮显示复制按钮，Secret 只显示 configured/missing。Add Provider 三步向导；Edit 表单密度紧凑（`im-provider-edit-form-compact` class + `size="small"`）。
 - **Targets**：列表 + 编辑，channel check 按钮。
 - **Routes**：列表 + 编辑，V1 只暴露 `RunScriptAndReply`；trigger 必填。
-- **Schedules**：列表 + 详情弹窗；Add 弹窗支持 Script / Agent 两类任务，Agent 需选 Runner + preset prompt + work dir；每行支持 Run now、Pause、Resume、Delete；ChatGPT Web Runner 展示 `First-round Prompt`。
 - **History**：Events / Runs / Outbound Messages 三 tab；Runs 点击进入详情复用 Schedule run detail。
 
 窄宽度下 Connections/Routes 三列详情改为自适应网格；Targets/Schedules 表格开启横向滚动。

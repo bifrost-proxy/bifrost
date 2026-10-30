@@ -354,89 +354,6 @@ pub(super) fn fake_external_runner_override_command() -> (String, Vec<String>) {
 }
 
 #[test]
-pub(super) fn chatgpt_web_startup_auth_runners_include_all_web_runners() {
-    let temp_dir = tempfile::TempDir::new().unwrap();
-    let service = ImGatewayService::new(temp_dir.path());
-
-    let mut runners = std::collections::BTreeMap::new();
-    runners.insert(
-        "default".to_string(),
-        crate::im_gateway::external_cli::ExternalCliAgentSettings::default(),
-    );
-    runners.insert(
-        "web-disabled".to_string(),
-        crate::im_gateway::external_cli::ExternalCliAgentSettings {
-            adapter: crate::im_gateway::chatgpt_web::ADAPTER_ID.to_string(),
-            enabled: false,
-            ..Default::default()
-        },
-    );
-    runners.insert(
-        "web-enabled".to_string(),
-        crate::im_gateway::external_cli::ExternalCliAgentSettings {
-            adapter: crate::im_gateway::chatgpt_web::ADAPTER_ID.to_string(),
-            enabled: true,
-            ..Default::default()
-        },
-    );
-    runners.insert(
-        "codex".to_string(),
-        crate::im_gateway::external_cli::ExternalCliAgentSettings {
-            adapter: "codex".to_string(),
-            enabled: true,
-            ..Default::default()
-        },
-    );
-    service
-        .external_cli_config_store
-        .save(crate::im_gateway::external_cli::ExternalCliGatewayConfig {
-            version: 1,
-            default_runner_id: "default".to_string(),
-            runners,
-            channels: std::collections::BTreeMap::new(),
-        })
-        .unwrap();
-
-    let runner_ids = service
-        .chatgpt_web_startup_auth_runners()
-        .into_iter()
-        .map(|runner| runner.runner_id)
-        .collect::<Vec<_>>();
-
-    assert_eq!(runner_ids, vec!["web-disabled", "web-enabled"]);
-}
-
-#[tokio::test(flavor = "current_thread")]
-pub(super) async fn chatgpt_web_startup_auth_dry_run_reports_login_prompt() {
-    let temp_dir = tempfile::TempDir::new().unwrap();
-    let _env_guard = EnvGuard::set_data_dir(temp_dir.path());
-    let _dry_run_guard = EnvVarGuard::set(
-        crate::im_gateway::chatgpt_web::STARTUP_AUTH_DRY_RUN_ENV,
-        "1",
-    );
-    let settings = crate::im_gateway::external_cli::ExternalCliAgentSettings {
-        adapter: crate::im_gateway::chatgpt_web::ADAPTER_ID.to_string(),
-        ..Default::default()
-    };
-
-    let status = crate::im_gateway::chatgpt_web::ensure_startup_auth_ready("web", &settings)
-        .await
-        .unwrap();
-
-    assert_eq!(status.runner_id, "web");
-    assert!(!status.logged_in);
-    assert!(!status.opened_login);
-    assert!(status.dry_run);
-    assert!(std::path::Path::new(&status.state_path)
-        .ends_with(std::path::Path::new("chatgpt_web").join("auth_state.json")));
-    assert!(status
-        .message
-        .as_deref()
-        .unwrap_or_default()
-        .contains("would open login browser"));
-}
-
-#[test]
 pub(super) fn online_notification_message_uses_provider_work_dir_override() {
     let mut provider = test_provider();
     provider.agent_config = Some(ImProviderAgentConfig {
@@ -487,10 +404,10 @@ pub(super) fn online_notification_message_includes_runner_context_and_turns() {
     let mut provider = test_provider();
     provider.owner_open_id = Some("ou_owner".to_string());
     let context = OnlineNotificationAgentContext {
-        runner_type: "chatgpt_web".to_string(),
+        runner_type: "custom_cli".to_string(),
         runner_id: Some("web-main".to_string()),
         model: Some("gpt-5".to_string()),
-        model_provider: Some("chatgpt_web".to_string()),
+        model_provider: Some("custom_cli".to_string()),
         model_reasoning_effort: Some("high".to_string()),
         model_reasoning_summary: Some("auto".to_string()),
         session_key: "feishu-main:ou_owner".to_string(),
@@ -500,9 +417,9 @@ pub(super) fn online_notification_message_includes_runner_context_and_turns() {
     let message =
         build_online_notification_message_with_context(&provider, "eden-macbook", Some(&context));
 
-    assert!(message.contains("- **Runner Type**: `chatgpt_web`"));
+    assert!(message.contains("- **Runner Type**: `custom_cli`"));
     assert!(message.contains("- **Runner ID**: `web-main`"));
-    assert!(message.contains("- **Model**: `gpt-5（chatgpt_web）`"));
+    assert!(message.contains("- **Model**: `gpt-5（custom_cli）`"));
     assert!(message.contains("- **Reasoning Effort**: `high`"));
     assert!(message.contains("- **Reasoning Summary**: `auto`"));
     assert!(message.contains("- **Bound Session**: `feishu-main:ou_owner`"));
@@ -535,7 +452,7 @@ pub(super) fn online_notification_context_resolves_external_runner_adapter_and_t
         runners: std::collections::BTreeMap::from([(
             "web-main".to_string(),
             crate::im_gateway::external_cli::ExternalCliAgentSettings {
-                adapter: "chatgpt_web".to_string(),
+                adapter: "custom_cli".to_string(),
                 enabled: true,
                 ..Default::default()
             },
@@ -567,7 +484,7 @@ pub(super) fn online_notification_context_resolves_external_runner_adapter_and_t
         &manager,
     );
 
-    assert_eq!(context.runner_type, "chatgpt_web");
+    assert_eq!(context.runner_type, "custom_cli");
     assert_eq!(context.runner_id.as_deref(), Some("web-main"));
     assert_eq!(context.session_key, "feishu-main:ou_owner");
     assert_eq!(context.user_turn_count, 2);
@@ -6241,7 +6158,7 @@ pub(super) async fn concurrent_external_events_cover_active_and_queued_sessions(
     external_config.runners.insert(
         "web".to_string(),
         crate::im_gateway::external_cli::ExternalCliAgentSettings {
-            adapter: crate::im_gateway::chatgpt_web::ADAPTER_ID.to_string(),
+            adapter: "custom_cli".to_string(),
             enabled: true,
             ..Default::default()
         },

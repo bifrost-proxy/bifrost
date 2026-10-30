@@ -28,6 +28,21 @@ pub use local_sessions::{
     LocalExternalSession, LocalSessionSelectionContext,
 };
 
+/// Retired adapter names must never fall through to custom CLI execution.
+pub fn validate_supported_adapter(adapter: &str) -> Result<(), String> {
+    if let Some(runner_id) = adapter.strip_prefix("missing_runner:") {
+        return Err(format!("Runner '{runner_id}' does not exist. Select and configure a supported Runner explicitly; no provider was selected automatically."));
+    }
+    let name = adapter.trim().to_ascii_lowercase().replace(['-', ' '], "_");
+    if matches!(
+        name.as_str(),
+        "chatgpt_web" | "gpt_web" | "chatgptweb" | "gptweb"
+    ) {
+        return Err("ChatGPT Web Runner has been removed and is no longer supported. Select and configure another Runner explicitly; existing sessions, credentials and browser profiles are preserved. No provider was selected automatically.".to_string());
+    }
+    Ok(())
+}
+
 const DEFAULT_RUNTIME: &str = "external_cli";
 const DEFAULT_ADAPTER: &str = "codex";
 pub const CODEX_FAST_SERVICE_TIER: &str = "fast";
@@ -652,14 +667,12 @@ pub(crate) async fn request_local_managed_session_stop(
 ) -> bool {
     let worker_stopped = request_worker_session_stop(session_key).await;
     let legacy_stopped = request_session_stop(runs_root, session_key).await.is_ok();
-    let browser_stopped =
-        crate::im_gateway::chatgpt_web::worker::stop_session_run(session_key).await;
-    worker_stopped || legacy_stopped || browser_stopped
+    worker_stopped || legacy_stopped
 }
 
 /// Stop every supported runner implementation for an IM session in the
 /// process that owns it. This covers isolated external CLI workers, the legacy
-/// in-process protocol registry, and the browser worker used by ChatGPT Web.
+/// in-process protocol registry.
 pub async fn request_managed_session_stop(
     runs_root: impl AsRef<Path>,
     session_key: &str,
@@ -1474,9 +1487,37 @@ impl ExternalCliConfigStore {
     }
 
     pub fn save(&self, config: ExternalCliGatewayConfig) -> Result<(), String> {
+        // Track explicit rows separately from defaults injected by normalization.
+        // The existing alias migrations preserve explicitly supplied settings.
+        let mut submitted = config.clone();
+        submitted.runners = submitted
+            .runners
+            .into_iter()
+            .map(|(id, settings)| (id.trim().to_string(), settings))
+            .collect();
+        migrate_legacy_traex_runner_id(&mut submitted);
+        migrate_legacy_claude_code_runner_id(&mut submitted);
+        let config = normalized_gateway_config(config);
         let mut data = self.data.write();
-        *data = normalized_gateway_config(config);
-        save_config_to_disk(&self.file_path, &data)
+        // Compare with persisted state, not a stale worker cache: a migrated record
+        // must never be restored as a retired Runner by a later stale save.
+        let previous =
+            normalized_gateway_config(load_config_from_disk(&self.file_path).unwrap_or_default());
+        for (id, settings) in &previous.runners {
+            if !submitted.runners.contains_key(id) {
+                if let Err(retirement_error) = validate_supported_adapter(&settings.adapter) {
+                    let replacement =
+                        effective_config_for_provider_and_runner(&config, None, Some(id));
+                    if validate_supported_adapter(&replacement.settings.adapter).is_ok() {
+                        return Err(format!("{retirement_error} Removing Runner '{id}' would implicitly select a default Runner; explicitly migrate this record before deleting it."));
+                    }
+                }
+            }
+        }
+        validate_retired_config_edits(&previous, &config)?;
+        save_config_to_disk(&self.file_path, &config)?;
+        *data = config;
+        Ok(())
     }
 
     pub fn update_channel(
@@ -1489,15 +1530,51 @@ impl ExternalCliConfigStore {
             return Err("provider_id cannot be empty".to_string());
         }
         let mut data = self.data.write();
+        let previous = normalized_gateway_config(
+            load_config_from_disk(&self.file_path).unwrap_or_else(|| data.clone()),
+        );
+        let mut next = previous.clone();
         let patch = normalized_channel_settings(patch);
         if is_empty_channel_settings(&patch) {
-            data.channels.remove(provider_id);
+            next.channels.remove(provider_id);
         } else {
-            data.channels.insert(provider_id.to_string(), patch);
+            next.channels.insert(provider_id.to_string(), patch);
         }
-        save_config_to_disk(&self.file_path, &data)?;
+        validate_retired_config_edits(&previous, &next)?;
+        save_config_to_disk(&self.file_path, &next)?;
+        *data = next;
         Ok(effective_config_for_provider(&data, Some(provider_id)))
     }
+}
+
+// Unchanged legacy rows and bindings may round-trip so users can migrate one
+// record at a time. New/changed retired rows and new retired bindings are denied.
+fn validate_retired_config_edits(
+    previous: &ExternalCliGatewayConfig,
+    next: &ExternalCliGatewayConfig,
+) -> Result<(), String> {
+    for (id, settings) in &next.runners {
+        if previous.runners.get(id) != Some(settings) {
+            validate_supported_adapter(&settings.adapter)?;
+        }
+    }
+    if next.default_runner_id != previous.default_runner_id {
+        validate_supported_adapter(&effective_config_for_provider(next, None).settings.adapter)?;
+    }
+    for (provider, channel) in &next.channels {
+        let old_runner = previous
+            .channels
+            .get(provider)
+            .and_then(|item| item.runner_id.as_ref());
+        if channel.runner_id.as_ref() != old_runner {
+            validate_supported_adapter(
+                &effective_config_for_provider(next, Some(provider))
+                    .settings
+                    .adapter,
+            )?;
+        }
+    }
+    Ok(())
 }
 
 pub fn effective_config_for_provider(
@@ -1537,7 +1614,11 @@ pub fn effective_config_for_provider_and_runner(
         }
     }
     runner_id = canonical_external_cli_runner_id(config, &runner_id);
-    let mut settings = config.runners.get(&runner_id).cloned().unwrap_or_default();
+    let mut settings = config
+        .runners
+        .get(&runner_id)
+        .cloned()
+        .unwrap_or_else(|| missing_runner_settings(&runner_id));
     let mut sources = BTreeMap::new();
     sources.insert("runnerId".to_string(), "runner".to_string());
     sources.insert("enabled".to_string(), "runner".to_string());
@@ -2112,6 +2193,7 @@ impl ExternalCliRuntime {
         request: ExternalCliRunRequest,
         progress_tx: Option<mpsc::Sender<ExternalCliProgressEvent>>,
     ) -> Result<ExternalCliRunResult, String> {
+        validate_supported_adapter(&request.adapter)?;
         if crate::worker_runtime::im_gateway::is_im_gateway_worker_process() {
             if !crate::worker_runtime::im_broker::client_configured() {
                 return Err("IM Gateway worker Agent broker is not configured".to_string());
@@ -2123,28 +2205,12 @@ impl ExternalCliRuntime {
             )
             .await;
         }
-        let delegates_to_browser_worker = !cfg!(test)
-            && request.adapter == crate::im_gateway::chatgpt_web::ADAPTER_ID
-            && crate::worker_runtime::worker_execution_enabled(
-                crate::worker_runtime::WorkerKind::Browser,
-            )
-            && !crate::im_gateway::chatgpt_web::worker::is_browser_worker_process();
-        if delegates_to_browser_worker {
-            return self
-                .run_with_progress_inner(request, progress_tx, None)
-                .await;
-        }
-
         let registry_id = uuid::Uuid::new_v4().to_string();
         let logical_job_id = request
             .session_key
             .clone()
             .unwrap_or_else(|| registry_id.clone());
-        let worker_kind = if request.adapter == crate::im_gateway::chatgpt_web::ADAPTER_ID {
-            crate::worker_runtime::WorkerKind::Browser
-        } else {
-            crate::worker_runtime::WorkerKind::ExternalCli
-        };
+        let worker_kind = crate::worker_runtime::WorkerKind::ExternalCli;
         let worker_key = format!("{}:{}", worker_kind.as_str(), registry_id);
         crate::worker_runtime::begin_worker_job(
             &worker_key,
@@ -2214,20 +2280,6 @@ impl ExternalCliRuntime {
         progress_tx: Option<mpsc::Sender<ExternalCliProgressEvent>>,
         registry_id: Option<&str>,
     ) -> Result<ExternalCliRunResult, String> {
-        if !cfg!(test)
-            && request.adapter == crate::im_gateway::chatgpt_web::ADAPTER_ID
-            && crate::worker_runtime::worker_execution_enabled(
-                crate::worker_runtime::WorkerKind::Browser,
-            )
-            && !crate::im_gateway::chatgpt_web::worker::is_browser_worker_process()
-        {
-            return crate::im_gateway::chatgpt_web::worker::run_via_browser_worker(
-                self.runs_root.clone(),
-                request,
-                progress_tx,
-            )
-            .await;
-        }
         if should_run_external_cli_in_current_process() {
             if let Some(registry_id) = registry_id {
                 crate::worker_runtime::mark_worker_job_running(registry_id);
@@ -2556,6 +2608,7 @@ impl ExternalCliRuntime {
         request: ExternalCliRunRequest,
         progress_tx: Option<mpsc::Sender<ExternalCliProgressEvent>>,
     ) -> Result<ExternalCliRunResult, String> {
+        validate_supported_adapter(&request.adapter)?;
         validate_run_request(&request)?;
         validate_work_dir(&request)?;
         let started_at = now_ms();
@@ -2591,14 +2644,9 @@ impl ExternalCliRuntime {
         .await
         .map_err(|error| format!("write prompt failed: {error}"))?;
 
-        let external_cli_transport =
-            if request.adapter == crate::im_gateway::chatgpt_web::ADAPTER_ID {
-                None
-            } else {
-                Some(app_server::resolved_transport(&request)?)
-            };
+        let external_cli_transport = app_server::resolved_transport(&request)?;
         let spec = match external_cli_transport {
-            Some(ExternalCliTransport::AppServer) => app_server::build_command_spec(&request),
+            ExternalCliTransport::AppServer => app_server::build_command_spec(&request),
             _ => build_command_spec(&request, &last_message_path)?,
         };
         let cli_version = detect_cli_version(&request.adapter, &spec).await;
@@ -2624,84 +2672,12 @@ impl ExternalCliRuntime {
             ACTIVE_SESSIONS.insert(session_key.to_string(), run_id.clone());
         }
 
-        let mut command_started_at = None;
-        let mut command_finished_at = None;
-        let run_output = if request.adapter == crate::im_gateway::chatgpt_web::ADAPTER_ID {
-            let output_result =
-                crate::im_gateway::chatgpt_web::run_adapter(&request, &prompt, &run_dir).await;
-            remove_active_sessions_for_run(&run_id);
-            let output = match output_result {
-                Ok(output) => output,
-                Err(error) if error.starts_with("stopped:") => {
-                    crate::im_gateway::chatgpt_web::ChatGptWebRunOutput {
-                        status: ExternalCliRunStatus::Stopped,
-                        exit_code: None,
-                        stdout: Vec::new(),
-                        stderr: error.as_bytes().to_vec(),
-                        response: "ChatGPT Web run was stopped by request.".to_string(),
-                        responses: vec!["ChatGPT Web run was stopped by request.".to_string()],
-                        events: vec![ExternalCliProgressEvent {
-                            event_type: ExternalCliProgressEventType::RunFailed,
-                            content: "ChatGPT Web run was stopped by request.".to_string(),
-                            title: Some("Stopped".to_string()),
-                            raw: serde_json::json!({ "type": "run_stopped" }),
-                        }],
-                        metadata: BTreeMap::new(),
-                    }
-                }
-                Err(error) => {
-                    let response = format!("ChatGPT Web run failed: {error}");
-                    let mut metadata = BTreeMap::new();
-                    let diagnostics_path = run_dir.join("failure_diagnostics.json");
-                    if tokio::fs::try_exists(&diagnostics_path)
-                        .await
-                        .unwrap_or(false)
-                    {
-                        metadata.insert(
-                            "failureDiagnostics".to_string(),
-                            diagnostics_path.display().to_string(),
-                        );
-                    }
-                    crate::im_gateway::chatgpt_web::ChatGptWebRunOutput {
-                        status: ExternalCliRunStatus::Failed,
-                        exit_code: None,
-                        stdout: Vec::new(),
-                        stderr: error.as_bytes().to_vec(),
-                        response: response.clone(),
-                        responses: vec![response.clone()],
-                        events: vec![ExternalCliProgressEvent {
-                            event_type: ExternalCliProgressEventType::RunFailed,
-                            content: response,
-                            title: Some("Failed".to_string()),
-                            raw: serde_json::json!({
-                                "type": "run_failed",
-                                "adapter": crate::im_gateway::chatgpt_web::ADAPTER_ID,
-                                "error": error,
-                            }),
-                        }],
-                        metadata,
-                    }
-                }
-            };
-            tokio::fs::write(&last_message_path, output.response.as_bytes())
-                .await
-                .map_err(|error| format!("write last message failed: {error}"))?;
-            AdapterRunOutput {
-                status: output.status,
-                exit_code: output.exit_code,
-                stdout: output.stdout,
-                stderr: output.stderr,
-                events: output.events,
-                responses: output.responses,
-                response: output.response,
-                metadata: output.metadata,
-            }
-        } else {
+        let command_started_at;
+        let command_finished_at;
+        let run_output = {
             let session_key_for_stop = request.session_key.clone();
             command_started_at = Some(now_ms());
-            let command_output = match external_cli_transport
-                .expect("non-chatgpt external CLI transport must be resolved")
-            {
+            let command_output = match external_cli_transport {
                 ExternalCliTransport::AppServer => {
                     app_server::run_command(
                         &run_id,
@@ -2825,17 +2801,10 @@ impl ExternalCliRuntime {
                 serde_json::to_string(&saved_files).unwrap_or_else(|_| "[]".to_string()),
             );
         }
-        if request.adapter == crate::im_gateway::chatgpt_web::ADAPTER_ID {
-            tokio::fs::write(&stdout_path, &run_output.stdout)
-                .await
-                .map_err(|error| format!("write stdout failed: {error}"))?;
-            tokio::fs::write(&stderr_path, &run_output.stderr)
-                .await
-                .map_err(|error| format!("write stderr failed: {error}"))?;
-        } else {
-            ensure_external_cli_log_exists(&stdout_path, &run_output.stdout).await?;
-            ensure_external_cli_log_exists(&stderr_path, &run_output.stderr).await?;
-        }
+
+        ensure_external_cli_log_exists(&stdout_path, &run_output.stdout).await?;
+        ensure_external_cli_log_exists(&stderr_path, &run_output.stderr).await?;
+
         let persisted_events = persisted_event_summaries(&run_output.events);
         write_events_jsonl(&events_path, &persisted_events).await?;
         let artifacts = ExternalCliRunArtifacts {
@@ -8224,10 +8193,10 @@ fn normalized_gateway_config(mut config: ExternalCliGatewayConfig) -> ExternalCl
         if config.runners.contains_key(&canonical_default_runner_id) {
             config.default_runner_id = canonical_default_runner_id;
         } else {
-            config
-                .runners
-                .entry(config.default_runner_id.clone())
-                .or_default();
+            config.runners.insert(
+                config.default_runner_id.clone(),
+                missing_runner_settings(&config.default_runner_id),
+            );
         }
     }
     config.channels = config
@@ -8364,6 +8333,18 @@ pub fn canonical_external_cli_runner_id(
             DEFAULT_CLAUDE_CODE_RUNNER_ID.to_string()
         }
         _ => runner_id.to_string(),
+    }
+}
+
+fn missing_runner_settings(runner_id: &str) -> ExternalCliAgentSettings {
+    ExternalCliAgentSettings {
+        adapter: if validate_supported_adapter(runner_id).is_err() {
+            runner_id.to_string()
+        } else {
+            format!("missing_runner:{runner_id}")
+        },
+        enabled: false,
+        ..Default::default()
     }
 }
 

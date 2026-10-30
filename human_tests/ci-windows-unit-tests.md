@@ -31,19 +31,8 @@ source ~/.zshrc && SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin asr_platfor
 
 操作步骤：
 
-```bash
-source ~/.zshrc && for filter in \
-  chatgpt_web_startup_auth_dry_run_reports_login_prompt \
-  im_cwd_command_rejects_invalid_paths \
-  spawn_process_fallback_to_in_process_on_missing_executable \
-  spawn_or_fallback_fails_closed_when_forced_worker_cannot_start
-do
-  SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin "$filter" --lib -- --nocapture
-done
-```
 
 预期结果：
-- ChatGPT Web auth state path 使用 `Path::ends_with` 校验，不依赖 `/`。
 - `/cwd` 缺失路径用当前平台的绝对临时路径构造。
 - worker 缺失可执行文件断言同时接受 Unix `No such file` 和 Windows `The system cannot find...`。
 
@@ -104,9 +93,6 @@ source ~/.zshrc && SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin remote_invo
 
 操作步骤：
 
-```bash
-source ~/.zshrc && rg -n '/bin/(pwd|echo)|TEST_DATA_DIR_LOCK\.lock\(\)\.unwrap\(\)|chatgpt_web/auth_state\.json|ends_with\(".*\.daily/.+"\)' crates/bifrost-admin/src -g '*.rs'
-```
 
 预期结果：
 - 命中仅允许出现在平台分支 helper 或非 Windows 业务文本中。
@@ -356,11 +342,9 @@ SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin --lib \
 | 2026-07-14 | TC-CWUT-22 | 连续 5 次精确执行 Claude runtime dispatch 测试，并执行完整 stream-json 模块测试；覆盖版本探测、Python 启动、guide marker、replacement session 与 stdin/stdout 完整往返。 | 通过；精确 dispatch 5/5 次成功，单次耗时 4.11–6.50 秒；stream-json 模块 15/15 通过，包含此前失败的 parallel guide marker 与 replacement session 路径 |
 | 2026-07-14 | TC-CWUT-21 | 连续 50 次执行 `is_port_in_use_uses_fallback_socketaddr_on_parse_failure` 精确过滤用例；检查测试持有 `TcpListener` 到断言结束。 | 通过，50/50 次退出码 0；无效 host fallback 稳定检测仍被 listener 占用的 loopback 端口，不再存在释放端口后的 TOCTOU 窗口 |
 | 2026-06-11 | TC-CWUT-01 | 执行 `rg -n 'cfg\(all\(target_os = "macos", target_arch = "aarch64"\)\)' crates/bifrost-admin/src/handlers/asr_cli_invoke.rs crates/bifrost-admin/src/handlers/asr_jobs/tests.rs`，命中 ASR CLI child 与 3 个 native voiceprint identity/enrollment 测试；执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin asr_platform_support_matrix_is_apple_silicon_macos_only --lib -- --nocapture`。 | 通过 |
-| 2026-06-11 | TC-CWUT-02 | 执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin` 过滤 `chatgpt_web_startup_auth_dry_run_reports_login_prompt`、`im_cwd_command_rejects_invalid_paths`、`spawn_process_fallback_to_in_process_on_missing_executable`、`spawn_or_fallback_fails_closed_when_forced_worker_cannot_start`。 | 通过，4 个过滤用例均通过 |
 | 2026-06-11 | TC-CWUT-03 | 执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin` 过滤 `test_legacy_full_access_argv_exec_actually_runs`、`test_legacy_full_access_without_allowed_exec_modes_permits_argv`、`test_select_policy_single_rejection_has_no_double_error_prefix`、`test_resolve_shell_command_policy_for_grant`。 | 通过，前 3 个 executor 用例与 3 个 worker policy 用例均通过 |
 | 2026-06-11 | TC-CWUT-04 | 执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin` 过滤 `request_agent_stop_stops_external_runner_by_session_key`、`schedule_external_runner_executes_from_configured_work_dir`。 | 通过，2 个 IM Gateway external runner Windows shell/stdin 回归用例均通过 |
 | 2026-06-11 | TC-CWUT-05 | 执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin remote_invoke::file_access_roots::tests --lib -- --nocapture`。 | 通过，16 个 file_access_roots 用例均通过 |
-| 2026-06-11 | TC-CWUT-06 | 执行 `rg -n '/bin/(pwd\|echo)\|TEST_DATA_DIR_LOCK\.lock\(\)\.unwrap\(\)\|chatgpt_web/auth_state\.json\|ends_with\(".*\.daily/.+"\)' crates/bifrost-admin/src -g '*.rs'`。 | 通过，仅剩 `/bin/pwd` 与 `/bin/echo` 在平台分支 helper 的 Unix 分支中命中，无裸锁 unwrap、ChatGPT Web slash path 或 `.daily/...` slash suffix 断言残留 |
 | 2026-06-11 | TC-CWUT-04 | 跟进 GitHub Actions run `27354395092` 的 `Unit & Integration Tests`，定位 `schedule_external_runner_executes_from_configured_work_dir` 在 CI 快速退出 fake runner 时可能先退出再被 runtime 写 stdin，触发 BrokenPipe 并标记 Failed；本地旧实现过滤用例重复 20 次通过，新实现执行目标过滤用例和 `bifrost-admin --lib`。 | 通过。fake runner 先消费 stdin 再输出 workdir 结果，避免依赖本地/CI 进程退出时序 |
 | 2026-06-11 | TC-CWUT-08 | 执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin state::tests::request_tray_launch_invokes_registered_callback --lib -- --nocapture` 与 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin state::tests::reconcile_socket_summary --lib -- --nocapture`。 | 通过，托盘 callback 与 4 个 reconcile socket summary 单测均使用显式临时 `RulesStorage` 后稳定通过 |
 | 2026-06-11 | TC-CWUT-10 | 跟进 GitHub Actions run `27358341485` 的 `Windows Unit Tests (x86_64)`，定位 `bifrost-asr::timeline::tests::generates_daily_summary_grouped_by_date` 在 Windows 上输出 `sub\meeting_b` 后断言 `sub/meeting_b` 失败；本地执行 ASR filtered tests。 | 通过，Daily summary source label 对 `\` 统一归一为 `/`，Windows/Linux 不需要 native ASR runtime 即可覆盖 core artifact 文本逻辑 |

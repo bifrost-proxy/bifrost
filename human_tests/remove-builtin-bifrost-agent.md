@@ -47,7 +47,6 @@ Expected: every removed built-in-only asset is absent.
 
 ## TC-RBA-04: External runner selectors remain
 
-1. Run `rg -n 'Codex Runner|Claude Code|Trae X|ChatGPT Web' web/src/pages/AI web/src/pages/Settings/tabs`.
 2. Run `rg -n 'default_runner_id|DEFAULT_CODEX_RUNNER_ID' crates/bifrost-admin/src/im_gateway/external_cli/mod.rs`.
 
 Expected: external runner UI and default registry code remain present.

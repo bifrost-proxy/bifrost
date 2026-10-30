@@ -1331,6 +1331,7 @@ fn daily_agent_run_has_sendable_reports(status: &str, reports_generated: &[Strin
     matches!(status, "success" | "partial_success") && !reports_generated.is_empty()
 }
 
+#[cfg(test)]
 fn record_daily_agent_entry_failure(
     failed_entries: &mut Vec<DailyAgentEntryFailure>,
     task: &AsrDirectoryTask,
@@ -1353,41 +1354,9 @@ fn record_daily_agent_entry_failure(
     });
 }
 
-fn single_entry_change_plan(
-    plan: &AsrDailyAgentChangePlan,
-    entry: DailyAgentChangePlanEntry,
-) -> AsrDailyAgentChangePlan {
-    AsrDailyAgentChangePlan {
-        task_id: plan.task_id.clone(),
-        entries: vec![entry],
-        skipped: false,
-        skip_reason: None,
-    }
-}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ChatGptWebDailyAgentContract {
-    DailyReport,
-    TomorrowTodo,
-    GenericMarkdown,
-}
 
-fn chatgpt_web_daily_agent_contract(
-    agent_id: &str,
-    output_dir: &str,
-) -> ChatGptWebDailyAgentContract {
-    if agent_id == DEFAULT_TOMORROW_TODO_AGENT_ID
-        || output_dir == DEFAULT_TOMORROW_TODO_OUTPUT_DIR
-    {
-        ChatGptWebDailyAgentContract::TomorrowTodo
-    } else if agent_id == DEFAULT_DAILY_AGENT_ID || output_dir == DEFAULT_DAILY_AGENT_OUTPUT_DIR {
-        ChatGptWebDailyAgentContract::DailyReport
-    } else {
-        ChatGptWebDailyAgentContract::GenericMarkdown
-    }
-}
-
-fn chatgpt_web_normalized_response(response: &str) -> &str {
+fn normalized_markdown_response(response: &str) -> &str {
     let trimmed = response.trim();
     let normalized = if let Some(rest) = trimmed.strip_prefix("ChatGPT 说") {
         rest.trim_start_matches([':', '：']).trim()
@@ -1414,274 +1383,11 @@ fn chatgpt_web_normalized_response(response: &str) -> &str {
     }
 }
 
-fn chatgpt_web_response_is_placeholder(normalized: &str) -> bool {
+fn markdown_response_is_placeholder(normalized: &str) -> bool {
     normalized.starts_with("用户的消息为空")
         || normalized.contains("上传的文件包含")
         || normalized == "正在思考"
         || normalized == "正在打草稿"
-}
-
-fn validate_chatgpt_web_daily_report_response(response: &str, date: &str) -> Result<(), String> {
-    let trimmed = response.trim();
-    if trimmed.len() < 512 {
-        return Err(format!(
-            "chatgpt_web daily report response too short for {date}: {} bytes",
-            trimmed.len()
-        ));
-    }
-    if !trimmed.contains(date) {
-        return Err(format!(
-            "chatgpt_web daily report response missing target date {date}"
-        ));
-    }
-    let normalized = chatgpt_web_normalized_response(trimmed);
-    let expected_heading = format!("# {date} 日报");
-    if !normalized.starts_with(&expected_heading) {
-        return Err(format!(
-            "chatgpt_web daily report response missing leading report heading {expected_heading}"
-        ));
-    }
-    if !normalized.contains("今日概览") || !normalized.contains("证据与不确定性") {
-        return Err(format!(
-            "chatgpt_web daily report response missing required report sections for {date}"
-        ));
-    }
-    if chatgpt_web_response_is_placeholder(normalized) {
-        return Err(format!(
-            "chatgpt_web daily report response is a status/error placeholder for {date}"
-        ));
-    }
-    Ok(())
-}
-
-fn tomorrow_todo_target_date(source_date: &str) -> String {
-    NaiveDate::parse_from_str(source_date, "%Y-%m-%d")
-        .ok()
-        .and_then(|date| date.checked_add_signed(ChronoDuration::days(1)))
-        .map(|date| date.format("%Y-%m-%d").to_string())
-        .unwrap_or_else(|| source_date.to_string())
-}
-
-fn validate_chatgpt_web_tomorrow_todo_response(
-    response: &str,
-    source_date: &str,
-) -> Result<(), String> {
-    let target_date = tomorrow_todo_target_date(source_date);
-    let trimmed = response.trim();
-    if trimmed.len() < 128 {
-        return Err(format!(
-            "chatgpt_web tomorrow_todo response too short for {source_date}: {} bytes",
-            trimmed.len()
-        ));
-    }
-    if !trimmed.contains(&target_date) {
-        return Err(format!(
-            "chatgpt_web tomorrow_todo response missing target date {target_date} for source {source_date}"
-        ));
-    }
-    let normalized = chatgpt_web_normalized_response(trimmed);
-    let expected_heading = format!("# 明日 To Do List - {target_date}");
-    if !normalized.starts_with(&expected_heading) {
-        return Err(format!(
-            "chatgpt_web tomorrow_todo response missing leading todo heading {expected_heading}"
-        ));
-    }
-    if normalized.starts_with(&format!("# {source_date} 日报"))
-        || normalized.starts_with(&format!("# {target_date} 日报"))
-    {
-        return Err(format!(
-            "chatgpt_web tomorrow_todo response was a daily report for source {source_date}"
-        ));
-    }
-    for section in ["明天必须完成", "可选推进", "需要确认"] {
-        if !normalized.contains(section) {
-            return Err(format!(
-                "chatgpt_web tomorrow_todo response missing required section {section} for source {source_date}"
-            ));
-        }
-    }
-    if chatgpt_web_response_is_placeholder(normalized) {
-        return Err(format!(
-            "chatgpt_web tomorrow_todo response is a status/error placeholder for source {source_date}"
-        ));
-    }
-    Ok(())
-}
-
-fn validate_chatgpt_web_generic_markdown_response(
-    response: &str,
-    date: &str,
-    agent_id: &str,
-) -> Result<(), String> {
-    let trimmed = response.trim();
-    if trimmed.len() < 64 {
-        return Err(format!(
-            "chatgpt_web {agent_id} response too short for {date}: {} bytes",
-            trimmed.len()
-        ));
-    }
-    let normalized = chatgpt_web_normalized_response(trimmed);
-    if !trimmed.contains(date) && !normalized.starts_with("# ") {
-        return Err(format!(
-            "chatgpt_web {agent_id} response missing target date {date} or markdown heading"
-        ));
-    }
-    if chatgpt_web_response_is_placeholder(normalized) {
-        return Err(format!(
-            "chatgpt_web {agent_id} response is a status/error placeholder for {date}"
-        ));
-    }
-    Ok(())
-}
-
-fn validate_chatgpt_web_daily_agent_response(
-    response: &str,
-    date: &str,
-    agent_id: &str,
-    output_dir: &str,
-) -> Result<(), String> {
-    match chatgpt_web_daily_agent_contract(agent_id, output_dir) {
-        ChatGptWebDailyAgentContract::DailyReport => {
-            validate_chatgpt_web_daily_report_response(response, date)
-        }
-        ChatGptWebDailyAgentContract::TomorrowTodo => {
-            validate_chatgpt_web_tomorrow_todo_response(response, date)
-        }
-        ChatGptWebDailyAgentContract::GenericMarkdown => {
-            validate_chatgpt_web_generic_markdown_response(response, date, agent_id)
-        }
-    }
-}
-
-fn chatgpt_web_daily_agent_response_needs_continuation(
-    response: &str,
-    date: &str,
-    contract: ChatGptWebDailyAgentContract,
-) -> bool {
-    let normalized = chatgpt_web_normalized_response(response);
-    if chatgpt_web_response_is_placeholder(normalized) {
-        return false;
-    }
-
-    match contract {
-        ChatGptWebDailyAgentContract::DailyReport => {
-            normalized.starts_with(&format!("# {date} 日报"))
-                && normalized.contains("今日概览")
-                && !normalized.contains("证据与不确定性")
-        }
-        ChatGptWebDailyAgentContract::TomorrowTodo => {
-            let target_date = tomorrow_todo_target_date(date);
-            normalized.starts_with(&format!("# 明日 To Do List - {target_date}"))
-                && normalized.contains("明天必须完成")
-                && !normalized.contains("需要确认")
-        }
-        ChatGptWebDailyAgentContract::GenericMarkdown => false,
-    }
-}
-
-fn chatgpt_web_daily_agent_retry_prompt(
-    date: &str,
-    contract: ChatGptWebDailyAgentContract,
-) -> String {
-    match contract {
-        ChatGptWebDailyAgentContract::DailyReport => format!(
-            "上一条回复不是最终日报。系统动态确定的本次日期是 {date}，此规则优先级高于 AGENTS.md 中的历史固定日期或示例。请不要说明计划，不要总结你将要做什么，立即根据刚刚上传或粘贴的完整 Markdown 内容，直接输出完整的 {date} 日报正文。第一行必须严格为 `# {date} 日报`，必须包含 `## 今日概览` 和 `## 证据与不确定性`；不要保留日期冲突说明，不要使用代码块包装."
-        ),
-        ChatGptWebDailyAgentContract::TomorrowTodo => format!(
-            "上一条回复不是最终明日待办。系统动态确定的目标日期优先级高于 AGENTS.md 中的历史固定日期或示例。请不要说明计划，不要总结你将要做什么，立即根据刚刚上传或粘贴的完整 Markdown 内容，直接输出完整的 {} 明日 To Do List。第一行必须严格为 `# 明日 To Do List - {}`，必须包含 `## 明天必须完成`、`## 可选推进` 和 `## 需要确认`；不要保留日期冲突说明，不要使用代码块包装.",
-            tomorrow_todo_target_date(date),
-            tomorrow_todo_target_date(date),
-        ),
-        ChatGptWebDailyAgentContract::GenericMarkdown => format!(
-            "上一条回复不是最终 Markdown 输出。请不要说明计划，不要总结你将要做什么，立即根据刚刚上传或粘贴的完整 Markdown 内容，直接输出 {date} 对应的最终正文。输出必须是 Markdown 正文，不要使用代码块包装."
-        ),
-    }
-}
-
-fn chatgpt_web_daily_agent_retry_prompt_with_context(
-    original_prompt: &str,
-    date: &str,
-    contract: ChatGptWebDailyAgentContract,
-) -> String {
-    format!(
-        "{original_prompt}\n\n---\n\n{}",
-        chatgpt_web_daily_agent_retry_prompt(date, contract)
-    )
-}
-
-#[cfg(test)]
-mod retry_prompt_tests {
-    use super::*;
-
-    #[test]
-    fn retry_prompt_keeps_original_daily_agent_context() {
-        let original = "# Daily Agent Input\n\nsource-marker-2026-08-18";
-        let prompt = chatgpt_web_daily_agent_retry_prompt_with_context(
-            original,
-            "2026-08-18",
-            ChatGptWebDailyAgentContract::DailyReport,
-        );
-
-        assert!(prompt.starts_with(original));
-        assert!(prompt.contains("source-marker-2026-08-18"));
-        assert!(prompt.contains("# 2026-08-18 日报"));
-        assert!(prompt.contains("## 证据与不确定性"));
-    }
-}
-
-fn chatgpt_web_daily_agent_continuation_prompt(
-    date: &str,
-    contract: ChatGptWebDailyAgentContract,
-    tail: &str,
-) -> String {
-    match contract {
-        ChatGptWebDailyAgentContract::DailyReport => format!(
-            "上一条 {date} 日报正文在中途截断了。请从下面这段末尾之后继续写，不要重复前文，不要使用代码块；继续补齐剩余章节，最后必须包含 `## 证据与不确定性`。\n\n上一条末尾：\n{tail}"
-        ),
-        ChatGptWebDailyAgentContract::TomorrowTodo => format!(
-            "上一条 {} 明日 To Do List 在中途截断了。请从下面这段末尾之后继续写，不要重复前文，不要使用代码块；继续补齐剩余章节，最后必须包含 `## 需要确认`。\n\n上一条末尾：\n{tail}",
-            tomorrow_todo_target_date(date),
-        ),
-        ChatGptWebDailyAgentContract::GenericMarkdown => format!(
-            "上一条 {date} Markdown 输出在中途截断了。请从下面这段末尾之后继续写，不要重复前文，不要使用代码块；继续补齐剩余正文。\n\n上一条末尾：\n{tail}"
-        ),
-    }
-}
-
-#[cfg(test)]
-fn merge_chatgpt_web_daily_report_continuation(
-    base: &str,
-    continuation: &str,
-    date: &str,
-) -> String {
-    let continuation = continuation.trim();
-    if validate_chatgpt_web_daily_report_response(continuation, date).is_ok() {
-        continuation.to_string()
-    } else {
-        format!("{}\n{}", base.trim_end(), continuation.trim_start())
-    }
-}
-
-fn merge_chatgpt_web_daily_agent_continuation(
-    base: &str,
-    continuation: &str,
-    date: &str,
-    agent_id: &str,
-    output_dir: &str,
-) -> String {
-    let continuation = continuation.trim();
-    if validate_chatgpt_web_daily_agent_response(continuation, date, agent_id, output_dir).is_ok()
-    {
-        continuation.to_string()
-    } else {
-        format!("{}\n{}", base.trim_end(), continuation.trim_start())
-    }
-}
-
-fn chatgpt_web_daily_report_tail(response: &str, max_chars: usize) -> String {
-    let chars: Vec<char> = response.chars().collect();
-    let start = chars.len().saturating_sub(max_chars);
-    chars[start..].iter().collect()
 }
 
 fn metadata_value(
@@ -1707,9 +1413,7 @@ fn persist_daily_agent_conversation_success(
     state.session_key = Some(session_key.to_string());
     state.initialized = true;
     state.updated_at_ms = Some(now_ms());
-    if adapter == "chatgpt_web" {
-        state.conversation_id = None;
-    } else if let Some(metadata) = metadata {
+     if let Some(metadata) = metadata {
         if let Some(conversation_id) =
             metadata_value(metadata, &["conversationId", "conversation_id"])
         {
@@ -1736,18 +1440,12 @@ async fn run_external_daily_agent_prompt(
         effective.settings.adapter.as_str(),
         conversation_state,
     );
-    let request_session_key = if effective.settings.adapter == "chatgpt_web" {
-        crate::im_gateway::chatgpt_web::clear_session_conversation(session_key).await;
-        None
-    } else {
-        Some(session_key.to_string())
-    };
     run_external_daily_agent_prompt_with_params(
         task,
         runner_id,
         prompt,
         daily_dir,
-        request_session_key,
+        Some(session_key.to_string()),
         params,
         effective,
     )
@@ -1763,15 +1461,14 @@ async fn run_external_daily_agent_prompt_with_params(
     params: serde_json::Value,
     effective: &crate::im_gateway::external_cli::ExternalCliEffectiveConfig,
 ) -> Result<crate::im_gateway::external_cli::ExternalCliRunResult, String> {
+    crate::im_gateway::external_cli::validate_supported_adapter(&effective.settings.adapter)?;
+    if !effective.settings.enabled {
+        return Err(format!("Runner '{runner_id}' is disabled; select an enabled supported Runner explicitly."));
+    }
     let operation = match effective.settings.adapter.as_str() {
         "codex" => "run".to_string(),
         _ => "send".to_string(),
     };
-    let adapter_config = daily_agent_external_runner_adapter_config(
-        effective.settings.adapter.as_str(),
-        &effective.settings.adapter_config,
-        task.daily_agent.timeout_ms,
-    );
 
     let request = crate::im_gateway::external_cli::ExternalCliRunRequest {
         images: Vec::new(),
@@ -1786,7 +1483,7 @@ async fn run_external_daily_agent_prompt_with_params(
         adapter: effective.settings.adapter.clone(),
         work_dir: Some(daily_dir.to_path_buf()),
         instructions: None,
-        adapter_config,
+        adapter_config: effective.settings.adapter_config.clone(),
         allow_work_dirs: vec![
             daily_dir.to_string_lossy().to_string(),
             daily_dir_for_task(&task.id).to_string_lossy().to_string(),
@@ -1818,103 +1515,6 @@ async fn run_external_daily_agent_prompt_with_params(
     }
 
     Ok(run_result)
-}
-
-async fn wait_chatgpt_web_daily_agent_conversation(
-    task: &AsrDirectoryTask,
-    runner_id: &str,
-    daily_dir: &Path,
-    conversation_id: &str,
-    effective: &crate::im_gateway::external_cli::ExternalCliEffectiveConfig,
-) -> Result<crate::im_gateway::external_cli::ExternalCliRunResult, String> {
-    let adapter_config = daily_agent_external_runner_adapter_config(
-        effective.settings.adapter.as_str(),
-        &effective.settings.adapter_config,
-        daily_agent_chatgpt_web_same_conversation_wait_timeout_ms(task.daily_agent.timeout_ms),
-    );
-    let request = crate::im_gateway::external_cli::ExternalCliRunRequest {
-        images: Vec::new(),
-        files: Vec::new(),
-        message: String::new(),
-        operation: "wait".to_string(),
-        params: serde_json::json!({ "conversationId": conversation_id }),
-        provider_id: None,
-        runner_id: Some(runner_id.to_string()),
-        session_key: None,
-        runtime: "external_cli".to_string(),
-        adapter: effective.settings.adapter.clone(),
-        work_dir: Some(daily_dir.to_path_buf()),
-        instructions: None,
-        adapter_config,
-        allow_work_dirs: vec![
-            daily_dir.to_string_lossy().to_string(),
-            daily_dir_for_task(&task.id).to_string_lossy().to_string(),
-        ],
-        inject_bifrost_tools: effective.settings.inject_bifrost_tools,
-        skill_paths: effective.settings.skill_paths.clone(),
-    };
-
-    let runtime = crate::im_gateway::external_cli::ExternalCliRuntime::new(
-        bifrost_storage::data_dir().join("im_gateway/runs"),
-    );
-    let wait_timeout_ms =
-        daily_agent_chatgpt_web_same_conversation_wait_timeout_ms(task.daily_agent.timeout_ms);
-    let timeout_duration = Duration::from_millis(wait_timeout_ms);
-    let run_result = tokio::time::timeout(timeout_duration, runtime.run(request))
-        .await
-        .map_err(|_| {
-            format!(
-                "daily agent wait timed out after {}ms",
-                wait_timeout_ms
-            )
-        })?
-        .map_err(|e| format!("external CLI wait failed: {e}"))?;
-
-    if run_result.status != crate::im_gateway::external_cli::ExternalCliRunStatus::Succeeded {
-        return Err(format!(
-            "external CLI wait failed with status {:?}: {}",
-            run_result.status, run_result.response
-        ));
-    }
-
-    Ok(run_result)
-}
-
-fn daily_agent_external_runner_adapter_config(
-    adapter: &str,
-    config: &crate::im_gateway::external_cli::ExternalCliAdapterConfig,
-    daily_timeout_ms: u64,
-) -> crate::im_gateway::external_cli::ExternalCliAdapterConfig {
-    let mut config = config.clone();
-    if adapter != "chatgpt_web" {
-        return config;
-    }
-    let inner_timeout_secs = daily_agent_chatgpt_web_inner_timeout_secs(daily_timeout_ms);
-    config.timeout_secs = Some(inner_timeout_secs);
-    config
-}
-
-fn daily_agent_chatgpt_web_inner_timeout_secs(daily_timeout_ms: u64) -> u64 {
-    const MIN_TIMEOUT_SECS: u64 = 1;
-    const OUTER_TIMEOUT_HEADROOM_SECS: u64 = 30;
-    let daily_timeout_secs = daily_timeout_ms / 1000;
-    daily_timeout_secs
-        .saturating_sub(OUTER_TIMEOUT_HEADROOM_SECS)
-        .max(MIN_TIMEOUT_SECS)
-}
-
-fn daily_agent_chatgpt_web_same_conversation_wait_timeout_ms(daily_timeout_ms: u64) -> u64 {
-    const SAME_CONVERSATION_WAIT_MIN_MS: u64 = 5_000;
-    const OUTER_TIMEOUT_HEADROOM_MS: u64 = 30_000;
-    if daily_timeout_ms <= SAME_CONVERSATION_WAIT_MIN_MS {
-        return SAME_CONVERSATION_WAIT_MIN_MS;
-    }
-    if daily_timeout_ms <= OUTER_TIMEOUT_HEADROOM_MS * 2 {
-        return daily_timeout_ms;
-    }
-    daily_timeout_ms
-        .saturating_sub(OUTER_TIMEOUT_HEADROOM_MS)
-        .clamp(SAME_CONVERSATION_WAIT_MIN_MS, daily_timeout_ms)
 }
 
 fn daily_agent_external_runner_params(
@@ -2002,292 +1602,40 @@ async fn run_daily_agent_inner(
 
     // 5. Dispatch to runner
     let conversation_success: Option<(String, Option<DailyAgentBTreeMap<String, String>>)>;
-    let mut failed_entries = Vec::new();
+    let failed_entries: Vec<DailyAgentEntryFailure> = Vec::new();
 
     if task.daily_agent.research_fanout.is_some() {
         run_daily_agent_research_fanout(task, &plan).await?;
         conversation_success = None;
     } else if let Some(runner_id) = daily_agent_external_runner_id(task) {
-            let runner_id = runner_id.to_string();
-            // Read runner config to get adapter and other settings
-            let config_store = crate::im_gateway::external_cli::ExternalCliConfigStore::new(
-                &bifrost_storage::data_dir(),
-            );
-            let config = config_store.load();
-            let effective = crate::im_gateway::external_cli::effective_config_for_provider_and_runner(
-                &config,
-                None,
-                Some(&runner_id),
-            );
-
-            let mut last_metadata: Option<DailyAgentBTreeMap<String, String>> = None;
-
-            if adapter == "chatgpt_web" {
-                let agent_id = task.daily_agent.agent_id.as_str();
-                let output_dir = task.daily_agent.output_dir.as_str();
-                let response_contract =
-                    chatgpt_web_daily_agent_contract(agent_id, output_dir);
-                let changed_entries: Vec<_> = plan
-                    .entries
-                    .iter()
-                    .filter(|e| e.change_kind != DailyAgentChangeKind::Unchanged)
-                    .cloned()
-                    .collect();
-                'entry_loop: for entry in changed_entries {
-                    macro_rules! fail_entry {
-                        ($error:expr) => {{
-                            record_daily_agent_entry_failure(
-                                &mut failed_entries,
-                                task,
-                                entry,
-                                $error,
-                            );
-                            continue 'entry_loop;
-                        }};
-                    }
-                    let entry_plan = single_entry_change_plan(&plan, entry.clone());
-                    let prompt = match build_daily_agent_prompt(task, &entry_plan, &adapter, true)
-                    {
-                        Ok(prompt) => prompt,
-                        Err(error) => fail_entry!(error),
-                    };
-                    let retry_context_prompt = prompt.clone();
-                    let run_result = match run_external_daily_agent_prompt(
-                        task,
-                        &runner_id,
-                        prompt,
-                        &agent_work_dir,
-                        &session_key,
-                        &conversation_state,
-                        &effective,
-                    )
-                    .await
-                    {
-                        Ok(run_result) => run_result,
-                        Err(error) => fail_entry!(error),
-                    };
-                    let mut entry_last_metadata = Some(run_result.metadata.clone());
-                    let response = run_result.response.trim();
-                    if response.is_empty() {
-                        fail_entry!("chatgpt_web daily agent returned an empty response");
-                    }
-                    let response = match validate_chatgpt_web_daily_agent_response(
-                        response,
-                        &entry.date,
-                        agent_id,
-                        output_dir,
-                    ) {
-                        Ok(()) => response.to_string(),
-                        Err(first_error) => {
-                            let Some(conversation_id) =
-                                metadata_value(&run_result.metadata, &["conversationId", "conversation_id"])
-                            else {
-                                fail_entry!(first_error);
-                            };
-                            tracing::warn!(
-                                date = %entry.date,
-                                agent_id,
-                                conversation_id = %conversation_id,
-                                error = %first_error,
-                                "chatgpt_web daily agent response failed validation; waiting for same conversation before retry"
-                            );
-                            let mut same_conversation_response = None;
-                            let waited_result = wait_chatgpt_web_daily_agent_conversation(
-                                task,
-                                &runner_id,
-                                &agent_work_dir,
-                                &conversation_id,
-                                &effective,
-                            )
-                            .await;
-                            if let Ok(waited_result) = waited_result {
-                                entry_last_metadata = Some(waited_result.metadata.clone());
-                                let waited_response = waited_result.response.trim().to_string();
-                                if validate_chatgpt_web_daily_agent_response(
-                                    &waited_response,
-                                    &entry.date,
-                                    agent_id,
-                                    output_dir,
-                                )
-                                .is_ok()
-                                {
-                                    tracing::info!(
-                                        date = %entry.date,
-                                        agent_id,
-                                        conversation_id = %conversation_id,
-                                        "chatgpt_web daily agent same-conversation wait produced valid final response"
-                                    );
-                                    same_conversation_response = Some(waited_response);
-                                } else {
-                                    tracing::warn!(
-                                        date = %entry.date,
-                                        agent_id,
-                                        conversation_id = %conversation_id,
-                                        waited_len = waited_response.len(),
-                                        "chatgpt_web daily agent same-conversation wait still failed validation; retrying with explicit final-output instruction"
-                                    );
-                                }
-                            } else if let Err(wait_error) = waited_result {
-                                tracing::warn!(
-                                    date = %entry.date,
-                                    agent_id,
-                                    conversation_id = %conversation_id,
-                                    error = %wait_error,
-                                    "chatgpt_web daily agent same-conversation wait failed; retrying with explicit final-output instruction"
-                                );
-                            }
-                            if let Some(valid_response) = same_conversation_response {
-                                valid_response
-                            } else {
-                            tracing::warn!(
-                                date = %entry.date,
-                                agent_id,
-                                conversation_id = %conversation_id,
-                                error = %first_error,
-                                "chatgpt_web daily agent response failed validation; retrying with explicit final-output instruction"
-                            );
-                            let retry_prompt = chatgpt_web_daily_agent_retry_prompt_with_context(
-                                &retry_context_prompt,
-                                &entry.date,
-                                response_contract,
-                            );
-                            let retry_result = match run_external_daily_agent_prompt_with_params(
-                                task,
-                                &runner_id,
-                                retry_prompt,
-                                &agent_work_dir,
-                                None,
-                                serde_json::json!({ "conversationId": conversation_id }),
-                                &effective,
-                            )
-                            .await
-                            {
-                                Ok(retry_result) => retry_result,
-                                Err(error) => fail_entry!(error),
-                            };
-                            entry_last_metadata = Some(retry_result.metadata.clone());
-                            let mut retry_response = retry_result.response.trim().to_string();
-                            if validate_chatgpt_web_daily_agent_response(
-                                &retry_response,
-                                &entry.date,
-                                agent_id,
-                                output_dir,
-                            )
-                            .is_err()
-                                && chatgpt_web_daily_agent_response_needs_continuation(
-                                    &retry_response,
-                                    &entry.date,
-                                    response_contract,
-                                )
-                            {
-                                let retry_conversation_id = metadata_value(
-                                    &retry_result.metadata,
-                                    &["conversationId", "conversation_id"],
-                                )
-                                .unwrap_or_else(|| conversation_id.clone());
-                                for attempt in 1..=3 {
-                                    let tail = chatgpt_web_daily_report_tail(&retry_response, 1200);
-                                    tracing::warn!(
-                                        date = %entry.date,
-                                        agent_id,
-                                        conversation_id = %retry_conversation_id,
-                                        attempt,
-                                        "chatgpt_web daily agent response appears truncated; requesting continuation"
-                                    );
-                                    let continuation_prompt =
-                                        chatgpt_web_daily_agent_continuation_prompt(
-                                            &entry.date,
-                                            response_contract,
-                                            &tail,
-                                        );
-                                    let continuation_result =
-                                        match run_external_daily_agent_prompt_with_params(
-                                            task,
-                                            &runner_id,
-                                            continuation_prompt,
-                                            &agent_work_dir,
-                                            None,
-                                            serde_json::json!({
-                                                "conversationId": retry_conversation_id
-                                            }),
-                                            &effective,
-                                        )
-                                        .await
-                                        {
-                                            Ok(continuation_result) => continuation_result,
-                                            Err(error) => fail_entry!(error),
-                                        };
-                                    entry_last_metadata =
-                                        Some(continuation_result.metadata.clone());
-                                    retry_response = merge_chatgpt_web_daily_agent_continuation(
-                                        &retry_response,
-                                        &continuation_result.response,
-                                        &entry.date,
-                                        agent_id,
-                                        output_dir,
-                                    );
-                                    if validate_chatgpt_web_daily_agent_response(
-                                        &retry_response,
-                                        &entry.date,
-                                        agent_id,
-                                        output_dir,
-                                    )
-                                    .is_ok()
-                                    {
-                                        break;
-                                    }
-                                }
-                            }
-                            if let Err(error) = validate_chatgpt_web_daily_agent_response(
-                                &retry_response,
-                                &entry.date,
-                                agent_id,
-                                output_dir,
-                            ) {
-                                fail_entry!(error);
-                            }
-                            retry_response
-                            }
-                        }
-                    };
-                    let response = chatgpt_web_normalized_response(&response).to_string();
-                    let report_path = PathBuf::from(&entry.report_target);
-                    if let Some(parent) = report_path.parent() {
-                        std::fs::create_dir_all(parent).ok();
-                    }
-                    if let Err(e) = std::fs::write(&report_path, &response) {
-                        fail_entry!(format!(
-                            "failed to save chatgpt_web response as report {}: {e}",
-                            report_path.display()
-                        ));
-                    } else {
-                        tracing::info!(
-                            report_path = %report_path.display(),
-                            len = response.len(),
-                            "saved chatgpt_web response as report"
-                        );
-                    }
-                    last_metadata = entry_last_metadata;
-                }
-            } else {
-                let prompt = build_daily_agent_prompt(task, &plan, &adapter, false)?;
-                let run_result = run_external_daily_agent_prompt(
-                    task,
-                    &runner_id,
-                    prompt,
-                    &agent_work_dir,
-                    &session_key,
-                    &conversation_state,
-                    &effective,
-                )
-                .await?;
-                apply_external_daily_agent_metadata(&mut conversation_state, &run_result.metadata);
-                last_metadata = Some(run_result.metadata.clone());
-            }
-            conversation_success = Some((effective.settings.adapter.clone(), last_metadata));
-        } else {
-            return Err("daily agent requires an external runner".to_string());
-        }
+        let runner_id = runner_id.to_string();
+        // Read runner config to get adapter and other settings
+        let config_store = crate::im_gateway::external_cli::ExternalCliConfigStore::new(
+            &bifrost_storage::data_dir(),
+        );
+        let config = config_store.load();
+        let effective = crate::im_gateway::external_cli::effective_config_for_provider_and_runner(
+            &config,
+            None,
+            Some(&runner_id),
+        );
+        let prompt = build_daily_agent_prompt(task, &plan, &adapter, false)?;
+        let run_result = run_external_daily_agent_prompt(
+            task,
+            &runner_id,
+            prompt,
+            &agent_work_dir,
+            &session_key,
+            &conversation_state,
+            &effective,
+        )
+        .await?;
+        apply_external_daily_agent_metadata(&mut conversation_state, &run_result.metadata);
+        let last_metadata = Some(run_result.metadata.clone());
+        conversation_success = Some((effective.settings.adapter.clone(), last_metadata));
+    } else {
+        return Err("daily agent requires an external runner".to_string());
+    }
 
     // 6. Validate reports before marking source documents processed.
     let failed_report_targets = failed_entries

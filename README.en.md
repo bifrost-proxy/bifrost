@@ -77,16 +77,7 @@ http://127.0.0.1:9900/_bifrost/
 bifrost install-skill -y
 ```
 
-ASR Daily Agent can fan out one daily report into separate ChatGPT Web research conversations. Set the optional `chatgpt_project_url` on the research fan-out to file every new conversation in a specific ChatGPT Project while continuing to enforce Chat mode and the Pro model:
-
-```json
-{
-  "max_questions": 8,
-  "chatgpt_interface_mode": "chat",
-  "chatgpt_model": "pro",
-  "chatgpt_project_url": "https://chatgpt.com/g/g-p-<project-id>/project"
-}
-```
+ASR Daily Agent can fan out daily reports into independent questions using explicitly configured Codex, Traex, Claude Code or custom CLI Runners. ChatGPT Web Runner has been removed; see the [migration guide](design/remove-chatgpt-web-runner.md).
 
 See [`design/asr-daily-agent-pipeline.md`](design/asr-daily-agent-pipeline.md) for the complete agent graph, research manifest, and failure boundaries.
 
