@@ -4,13 +4,26 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SearchResultItem } from "../../types";
 import SearchResultsList from "./SearchResultsList";
 
+const virtual = vi.hoisted(() => {
+  const state = { count: 0 };
+  return {
+    state,
+    instance: {
+      getTotalSize: () => state.count * 64,
+      getVirtualItems: () => [],
+    },
+  };
+});
 vi.mock("@tanstack/react-virtual", () => ({
-  useVirtualizer: ({ count }: { count: number }) => ({
-    getTotalSize: () => count * 64,
-    getVirtualItems: () => [],
-  }),
+  useVirtualizer: ({ count }: { count: number }) => {
+    virtual.state.count = count;
+    return virtual.instance;
+  },
 }));
-vi.mock("antd", () => ({ theme: { useToken: () => ({ token: {} }) } }));
+vi.mock("antd", () => {
+  const token = {};
+  return { theme: { useToken: () => ({ token }) } };
+});
 vi.mock("../AppIcon", () => ({ default: () => null }));
 
 let container: HTMLDivElement;
@@ -121,4 +134,27 @@ describe("short filtered search pagination", () => {
     );
     expect(load).not.toHaveBeenCalled();
   });
+});
+
+it("updates the virtual height when batches grow with a stable virtualizer instance", async () => {
+  const render = async (count: number) =>
+    act(() =>
+      root.render(
+        <SearchResultsList
+          results={Array(count).fill({}) as SearchResultItem[]}
+          keyword="match"
+          hasMore={false}
+          isLoadingMore={false}
+          onLoadMore={() => {}}
+          onSelect={() => {}}
+          onDoubleClick={() => {}}
+        />,
+      ),
+    );
+  await render(10);
+  const list = container.firstElementChild!.firstElementChild as HTMLElement;
+  expect(list.style.height).toBe("640px");
+  await render(30);
+  expect(container.firstElementChild!.firstElementChild).toBe(list);
+  expect(list.style.height).toBe("1920px");
 });
