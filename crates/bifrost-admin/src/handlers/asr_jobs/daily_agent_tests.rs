@@ -5277,7 +5277,7 @@ async fn retired_web_deleted_daily_binding_never_dispatches_codex_or_reuses_cach
     let store = ExternalCliConfigStore::new(temp.path());
     let mut task = test_directory_task("deleted-web-binding", temp.path().join("audio"));
     task.daily_agent.runner = "web".into();
-    task.daily_agent.research_fanout = Some(AsrDailyAgentResearchFanoutConfig::default());
+    task.daily_agent.research_fanout = Some(AsrDailyAgentResearchFanoutConfig {allowed_runners:vec!["web".into()], ..Default::default()});
     let mut agent = AsrDailyAgentItem::daily_report();
     agent.runner = "web".into();
     agent.research_fanout = task.daily_agent.research_fanout.clone();
@@ -5311,6 +5311,7 @@ async fn retired_web_deleted_daily_binding_never_dispatches_codex_or_reuses_cach
     let result_path = child_dir.join("q1.md");
     let metadata_path = child_dir.join("q1.json");
     std::fs::write(&result_path, "preserve cached report").unwrap();
+    validate_daily_research_manifest(&manifest, task.daily_agent.research_fanout.as_ref().unwrap(), "web").unwrap();
     let fingerprint = daily_research_question_fingerprint(&manifest.questions[0], "web", task.daily_agent.research_fanout.as_ref().unwrap());
     let cached: AsrDailyResearchChildResult = serde_json::from_value(serde_json::json!({"question_id":"q1","original_question":"cached question","runner":"web","status":"success","result_path":result_path,"fingerprint_sha256":fingerprint,"result_sha256":compute_sha256(&result_path).unwrap()})).unwrap();
     atomic_json_write(&metadata_path, &cached).unwrap();
@@ -5320,4 +5321,86 @@ async fn retired_web_deleted_daily_binding_never_dispatches_codex_or_reuses_cach
     assert!(error.contains("does not exist"), "{error}");
     assert_eq!(std::fs::read(metadata_path).unwrap(), before);
     assert_eq!(std::fs::read_to_string(result_path).unwrap(), "preserve cached report");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn retired_builtin_config_api_delete_cannot_reactivate_daily_agent_or_cached_codex() {
+    let temp = TempDir::new().unwrap();
+    let _guard = EnvGuard::set_data_dir(temp.path());
+    let config_path = temp.path().join("admin/im_gateway_external_cli_agent.json");
+    std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+    std::fs::write(&config_path, r#"{"version":2,"defaultRunnerId":"safe","runners":{"safe":{"enabled":true,"adapter":"custom_cli"},"Codex":{"enabled":true,"adapter":"chatgpt_web"}},"channels":{}}"#).unwrap();
+    let service = std::sync::Arc::new(crate::ImGatewayService::new(temp.path()));
+    let mut task = test_directory_task("retired-builtin-daily", temp.path().join("audio"));
+    let mut agent = AsrDailyAgentItem::daily_report();
+    agent.runner = "Codex".into();
+    agent.research_fanout = Some(AsrDailyAgentResearchFanoutConfig {allowed_runners:vec!["Codex".into()],..Default::default()});
+    task.daily_agent.agents = vec![agent.clone()];
+    let mut task = task_for_daily_agent(&task, &agent);
+    add_task(task.clone()).unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        loop {
+            let (stream, _) = listener.accept().await.unwrap();
+            let service = service.clone();
+            tokio::spawn(async move {
+                let _ = hyper::server::conn::http1::Builder::new().serve_connection(
+                    hyper_util::rt::TokioIo::new(stream),
+                    hyper::service::service_fn(move |request| {
+                        let service = service.clone();
+                        async move {
+                            let path = request.uri().path().to_string();
+                            Ok::<_, std::convert::Infallible>(crate::handlers::im_gateway::handle_im_gateway(request, Some(service), &path).await)
+                        }
+                    }),
+                ).await;
+            });
+        }
+    });
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let url = format!("http://{address}/api/im-gateway/chat/config");
+    let mut config: serde_json::Value = client.get(&url).send().await.unwrap().json().await.unwrap();
+    config["runners"].as_object_mut().unwrap().remove("Codex");
+    let response = client.patch(&url).json(&config).send().await.unwrap();
+    // On the old implementation this is 200 and an enabled native Codex is inserted.
+    // Stop here on regression, before anything could invoke an actual provider.
+    assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST, "{}", response.text().await.unwrap());
+    let config: serde_json::Value = client.get(&url).send().await.unwrap().json().await.unwrap();
+    assert_eq!(config["runners"]["Codex"]["adapter"], "chatgpt_web");
+    assert_eq!(find_task(&task.id).unwrap().daily_agent.runner, "Codex");
+    let response = client.post(format!("http://{address}/api/im-gateway/chat")).json(&serde_json::json!({"runnerId":"Codex","message":"must not execute"})).send().await.unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+    assert!(response.text().await.unwrap().contains("removed"));
+    server.abort();
+
+    let date = "2026-07-22";
+    let mut ordinary = task.clone();
+    ordinary.daily_agent.research_fanout = None;
+    ensure_asr_daily_workspace(&ordinary).unwrap();
+    std::fs::write(daily_dir_for_task(&task.id).join(format!("{date}.md")), "daily source").unwrap();
+    let error = run_daily_agent_inner(&ordinary, "manual", Some(date), true, "retired-builtin-trigger").await.unwrap_err();
+    assert!(error.contains("removed"), "{error}");
+    assert!(!temp.path().join("im_gateway/runs").exists());
+
+    task.daily_agent.dependencies = vec![AsrDailyAgentDependency {agent_id:"dispatcher".into(),include_output:true}];
+    let dependency = daily_agent_upstream_input_dir(&task, "dispatcher");
+    std::fs::create_dir_all(&dependency).unwrap();
+    let manifest: AsrDailyResearchManifest = serde_json::from_value(serde_json::json!({"questions":[{"id":"q1","original_question":"cached question","runner":"Codex"}]})).unwrap();
+    validate_daily_research_manifest(&manifest, task.daily_agent.research_fanout.as_ref().unwrap(), "Codex").unwrap();
+    std::fs::write(dependency.join(format!("{date}-report.md")), serde_json::to_vec(&manifest).unwrap()).unwrap();
+    let child_dir = daily_agent_output_dir(&task).join(date);
+    std::fs::create_dir_all(&child_dir).unwrap();
+    let result_path = child_dir.join("q1.md");
+    let metadata_path = child_dir.join("q1.json");
+    std::fs::write(&result_path, "preserve cached result").unwrap();
+    let fingerprint = daily_research_question_fingerprint(&manifest.questions[0], "Codex", task.daily_agent.research_fanout.as_ref().unwrap());
+    let cached: AsrDailyResearchChildResult = serde_json::from_value(serde_json::json!({"question_id":"q1","original_question":"cached question","runner":"Codex","status":"success","result_path":result_path,"fingerprint_sha256":fingerprint,"result_sha256":compute_sha256(&result_path).unwrap()})).unwrap();
+    atomic_json_write(&metadata_path, &cached).unwrap();
+    assert!(reusable_daily_research_child(&metadata_path, &result_path, &fingerprint).is_some());
+    let before = std::fs::read(&metadata_path).unwrap();
+    let error = run_daily_agent_research_fanout(&task, &daily_agent_research_plan(&task, date)).await.unwrap_err();
+    assert!(error.contains("removed"), "{error}");
+    assert_eq!(std::fs::read(metadata_path).unwrap(), before);
+    assert_eq!(std::fs::read_to_string(result_path).unwrap(), "preserve cached result");
 }

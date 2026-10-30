@@ -1487,12 +1487,33 @@ impl ExternalCliConfigStore {
     }
 
     pub fn save(&self, config: ExternalCliGatewayConfig) -> Result<(), String> {
+        // Track explicit rows separately from defaults injected by normalization.
+        // The existing alias migrations preserve explicitly supplied settings.
+        let mut submitted = config.clone();
+        submitted.runners = submitted
+            .runners
+            .into_iter()
+            .map(|(id, settings)| (id.trim().to_string(), settings))
+            .collect();
+        migrate_legacy_traex_runner_id(&mut submitted);
+        migrate_legacy_claude_code_runner_id(&mut submitted);
         let config = normalized_gateway_config(config);
         let mut data = self.data.write();
         // Compare with persisted state, not a stale worker cache: a migrated record
         // must never be restored as a retired Runner by a later stale save.
         let previous =
             normalized_gateway_config(load_config_from_disk(&self.file_path).unwrap_or_default());
+        for (id, settings) in &previous.runners {
+            if !submitted.runners.contains_key(id) {
+                if let Err(retirement_error) = validate_supported_adapter(&settings.adapter) {
+                    let replacement =
+                        effective_config_for_provider_and_runner(&config, None, Some(id));
+                    if validate_supported_adapter(&replacement.settings.adapter).is_ok() {
+                        return Err(format!("{retirement_error} Removing Runner '{id}' would implicitly select a default Runner; explicitly migrate this record before deleting it."));
+                    }
+                }
+            }
+        }
         validate_retired_config_edits(&previous, &config)?;
         save_config_to_disk(&self.file_path, &config)?;
         *data = config;

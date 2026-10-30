@@ -29,3 +29,7 @@
 评审增量：11 项退役回归、93 项 Daily Agent 与 176 项 External CLI 测试通过；真实多旧配置 API/CLI 黑盒、更新后的 Rust 退役 E2E（1/1）、显式项目设置清理组件测试通过。完整 workspace 与原始覆盖率命令的只读 HOME 限制仍保留，不以增量通过替代。
 
 两项评审增量浏览器用例通过（逐条迁移 Runner、显式清除多个废弃项目设置），并检查未自动改选 Runner。最终同源变更行门禁为 92.22%（166/180），阈值 90%；这是补采结果，不把原始失败命令改称通过。Rust 1.95 全目标/全特性 clippy 与 workspace/desktop fmt 通过。
+
+内置 ID 变体：以 `Codex`/`Traex`/`Claude-Code` 及别名保存旧退役记录，仅绑定 Daily Agent。配置 API 删除应返回 400、记录及绑定保持原样，普通 Daily Agent 触发仍报退役错误。缓存用例显式设置 `allowed_runners=["Codex"]`，先断言 manifest 校验与缓存指纹/摘要匹配，再断言不能复用成功；不能由空 allowlist 的另一错误造成假通过。
+
+内置 ID 复审结果：旧真实 API 复现删除返回 200 并补回启用的 Codex（未执行 provider）；修复后 13 项退役、94 项 Daily Agent、177 项 External CLI 回归通过，真实 API 拒绝删除并保留绑定，普通触发与有效缓存仍报退役错误。最终补采门禁 91.58%（174/190），Rust 全目标/全特性 clippy、workspace/desktop fmt 通过。

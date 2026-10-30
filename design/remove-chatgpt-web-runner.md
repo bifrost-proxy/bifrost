@@ -27,3 +27,5 @@
 2026-10-30 本地验证：Rust 1.95.0 workspace clippy、Rust fmt、前端生产构建、类型检查和定向 ESLint 通过；前端单元测试 511/511 通过。带显式回环 mock 开关的管理端为 3507 通过、1 忽略；CLI lib/bin 分别为 1456/1472 通过、各 2 忽略，相关 CLI 和 worker 集成测试通过。完整 workspace 与 `make coverage-changed` 在未修改的 daemon shutdown 集成测试处，因只读 home 无法创建 CLI 代理 profile 锁而停止（2 项失败）；未修改 HOME、用户 profile 或生产代理设置。补采真实退役 E2E 与 CLI/API 黑盒覆盖率后，同源 changed-lines 门禁为 90.97%（131/144），超过 90% 下限。完整跨平台 CI 仍需在 draft PR 核验。
 
 保存允许未修改的退役 Runner 记录与绑定原样保留，支持多记录逐条迁移和新增受支持的替代 Runner。新增或修改退役记录、新建退役绑定仍被拒绝；校验以磁盘现状为准，防止旧缓存恢复已迁移的退役记录。缺失的任意 Runner ID 明确失败，不再回退到 Codex；Daily Agent 执行和研究缓存复用前均校验 Runner。
+
+若旧退役记录占用 `Codex`、`Traex`、`Claude-Code` 或会解析到这些内置记录的别名，删除可能触发原生默认配置自动补齐。保存会识别显式提交的记录并拒绝这种隐式替换；请先显式为该记录选择受支持的 Adapter，再按需删除。正常默认 Runner 初始化不变。

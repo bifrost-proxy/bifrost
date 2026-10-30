@@ -7163,3 +7163,51 @@ fn missing_arbitrary_runner_does_not_select_codex() {
         .unwrap_err()
         .contains("does not exist"));
 }
+
+#[test]
+fn retired_builtin_ids_cannot_be_implicitly_replaced_by_default_insertion() {
+    for id in [
+        "Codex",
+        "Traex",
+        "Claude-Code",
+        "codex",
+        "CODEX",
+        "trae",
+        "claude",
+        "claude_code",
+        "treex",
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("admin").join(CONFIG_FILENAME);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, serde_json::to_vec(&serde_json::json!({
+            "version":2,"defaultRunnerId":"safe", "runners": {
+                "safe":{"enabled":true,"adapter":"custom_cli"},
+                (id):{"enabled":true,"adapter":"chatgpt_web","adapterConfig":{"auth":{"statePath":"keep.json"}}}
+            },"channels":{}
+        })).unwrap()).unwrap();
+        let store = ExternalCliConfigStore::new(temp.path());
+        let original = store.load();
+        let effective = effective_config_for_provider_and_runner(&original, None, Some(id));
+        assert!(
+            validate_supported_adapter(&effective.settings.adapter).is_err(),
+            "{id}"
+        );
+        let removed_id = effective.runner_id;
+        let mut candidate = original.clone();
+        candidate.runners.remove(&removed_id);
+        let before = std::fs::read(&path).unwrap();
+        assert!(
+            store.save(candidate).unwrap_err().contains("removed"),
+            "{id}"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before, "{id}");
+        assert_eq!(store.load(), original, "{id}");
+        // Explicitly selecting a supported adapter for that same record remains valid.
+        let mut migrated = original;
+        migrated.runners.get_mut(&removed_id).unwrap().adapter = "custom_cli".into();
+        store.save(migrated.clone()).unwrap();
+        migrated.runners.remove(&removed_id);
+        store.save(migrated).unwrap();
+    }
+}
