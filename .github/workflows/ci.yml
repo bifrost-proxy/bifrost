@@ -45,6 +45,74 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  moss-runtime-changes:
+    name: Detect MOSS runtime build changes
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      changed: ${{ steps.paths.outputs.changed }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Select runtime build inputs
+        id: paths
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          git diff --name-only "$BASE_SHA" "$HEAD_SHA" > "$RUNNER_TEMP/moss-runtime-changed-files"
+          changed=false
+          while IFS= read -r path; do
+            case "$path" in
+              scripts/asr/*|scripts/ci/*moss*runtime.sh|.github/workflows/ci.yml)
+                changed=true ;;
+            esac
+          done < "$RUNNER_TEMP/moss-runtime-changed-files"
+          echo "changed=$changed" >> "$GITHUB_OUTPUT"
+
+  moss-runtime-build:
+    name: Build MOSS Runtime Without Publishing (ARM64)
+    needs: moss-runtime-changes
+    if: needs.moss-runtime-changes.outputs.changed == 'true'
+    runs-on: macos-15
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Confirm Apple Silicon runner
+        shell: bash
+        run: test "$(uname -sm)" = "Darwin arm64"
+      - name: Build and validate actual runtime archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          version="$(tr -d '[:space:]' < scripts/asr/moss-runtime-version.txt)"
+          bash scripts/ci/build-moss-release-runtime.sh "$version" "$PWD/dist" 2>&1 | tee dist/build.log
+          bash scripts/ci/verify-moss-release-runtime.sh \
+            "$PWD/dist/moss-joint-runtime-v${version}-aarch64-apple-darwin.zip" \
+            scripts/asr/moss-mlx-requirements.txt 2>&1 | tee dist/verification.log
+      - name: Preserve runtime build and verification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: moss-runtime-build-only-${{ github.sha }}
+          path: |
+            dist/*.zip
+            dist/*.sha256
+            dist/*.log
+          if-no-files-found: warn
+          retention-days: 3
+
   release-contract:
     name: MOSS Runtime Release Contract (macOS)
     runs-on: macos-15

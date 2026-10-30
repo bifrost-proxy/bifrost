@@ -961,11 +961,11 @@ mod tests {
         );
         assert!(moss_runtime_asset_name_for("linux", "x86_64").is_err());
         let asset = moss_runtime_asset_name_for("macos", "aarch64").unwrap();
-        assert_eq!(moss_runtime_version(), "1.0.0");
-        assert_eq!(moss_runtime_release_tag(), "moss-runtime-v1.0.0");
+        assert_eq!(moss_runtime_version(), "1.0.1");
+        assert_eq!(moss_runtime_release_tag(), "moss-runtime-v1.0.1");
         assert_eq!(
             asset,
-            "moss-joint-runtime-v1.0.0-aarch64-apple-darwin.zip"
+            "moss-joint-runtime-v1.0.1-aarch64-apple-darwin.zip"
         );
         assert_eq!(
             moss_runtime_asset_name().is_ok(),
@@ -1001,7 +1001,7 @@ mod tests {
         drop(_url_guard);
         let default_url = moss_runtime_url(&asset);
         assert!(default_url.contains(
-            "github.com/bifrost-proxy/bifrost/releases/download/moss-runtime-v1.0.0"
+            "github.com/bifrost-proxy/bifrost/releases/download/moss-runtime-v1.0.1"
         ));
         let checksum = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
         let manifest_url = spawn_moss_http_server(format!("{checksum}  {asset}\n").into_bytes());
