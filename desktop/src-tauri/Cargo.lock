@@ -272,7 +272,7 @@ checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
 name = "bifrost-core"
-version = "0.0.190"
+version = "0.0.201"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -311,7 +311,7 @@ dependencies = [
 
 [[package]]
 name = "bifrost-desktop"
-version = "0.0.190"
+version = "0.0.201"
 dependencies = [
  "bifrost-core",
  "bifrost-storage",
@@ -333,17 +333,20 @@ dependencies = [
 
 [[package]]
 name = "bifrost-storage"
-version = "0.0.190"
+version = "0.0.201"
 dependencies = [
  "base64 0.22.1",
  "bifrost-core",
  "chrono",
  "dirs 5.0.1",
+ "fs2",
  "futures",
+ "libc",
  "ring",
  "serde",
  "serde_json",
  "sha2",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "toml 0.9.12+spec-1.1.0",
@@ -354,7 +357,7 @@ dependencies = [
 
 [[package]]
 name = "bifrost-tls"
-version = "0.0.190"
+version = "0.0.201"
 dependencies = [
  "bifrost-core",
  "chrono",
