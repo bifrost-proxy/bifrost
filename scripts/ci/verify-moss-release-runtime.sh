@@ -47,4 +47,10 @@ PY
 
 "$PYTHON" "$RUNTIME_ROOT/runtime/moss_mlx_runner.py" --self-test
 echo "PASS: extracted runner self-test with HF_HUB_OFFLINE=1 and TRANSFORMERS_OFFLINE=1"
-echo "NOT RUN: real transcription requires the separately downloaded 1.2 GB model weights and an audio fixture; neither is bundled"
+if [[ "${3:-}" == "--transcription-smoke" ]]; then
+  ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+  "$PYTHON" "$ROOT_DIR/scripts/ci/smoke-moss-release-runtime.py" \
+    "$RUNTIME_ROOT" "$ROOT_DIR/crates/bifrost-admin/src/handlers/asr_jobs/moss_joint.rs"
+else
+  echo "NOT RUN: real transcription smoke (enable with --transcription-smoke)"
+fi
