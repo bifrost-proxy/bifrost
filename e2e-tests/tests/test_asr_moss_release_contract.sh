@@ -105,6 +105,12 @@ requirements_lines = [
 ]
 require(requirements_lines, "pinned Python requirements are empty")
 require(all(re.fullmatch(r"[A-Za-z0-9_.-]+==[^=\s]+", line) for line in requirements_lines), "every Python requirement must use an exact version")
+# GHSA-6q48-6c7w-9gw2: emSign roots were removed in certifi 2026.10.18.
+certifi_version = capture(requirements, r"^certifi==([0-9]+\.[0-9]+\.[0-9]+)$", "certifi pin")
+require(tuple(map(int, certifi_version.split("."))) >= (2026, 10, 18), "certifi still trusts the compromised emSign CA chain")
+require(tuple(map(int, runtime_version.split("."))) >= (1, 0, 1), "certifi fix must use a new runtime release so installed 1.0.0 assets are invalidated")
+require('/../../scripts/asr/moss-runtime-version.txt' in runtime, "initializer must share the runtime release version source")
+
 require(patch_path.is_file(), "pinned MLX-Audio compatibility patch is missing")
 require(f'git -C "$SOURCE_DIR" fetch --depth 1 origin "$SOURCE_COMMIT"' in runtime_builder, "runtime builder does not fetch the pinned source commit")
 require('git -C "$SOURCE_DIR" apply --unidiff-zero' in runtime_builder, "runtime builder does not apply the compatibility patch")
