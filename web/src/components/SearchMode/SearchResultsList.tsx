@@ -161,9 +161,9 @@ export default function SearchResultsList({
   const parentRef = useRef<HTMLDivElement>(null);
   const attemptedPages = useRef(new Set<string>());
 
-  // eslint-disable-next-line react-hooks/incompatible-library
   const virtualizer = useVirtualizer({
     count: results.length,
+    getItemKey: (index) => results[index].record.id,
     getScrollElement: () => parentRef.current,
     estimateSize: () => ROW_HEIGHT,
     overscan: 5,
@@ -201,6 +201,7 @@ export default function SearchResultsList({
     return () => observer.disconnect();
   }, [paginationKey, hasMore, isLoadingMore, onLoadMore, results.length]);
 
+  const totalSize = virtualizer.getTotalSize();
   const styles = useMemo<Record<string, CSSProperties>>(
     () => ({
       container: {
@@ -208,7 +209,7 @@ export default function SearchResultsList({
         overflow: "auto",
       },
       list: {
-        height: `${virtualizer.getTotalSize()}px`,
+        height: `${totalSize}px`,
         width: "100%",
         position: "relative",
       },
@@ -239,7 +240,7 @@ export default function SearchResultsList({
         overflow: "hidden",
       },
     }),
-    [token, virtualizer],
+    [token, totalSize],
   );
 
   return (
