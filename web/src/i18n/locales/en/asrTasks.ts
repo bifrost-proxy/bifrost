@@ -65,6 +65,9 @@ const en = {
   "transcript.speakerCandidate": " candidate {name} {percent}%",
 
   // DailyAgentTab: messages
+  "dailyAgent.retiredProjectMigration":
+    "ChatGPT Web project settings are no longer supported. Remove these obsolete settings from all Daily Agents before editing. Runner selections, reports and history are preserved; choose another supported Runner explicitly.",
+  "dailyAgent.removeRetiredProjectUrls": "Remove obsolete project settings",
   "dailyAgent.loadConfigFailed": "Failed to load Daily Agent config: {error}",
   "dailyAgent.configSaved": "Configuration saved",
   "dailyAgent.saveFailed": "Failed to save: {error}",

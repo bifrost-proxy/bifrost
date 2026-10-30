@@ -26,7 +26,7 @@ python3 - "$BIFROST_DATA_DIR" <<'PY'
 import json,pathlib,sys
 root=pathlib.Path(sys.argv[1]); config=root/'admin/im_gateway_external_cli_agent.json'
 config.parent.mkdir(parents=True,exist_ok=True)
-config.write_text(json.dumps({'version':2,'defaultRunnerId':'web','runners':{'web':{'enabled':True,'adapter':'chatgpt_web','adapterConfig':{}}},'channels':{}}))
+config.write_text(json.dumps({'version':2,'defaultRunnerId':'web','runners':{'web':{'enabled':True,'adapter':'chatgpt_web','adapterConfig':{}},'web-b':{'enabled':True,'adapter':'gpt-web','adapterConfig':{}}},'channels':{'alpha':{'runnerId':'web'},'beta':{'runnerId':'web-b'}}}))
 legacy=root/'agent/im_gateway/chatgpt_web';legacy.mkdir(parents=True,exist_ok=True)
 for name in ['auth_state.json','history.jsonl','browser_profile/sentinel']:
     file=legacy/name;file.parent.mkdir(parents=True,exist_ok=True);file.write_text('preserve '+name)
@@ -48,7 +48,13 @@ for _ in range(200):
     except Exception: time.sleep(.1)
 else: raise AssertionError('service failed to become ready')
 config=request('/im-gateway/chat/config');assert config['runners']['web']['adapter']=='chatgpt_web'
-request('/im-gateway/chat/config','PATCH',config,400)
+request('/im-gateway/chat/config','PATCH',config)
+invalid=json.loads(json.dumps(config));invalid['runners']['new-web']=config['runners']['web']
+request('/im-gateway/chat/config','PATCH',invalid,400)
+supported={'enabled':True,'adapter':'custom_cli','adapterConfig':{'executable':sys.executable,'args':['-c','import sys; sys.stdin.read(); print("SUPPORTED_RUNNER_OK")']},'deliveryMode':'no_im'}
+config['runners']['replacement']=supported
+request('/im-gateway/chat/config','PATCH',config)
+assert request('/im-gateway/chat','POST',{'runnerId':'replacement','message':'hello'})['status']=='succeeded'
 for suffix in ['', '/stream']:
     error=request('/im-gateway/chat'+suffix,'POST',{'runnerId':'web','message':'do not run','sessionKey':'old-session'},400)
     assert 'removed' in error['error'] and 'explicitly' in error['error'],error
@@ -63,6 +69,15 @@ run=subprocess.run([binary,'-p',port,'agent','run','--runner','web','--json','he
 assert run.returncode!=0 and 'removed' in run.stderr,(run.returncode,run.stdout,run.stderr)
 # Explicit migration to a supported custom executable; no automatic provider change.
 config['runners']['web']={'enabled':True,'adapter':'custom_cli','adapterConfig':{'executable':sys.executable,'args':['-c','import sys; sys.stdin.read(); print("SUPPORTED_RUNNER_OK")']},'deliveryMode':'no_im'}
+request('/im-gateway/chat/config','PATCH',config)
+assert request('/im-gateway/chat/config')['runners']['web-b']['adapter']=='gpt-web'
+assert 'removed' in request('/im-gateway/chat','POST',{'runnerId':'web-b','message':'no'},400)['error']
+assert request('/im-gateway/chat/config')['channels']['beta']['runnerId']=='web-b'
+# A deleted arbitrary ID must fail explicitly, even if its spelling is not a retired adapter alias.
+config['runners'].pop('web-b')
+request('/im-gateway/chat/config','PATCH',config)
+assert 'does not exist' in request('/im-gateway/chat','POST',{'runnerId':'web-b','message':'no'},400)['error']
+config['runners']['web-b']=supported
 request('/im-gateway/chat/config','PATCH',config)
 result=request('/im-gateway/chat','POST',{'runnerId':'web','message':'hello','sessionKey':'supported-runner'})
 assert result['status']=='succeeded' and 'SUPPORTED_RUNNER_OK' in result['response'],result

@@ -180,7 +180,7 @@ function TaskDailyAgentTab({ taskId }: DailyAgentTabProps) {
   }, [routeDetailAgentId]);
 
   const handleConfigUpdate = async (
-    updates: Partial<AsrDailyAgentConfig>
+    updates: Partial<AsrDailyAgentConfig> & { remove_retired_project_urls?: boolean }
   ) => {
     setSaving(true);
     try {
@@ -1247,6 +1247,24 @@ function TaskDailyAgentTab({ taskId }: DailyAgentTabProps) {
 
   return (
     <Space direction="vertical" size={16} style={{ width: "100%" }}>
+      {agents.some((agent) => agent.research_fanout?.chatgpt_project_url) && (
+        <Alert
+          type="warning"
+          showIcon
+          message={t("asrTasks.dailyAgent.retiredProjectMigration")}
+          action={
+            <Button
+              data-testid="remove-retired-project-urls"
+              loading={saving}
+              onClick={() =>
+                handleConfigUpdate({ remove_retired_project_urls: true })
+              }
+            >
+              {t("asrTasks.dailyAgent.removeRetiredProjectUrls")}
+            </Button>
+          }
+        />
+      )}
       <Card size="small" title={t("asrTasks.dailyAgent.dailyAgents")} loading={loading && !config}>
         <Space direction="vertical" size={8} style={{ width: "100%", marginBottom: 12 }}>
           <Space

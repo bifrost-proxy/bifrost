@@ -682,6 +682,9 @@ async fn run_daily_agent_research_fanout(
             &config, None, Some(runner_id),
         );
         crate::im_gateway::external_cli::validate_supported_adapter(&effective.settings.adapter)?;
+        if !effective.settings.enabled {
+            return Err(format!("Runner '{runner_id}' is disabled; cached research cannot bypass Runner validation."));
+        }
     }
     let agent_work_dir = daily_agent_work_dir(task);
     for entry in plan

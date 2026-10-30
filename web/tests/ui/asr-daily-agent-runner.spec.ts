@@ -764,3 +764,57 @@ test("ASR Daily Docs row force reruns all or one Agent and warns when busy", asy
     "Single document run source.",
   );
 });
+
+test("ASR explicitly removes obsolete project settings from multiple legacy agents", async ({
+  page,
+}) => {
+  await installDailyAgentMocks(page);
+  const agents = ["web-a", "web-b"].map((runner, index) => ({
+    id: index === 0 ? "daily_report" : "tomorrow_todo",
+    name: index === 0 ? "daily_report" : "tomorrow_todo",
+    enabled: index === 0,
+    runner,
+    timeout_ms: 7200000,
+    trigger_policy: "manual_only",
+    output_dir: index === 0 ? "report" : "todo",
+    im_delivery: { enabled: false, mode: "summary", send_policy: "on_success" },
+    research_fanout: {
+      max_questions: 8,
+      allowed_runners: [],
+      context_profiles: {},
+      chatgpt_project_url: "https://chatgpt.com/legacy" as string | undefined,
+    },
+  }));
+  const updates: Record<string, unknown>[] = [];
+  await page.route(
+    `**/_bifrost/api/asr/tasks/${taskId}/daily-agent`,
+    async (route) => {
+      if (route.request().method() === "PUT") {
+        const payload = route.request().postDataJSON();
+        updates.push(payload);
+        if (payload.remove_retired_project_urls) {
+          for (const agent of agents)
+            agent.research_fanout.chatgpt_project_url = undefined;
+        }
+      }
+      await route.fulfill({
+        json: {
+          ok: true,
+          task_id: taskId,
+          config: { ...agents[0], enabled: true, agents },
+          last_run: {},
+        },
+      });
+    },
+  );
+  await openPage(page, `ai?aiSection=tools-asr&asrTask=${taskId}`);
+  await page.getByRole("tab", { name: "Daily Agent", exact: true }).click();
+  const cleanup = page.getByTestId("remove-retired-project-urls");
+  await expect(cleanup).toBeVisible();
+  await cleanup.click();
+  await waitForToast(page, "Configuration saved");
+  await expect(cleanup).toHaveCount(0);
+  expect(updates).toEqual([{ remove_retired_project_urls: true }]);
+  expect(agents.map((agent) => agent.runner)).toEqual(["web-a", "web-b"]);
+  expect(agents.map((agent) => agent.enabled)).toEqual([true, false]);
+});

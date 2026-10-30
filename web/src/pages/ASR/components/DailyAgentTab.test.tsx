@@ -168,6 +168,39 @@ describe("Daily Agent report sync directory drafts", () => {
     });
   }
 
+  it("offers explicit cleanup for multiple legacy project settings without selecting a provider", async () => {
+    const legacy = config();
+    const first = legacy.config.agents![0];
+    first.research_fanout = {
+      max_questions: 8,
+      allowed_runners: [],
+      context_profiles: {},
+      chatgpt_project_url: "https://chatgpt.com/old",
+    };
+    legacy.config.agents = [
+      first,
+      { ...first, id: "second", name: "Second", enabled: false },
+    ];
+    vi.mocked(getDailyAgentConfig).mockResolvedValue(legacy);
+    vi.mocked(updateDailyAgentConfig).mockResolvedValue({
+      ok: true,
+      config: legacy.config,
+    });
+    await render();
+    const button = container.querySelector<HTMLButtonElement>(
+      '[data-testid="remove-retired-project-urls"]',
+    );
+    expect(button).not.toBeNull();
+    await act(async () => button!.click());
+    expect(updateDailyAgentConfig).toHaveBeenCalledWith("task-a", {
+      remove_retired_project_urls: true,
+    });
+    expect(legacy.config.agents.map((agent) => agent.runner)).toEqual([
+      "codex",
+      "codex",
+    ]);
+  });
+
   it("preserves a draft typed while the return-to-list refresh waits for instructions", async () => {
     await render("task-a", true);
     const refresh = deferred<AsrDailyAgentInstructionsResponse>();

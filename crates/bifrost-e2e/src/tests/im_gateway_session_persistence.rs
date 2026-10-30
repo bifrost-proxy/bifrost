@@ -61,8 +61,8 @@ pub fn get_all_tests() -> Vec<TestCase> {
                 .send()
                 .await
                 .map_err(|e| e.to_string())?;
-            if response.status().as_u16() != 400 {
-                return Err("retired config save must fail".into());
+            if response.status().as_u16() != 200 {
+                return Err("unchanged legacy config must round-trip for migration".into());
             }
             for stream in [false, true] {
                 let url = if stream {

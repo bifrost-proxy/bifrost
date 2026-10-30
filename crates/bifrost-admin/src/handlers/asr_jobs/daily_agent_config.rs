@@ -533,7 +533,7 @@ fn validate_daily_agent_item(item: &AsrDailyAgentItem) -> Result<(), String> {
         }
 
         if fanout.chatgpt_project_url.as_deref().is_some_and(|value| !value.trim().is_empty()) {
-            return Err("ChatGPT Web project URLs are no longer supported; remove research_fanout.chatgpt_project_url and explicitly configure a supported Runner.".to_string());
+            return Err("ChatGPT Web project URLs are no longer supported; use the Daily Agent “Remove obsolete project settings” action (API: remove_retired_project_urls: true) to remove research_fanout.chatgpt_project_url, then explicitly configure a supported Runner.".to_string());
         }
         for runner in &fanout.allowed_runners {
             if runner.trim().is_empty() {

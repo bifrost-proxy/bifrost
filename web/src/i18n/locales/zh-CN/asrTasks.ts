@@ -66,6 +66,9 @@ const zhCN: Record<keyof typeof en, string> = {
   "transcript.speakerCandidate": " 候选 {name} {percent}%",
 
   // DailyAgentTab: messages
+  "dailyAgent.retiredProjectMigration":
+    "ChatGPT Web 项目设置已停止支持。请先清除所有 Daily Agent 的废弃项目设置再编辑。Runner 选择、报告和历史保持不变；请显式选择受支持的 Runner。",
+  "dailyAgent.removeRetiredProjectUrls": "清除废弃项目设置",
   "dailyAgent.loadConfigFailed": "加载每日 Agent 配置失败：{error}",
   "dailyAgent.configSaved": "配置已保存",
   "dailyAgent.saveFailed": "保存失败：{error}",

@@ -7027,7 +7027,7 @@ async fn retired_web_adapter_rejects_all_entries_without_touching_data() {
 }
 
 #[test]
-fn retired_web_config_remains_readable_but_cannot_be_saved_or_replaced_implicitly() {
+fn retired_web_config_round_trips_but_cannot_be_replaced_implicitly() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("admin").join(CONFIG_FILENAME);
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -7044,7 +7044,7 @@ fn retired_web_config_remains_readable_but_cannot_be_saved_or_replaced_implicitl
     assert_eq!(effective.settings.adapter, "chatgpt_web");
     assert!(validate_supported_adapter(&effective.settings.adapter).is_err());
     let before = std::fs::read(&path).unwrap();
-    assert!(store.save(loaded.clone()).unwrap_err().contains("removed"));
+    store.save(loaded.clone()).unwrap();
     assert_eq!(std::fs::read(&path).unwrap(), before);
     assert_eq!(store.load(), loaded);
     assert!(store
@@ -7080,4 +7080,86 @@ fn missing_retired_runner_reference_never_falls_back_to_codex() {
     let missing = effective_config_for_provider_and_runner(&config, None, Some("chatgpt-web"));
     assert_eq!(missing.settings.adapter, "chatgpt-web");
     assert!(!missing.settings.enabled);
+}
+
+#[test]
+fn retired_web_multiple_bound_records_can_migrate_individually() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("admin").join(CONFIG_FILENAME);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &path,
+        serde_json::to_vec(&serde_json::json!({
+            "version": 2, "defaultRunnerId": "web-a", "runners": {
+                "web-a": {"enabled": true, "adapter": "chatgpt_web"},
+                "web-b": {"enabled": true, "adapter": "gpt-web"}
+            }, "channels": {"alpha": {"runnerId": "web-a"}, "beta": {"runnerId": "web-b"}}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let store = ExternalCliConfigStore::new(temp.path());
+    let stale = ExternalCliConfigStore::new(temp.path());
+    let original = store.load();
+    let mut next = original.clone();
+    next.runners
+        .insert("replacement".into(), ExternalCliAgentSettings::default());
+    store
+        .save(next.clone())
+        .expect("adding a supported replacement must preserve legacy records");
+    next.runners.get_mut("web-a").unwrap().adapter = "custom_cli".into();
+    store
+        .save(next.clone())
+        .expect("one legacy record can migrate while another remains bound");
+    assert_eq!(store.load().runners["web-b"], original.runners["web-b"]);
+    assert_eq!(store.load().channels, original.channels);
+    assert_eq!(store.load().default_runner_id, "web-a");
+    assert!(
+        stale.save(original).is_err(),
+        "stale writers cannot restore migrated retired records"
+    );
+    let mut invalid = next.clone();
+    invalid
+        .runners
+        .insert("new-web".into(), next.runners["web-b"].clone());
+    assert!(store.save(invalid).unwrap_err().contains("removed"));
+    let mut invalid = next.clone();
+    invalid.default_runner_id = "web-b".into();
+    assert!(store.save(invalid).unwrap_err().contains("removed"));
+    let mut invalid = next.clone();
+    invalid.runners.get_mut("web-b").unwrap().enabled = false;
+    assert!(store.save(invalid).unwrap_err().contains("removed"));
+    let mut invalid = next.clone();
+    invalid.channels.insert(
+        "new-bound".into(),
+        ExternalCliChannelSettings {
+            runner_id: Some("web-b".into()),
+            ..Default::default()
+        },
+    );
+    assert!(store.save(invalid).unwrap_err().contains("removed"));
+    store
+        .update_channel(
+            "beta",
+            ExternalCliChannelSettings {
+                runner_id: Some("web-b".into()),
+                enabled: Some(false),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    next = store.load();
+    next.runners.get_mut("web-b").unwrap().adapter = "claude_code".into();
+    store.save(next).unwrap();
+}
+
+#[test]
+fn missing_arbitrary_runner_does_not_select_codex() {
+    let config = normalized_gateway_config(ExternalCliGatewayConfig::default());
+    let effective =
+        effective_config_for_provider_and_runner(&config, None, Some("deleted-web-record"));
+    assert!(!effective.settings.enabled);
+    assert!(validate_supported_adapter(&effective.settings.adapter)
+        .unwrap_err()
+        .contains("does not exist"));
 }

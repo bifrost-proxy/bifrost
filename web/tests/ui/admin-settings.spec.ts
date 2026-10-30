@@ -3813,3 +3813,63 @@ test("Settings Sync 支持登录、同步、更新覆盖与断网重连", async 
     await remoteServer.close();
   }
 });
+
+test("Agent Runners migrates one legacy record while preserving another bound record", async ({
+  page,
+}) => {
+  let config = {
+    defaultRunnerId: "web-a",
+    runners: {
+      "web-a": { enabled: true, adapter: "chatgpt_web", adapterConfig: {} },
+      "web-b": {
+        enabled: true,
+        adapter: "gpt-web",
+        adapterConfig: { auth: { statePath: "keep.json" } },
+      },
+    },
+    channels: { alpha: { runnerId: "web-a" }, beta: { runnerId: "web-b" } },
+  };
+  const originalB = structuredClone(config.runners["web-b"]);
+  const saves: (typeof config)[] = [];
+  await page.route("**/_bifrost/api/im-gateway/agent", (route) =>
+    route.fulfill({
+      json: { enabled: true, model_providers: {}, mcp_servers: {} },
+    }),
+  );
+  await page.route("**/_bifrost/api/im-gateway/agent/providers", (route) =>
+    route.fulfill({ json: [] }),
+  );
+  await page.route("**/_bifrost/api/im-gateway/providers", (route) =>
+    route.fulfill({ json: [] }),
+  );
+  await page.route("**/_bifrost/api/im-gateway/chat/config", async (route) => {
+    if (route.request().method() === "PATCH") {
+      config = route.request().postDataJSON();
+      saves.push(structuredClone(config));
+    }
+    await route.fulfill({ json: config });
+  });
+  await openPage(page, "ai?aiSection=agent-runners&agentSection=runners");
+  const row = page
+    .getByRole("row")
+    .filter({ has: page.getByText("web-a", { exact: true }) });
+  await row.getByRole("button", { name: /Edit$/ }).click();
+  const dialog = page.getByRole("dialog", { name: "Edit Runner: web-a" });
+  await dialog.getByLabel("Adapter").click();
+  await page
+    .locator(".ant-select-dropdown:not(.ant-select-dropdown-hidden)")
+    .getByText("Codex CLI", { exact: true })
+    .click();
+  await dialog
+    .getByRole("button", { name: "Save Runner", exact: true })
+    .click();
+  await expect(dialog).not.toBeVisible();
+  expect(saves).toHaveLength(1);
+  expect(saves[0].runners["web-a"].adapter).toBe("codex");
+  expect(saves[0].runners["web-b"]).toEqual(originalB);
+  expect(saves[0].channels).toEqual({
+    alpha: { runnerId: "web-a" },
+    beta: { runnerId: "web-b" },
+  });
+  expect(saves[0].defaultRunnerId).toBe("web-a");
+});

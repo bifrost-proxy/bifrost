@@ -30,6 +30,9 @@ pub use local_sessions::{
 
 /// Retired adapter names must never fall through to custom CLI execution.
 pub fn validate_supported_adapter(adapter: &str) -> Result<(), String> {
+    if let Some(runner_id) = adapter.strip_prefix("missing_runner:") {
+        return Err(format!("Runner '{runner_id}' does not exist. Select and configure a supported Runner explicitly; no provider was selected automatically."));
+    }
     let name = adapter.trim().to_ascii_lowercase().replace(['-', ' '], "_");
     if matches!(
         name.as_str(),
@@ -1485,12 +1488,15 @@ impl ExternalCliConfigStore {
 
     pub fn save(&self, config: ExternalCliGatewayConfig) -> Result<(), String> {
         let config = normalized_gateway_config(config);
-        for settings in config.runners.values() {
-            validate_supported_adapter(&settings.adapter)?;
-        }
         let mut data = self.data.write();
+        // Compare with persisted state, not a stale worker cache: a migrated record
+        // must never be restored as a retired Runner by a later stale save.
+        let previous =
+            normalized_gateway_config(load_config_from_disk(&self.file_path).unwrap_or_default());
+        validate_retired_config_edits(&previous, &config)?;
+        save_config_to_disk(&self.file_path, &config)?;
         *data = config;
-        save_config_to_disk(&self.file_path, &data)
+        Ok(())
     }
 
     pub fn update_channel(
@@ -1503,23 +1509,51 @@ impl ExternalCliConfigStore {
             return Err("provider_id cannot be empty".to_string());
         }
         let mut data = self.data.write();
+        let previous = normalized_gateway_config(
+            load_config_from_disk(&self.file_path).unwrap_or_else(|| data.clone()),
+        );
+        let mut next = previous.clone();
         let patch = normalized_channel_settings(patch);
-        if let Some(runner_id) = patch.runner_id.as_deref() {
-            let adapter = data
-                .runners
-                .get(runner_id)
-                .map(|settings| settings.adapter.as_str())
-                .unwrap_or(runner_id);
-            validate_supported_adapter(adapter)?;
-        }
         if is_empty_channel_settings(&patch) {
-            data.channels.remove(provider_id);
+            next.channels.remove(provider_id);
         } else {
-            data.channels.insert(provider_id.to_string(), patch);
+            next.channels.insert(provider_id.to_string(), patch);
         }
-        save_config_to_disk(&self.file_path, &data)?;
+        validate_retired_config_edits(&previous, &next)?;
+        save_config_to_disk(&self.file_path, &next)?;
+        *data = next;
         Ok(effective_config_for_provider(&data, Some(provider_id)))
     }
+}
+
+// Unchanged legacy rows and bindings may round-trip so users can migrate one
+// record at a time. New/changed retired rows and new retired bindings are denied.
+fn validate_retired_config_edits(
+    previous: &ExternalCliGatewayConfig,
+    next: &ExternalCliGatewayConfig,
+) -> Result<(), String> {
+    for (id, settings) in &next.runners {
+        if previous.runners.get(id) != Some(settings) {
+            validate_supported_adapter(&settings.adapter)?;
+        }
+    }
+    if next.default_runner_id != previous.default_runner_id {
+        validate_supported_adapter(&effective_config_for_provider(next, None).settings.adapter)?;
+    }
+    for (provider, channel) in &next.channels {
+        let old_runner = previous
+            .channels
+            .get(provider)
+            .and_then(|item| item.runner_id.as_ref());
+        if channel.runner_id.as_ref() != old_runner {
+            validate_supported_adapter(
+                &effective_config_for_provider(next, Some(provider))
+                    .settings
+                    .adapter,
+            )?;
+        }
+    }
+    Ok(())
 }
 
 pub fn effective_config_for_provider(
@@ -8282,14 +8316,14 @@ pub fn canonical_external_cli_runner_id(
 }
 
 fn missing_runner_settings(runner_id: &str) -> ExternalCliAgentSettings {
-    if validate_supported_adapter(runner_id).is_err() {
-        ExternalCliAgentSettings {
-            adapter: runner_id.to_string(),
-            enabled: false,
-            ..Default::default()
-        }
-    } else {
-        ExternalCliAgentSettings::default()
+    ExternalCliAgentSettings {
+        adapter: if validate_supported_adapter(runner_id).is_err() {
+            runner_id.to_string()
+        } else {
+            format!("missing_runner:{runner_id}")
+        },
+        enabled: false,
+        ..Default::default()
     }
 }
 

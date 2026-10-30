@@ -1461,6 +1461,10 @@ async fn run_external_daily_agent_prompt_with_params(
     params: serde_json::Value,
     effective: &crate::im_gateway::external_cli::ExternalCliEffectiveConfig,
 ) -> Result<crate::im_gateway::external_cli::ExternalCliRunResult, String> {
+    crate::im_gateway::external_cli::validate_supported_adapter(&effective.settings.adapter)?;
+    if !effective.settings.enabled {
+        return Err(format!("Runner '{runner_id}' is disabled; select an enabled supported Runner explicitly."));
+    }
     let operation = match effective.settings.adapter.as_str() {
         "codex" => "run".to_string(),
         _ => "send".to_string(),
