@@ -70,7 +70,7 @@ jobs:
           changed=false
           while IFS= read -r path; do
             case "$path" in
-              scripts/asr/*|scripts/ci/*moss*runtime.*|.github/workflows/ci.yml|.github/workflows/*release.yml)
+              scripts/asr/*|scripts/ci/*moss*runtime.*|e2e-tests/tests/test_moss_published_initializer.py|.github/workflows/ci.yml|.github/workflows/*release.yml)
                 changed=true ;;
             esac
           done < "$RUNNER_TEMP/moss-runtime-changed-files"
@@ -128,6 +128,28 @@ jobs:
             dist/*.log
           if-no-files-found: warn
           retention-days: 3
+
+  moss-published-initialization:
+    name: Initialize and Upgrade Published MOSS Runtime (ARM64)
+    needs: [moss-runtime-changes, build-cli-macos-aarch64]
+    if: needs.moss-runtime-changes.outputs.changed == 'true'
+    runs-on: macos-15
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: bifrost-release-aarch64-apple-darwin
+          path: initializer-bin
+      - name: Check public clean install and real 1.0.0 runtime upgrade
+        shell: bash
+        run: |
+          chmod +x initializer-bin/bifrost
+          python3 e2e-tests/tests/test_moss_published_initializer.py initializer-bin/bifrost
 
   release-contract:
     name: MOSS Runtime Release Contract (macOS)
