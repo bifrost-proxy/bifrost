@@ -70,7 +70,7 @@ jobs:
           changed=false
           while IFS= read -r path; do
             case "$path" in
-              scripts/asr/*|scripts/ci/*moss*runtime.*|.github/workflows/ci.yml)
+              scripts/asr/*|scripts/ci/*moss*runtime.*|e2e-tests/tests/test_moss_published_initializer.py|.github/workflows/ci.yml|.github/workflows/*release.yml)
                 changed=true ;;
             esac
           done < "$RUNNER_TEMP/moss-runtime-changed-files"
@@ -101,6 +101,22 @@ jobs:
           bash scripts/ci/verify-moss-release-runtime.sh \
             "$PWD/dist/moss-joint-runtime-v${version}-aarch64-apple-darwin.zip" \
             scripts/asr/moss-mlx-requirements.txt --transcription-smoke 2>&1 | tee dist/verification.log
+      - name: Verify exact published security-fix runtime
+        shell: bash
+        env:
+          PUBLISHED_RUNTIME_VERSION: "1.0.1"
+          PUBLISHED_RUNTIME_SHA256: "9db27af0d22d332280a7bff6a317a876991547a01d9cba60f35c3a60f63db17b"
+        run: |
+          set -euo pipefail
+          mkdir -p published-runtime
+          asset="moss-joint-runtime-v${PUBLISHED_RUNTIME_VERSION}-aarch64-apple-darwin.zip"
+          url="https://github.com/bifrost-proxy/bifrost/releases/download/moss-runtime-v${PUBLISHED_RUNTIME_VERSION}"
+          curl --fail --location --retry 3 --output "published-runtime/$asset" "$url/$asset"
+          curl --fail --location --retry 3 --output "published-runtime/$asset.sha256" "$url/$asset.sha256"
+          printf '%s  %s\n' "$PUBLISHED_RUNTIME_SHA256" "published-runtime/$asset" | shasum -a 256 --check
+          bash scripts/ci/verify-moss-release-runtime.sh \
+            "$PWD/published-runtime/$asset" scripts/asr/moss-mlx-requirements.txt \
+            --transcription-smoke 2>&1 | tee dist/published-runtime-verification.log
       - name: Preserve runtime build and verification evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -113,11 +129,35 @@ jobs:
           if-no-files-found: warn
           retention-days: 3
 
+  moss-published-initialization:
+    name: Initialize and Upgrade Published MOSS Runtime (ARM64)
+    needs: [moss-runtime-changes, build-cli-macos-aarch64]
+    if: needs.moss-runtime-changes.outputs.changed == 'true'
+    runs-on: macos-15
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: bifrost-release-aarch64-apple-darwin
+          path: initializer-bin
+      - name: Check public clean install and real 1.0.0 runtime upgrade
+        shell: bash
+        run: |
+          chmod +x initializer-bin/bifrost
+          python3 e2e-tests/tests/test_moss_published_initializer.py initializer-bin/bifrost
+
   release-contract:
     name: MOSS Runtime Release Contract (macOS)
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
+      - name: Check Bifrost release tag selection with mixed runtime tags
+        run: python3 -m unittest discover -s scripts/ci/tests -p test_release_version_tag.py
       - name: Validate MOSS release and initializer contract
         shell: bash
         run: bash e2e-tests/tests/test_asr_moss_release_contract.sh

@@ -56,8 +56,10 @@ jobs:
             VERSION="${TAG#v}"
             IS_PRERELEASE=$([[ "$TAG" =~ (alpha|beta|rc) ]] && echo "true" || echo "false")
           else
-            LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+            LATEST_TAG=$(python3 scripts/ci/previous-bifrost-release-tag.py)
+            LATEST_TAG="${LATEST_TAG:-v0.0.0}"
             LATEST_VERSION="${LATEST_TAG#v}"
+            LATEST_VERSION="${LATEST_VERSION%%+*}"
             
             IFS='.' read -r MAJOR MINOR PATCH <<< "${LATEST_VERSION%%-*}"
             MAJOR=${MAJOR:-0}
@@ -550,7 +552,7 @@ jobs:
           TAG="${{ needs.prepare.outputs.tag }}"
           RELEASE_NOTES='${{ inputs.release_notes }}'
 
-          PREV_TAG=$(git describe --tags --abbrev=0 "${TAG}^" 2>/dev/null || echo "")
+          PREV_TAG=$(python3 scripts/ci/previous-bifrost-release-tag.py "${TAG}^")
 
           : > CHANGELOG.md
 

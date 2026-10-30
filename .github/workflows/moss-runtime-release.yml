@@ -82,6 +82,13 @@ jobs:
             "${{ needs.prepare.outputs.runtime_version }}" \
             "$GITHUB_WORKSPACE/dist"
 
+      - name: Verify packaged CA store and real offline transcription
+        shell: bash
+        run: |
+          bash scripts/ci/verify-moss-release-runtime.sh \
+            "$GITHUB_WORKSPACE/dist/moss-joint-runtime-v${{ needs.prepare.outputs.runtime_version }}-aarch64-apple-darwin.zip" \
+            scripts/asr/moss-mlx-requirements.txt --transcription-smoke
+
       - name: Upload runtime artifact
         uses: actions/upload-artifact@v4
         with:
