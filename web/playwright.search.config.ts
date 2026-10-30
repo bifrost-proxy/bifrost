@@ -1,7 +1,7 @@
 import { defineConfig } from "@playwright/test";
 // Isolated frontend regression with deterministic API streams, no proxy/backend build.
 export default defineConfig({
-  testDir: "./tests/ui",
+  testDir: "./tests/search",
   testMatch: "search-session.spec.ts",
   workers: 1,
   use: {

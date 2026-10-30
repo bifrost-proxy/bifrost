@@ -42,7 +42,7 @@ test("search rows, scroll and selection survive stream batches, pages and contin
       `event: done\ndata: ${JSON.stringify({ total_searched: rows.length, total_matched: rows.length, next_cursor: cursor ? null : 940, has_more: !cursor, search_id: "test" })}\n\n`;
     await route.fulfill({ contentType: "text/event-stream", body: events });
   });
-  await page.goto("/_bifrost/tests/ui/fixtures/search-session.html");
+  await page.goto("/_bifrost/tests/search/fixtures/search-session.html");
   await page.getByRole("textbox").fill("match");
   expect(requests).toBe(0);
   await page.getByTestId("search-mode-submit").click();

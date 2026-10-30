@@ -1,7 +1,7 @@
 import { defineConfig } from "@playwright/test";
 // Build the current CLI (including frontend assets) before running this suite.
 export default defineConfig({
-  testDir: "./tests/ui",
+  testDir: "./tests/search",
   testMatch: "search-session-live.spec.ts",
   workers: 1,
   timeout: 300_000,

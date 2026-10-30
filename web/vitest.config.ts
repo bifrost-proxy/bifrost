@@ -9,6 +9,6 @@ export default defineConfig({
       },
     },
     setupFiles: ["./vitest.setup.ts"],
-    exclude: ["tests/ui/**", "node_modules/**"],
+    exclude: ["tests/ui/**", "tests/search/**", "node_modules/**"],
   },
 });
