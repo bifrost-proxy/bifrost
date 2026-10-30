@@ -40,7 +40,6 @@ Bifrost 的 shell E2E 通过 `scripts/ci/run-e2e-shell.sh` 调用 `scripts/run_a
 - `SKIP_IN_CI_TESTS` 至少包含：
   - `test_system_proxy_e2e.sh`（修改宿主机代理，hosted runner 不稳）。
   - ASR/voice runtime 类：`test_asr_*.sh`、`test_qwen3_asr_*.sh`、`test_voice_input_runtime.sh`、`test_voice_wake_actions.sh`。
-  - 重型低频专项：`test_asr_admin_csrf.sh`（~583s wall time）、`test_chatgpt_web_shared_profile.sh`（~879s）、`test_security_hardening.sh`（聚合 wrapper）。
   - 纯 Rust 包装器：`test_im_online_notification_runner_context.sh`。其中的 focused `bifrost-admin` tests 已由 Unit/Integration 的 `cargo test --workspace --all-features` 与 Coverage job 覆盖，因此只留在本地 full-shell/release-gate。
 - `test_desktop_traffic_detail_window_contract.sh` 仍在 CI shell capability shard 执行静态检查、Web unit tests 与 desktop frontend build；workflow 注入 `SKIP_CARGO_TEST=true` 时不在 600 秒 shell suite 内冷编译 Tauri。focused `traffic_detail` Rust test 迁到 aarch64 macOS Desktop bundle job，在 30 分钟 job 预算内执行并复用 desktop cache。
 - 本地 `bash scripts/run_all_e2e.sh --full-shell ...`（`MODE=local`）不应用 skip 列表，可手动跑系统代理与 ASR 用例。
@@ -64,7 +63,6 @@ Bifrost 的 shell E2E 通过 `scripts/ci/run-e2e-shell.sh` 调用 `scripts/run_a
 
 **Cargo-heavy 用例串行**
 
-- `scripts/run_all_e2e.sh` 定义 `CARGO_HEAVY_TESTS`，包含 `test_chatgpt_web_behavior_artifacts.sh`、`test_asr_task_pause_resume.sh`、`test_voice_input_runtime.sh` 等触发 `cargo check/test/run` 的用例。
 - `run_shell_tests_parallel` 把 `is_cargo_heavy` 用例加入 `serial_tests`，串行执行，避免 Cargo artifact lock 竞争让业务已通过但被 900s per-test timeout 杀掉。
 
 **启动敏感 fixture 串行与真实 readiness**
@@ -85,7 +83,6 @@ Bifrost 的 shell E2E 通过 `scripts/ci/run-e2e-shell.sh` 调用 `scripts/run_a
 
 - macOS `E2E Shell (aarch64-apple-darwin, shard N/2)` 使用 `shell_test_weight` 的实测秒级权重分片。权重来自近期 GitHub Actions job 日志里的 `[PASS] shell:<script> (<seconds>s)` 记录，而不是脚本数量。
 - shard 内执行模型必须纳入分片计算：safe shell tests 先按 `BIFROST_E2E_SHELL_JOBS=2` 并发执行，lock-sensitive / cargo-heavy tests 再串行执行。分片算法按“串行预计耗时 + 并发 lane 最长预计耗时”估算墙钟，避免一个大的并发脚本抵消另一个 shard 的串行长尾。
-- 2026-07-07 复核的异常样本包含 `CI` run `28803571034`（shard 1: 19.85 min，shard 2: 37.70 min）和 `28778932181`（shard 1: 22.85 min，shard 2: 32.18 min）。主要长尾来自 `test_chatgpt_web_behavior_artifacts.sh`、`test_im_gateway_long_reply_delivery_regression.sh`，以及此前按默认 8s 估计但实际可达数百秒的 `test_desktop_open_requests_contract.sh`、`test_skill_creator_flow.sh`。
 - `CI` run `28881027276` 通过后，实测 shard 1 为 1168s、shard 2 为 1847s；该结果证明单纯平衡总权重仍会被串行段拖长。后续权重与验收口径改为 estimated wall clock。
 - `scripts/run_all_e2e.sh --check-shell-shard-balance` 会打印每个 shard 的 `estimated_wall`、串行耗时、并发 lane 耗时和测试数量，并在最大/最小预计墙钟差超过平均预计墙钟的 `BIFROST_E2E_SHARD_BALANCE_MAX_DIFF_PCT` 时返回非 0。默认门槛为 20%，对应用户目标的“两边耗时误差不超过 20%”。
 - 调整权重后必须运行：
@@ -104,7 +101,6 @@ Bifrost 的 shell E2E 通过 `scripts/ci/run-e2e-shell.sh` 调用 `scripts/run_a
 - `e2e-tests/test_utils/process.sh` Bifrost 清理优先 `SIGINT` + `wait`，仅当端口迟迟不释放才 force kill，避免 `Killed ...` 让 Linux shard 把 PASS 用例误判失败。
 - `test_remote_relay_url_fallback_e2e.sh` 在 `SKIP_BUILD=true` 且已有 `BIFROST_BIN` 时输出 `Using existing bifrost binary`，不再无条件 `cargo build`。
 - `scripts/run_all_e2e.sh` 的 `CARGO_BIN` 默认从当前 `PATH` 解析（`resolve_cargo_command`），不再硬编码 `$HOME/.cargo/bin/cargo`。
-- 顶层入口默认注入预构建 release `BIFROST_BIN`，但保留外部覆盖；`test_chatgpt_web_startup_auth_preflight.sh` 等 startup 类脚本必须尊重 `SKIP_BUILD=true`。
 
 **Windows rules 内层预算**
 
@@ -304,7 +300,6 @@ Bash 调度逻辑，无 Rust 公共函数变更。
 - `e2e-tests/tests/test_http3_e2e.sh`
 - `e2e-tests/tests/test_replay_body_decode.sh`
 - `e2e-tests/tests/test_replay_rules.sh`
-- `e2e-tests/tests/test_chatgpt_web_startup_auth_preflight.sh`
 - `e2e-tests/tests/test_cli_offline_commands_e2e.sh`
 - `e2e-tests/tests/test_large_body_protection.sh`
 - `e2e-tests/tests/test_upgrade_local_restart_e2e.sh`

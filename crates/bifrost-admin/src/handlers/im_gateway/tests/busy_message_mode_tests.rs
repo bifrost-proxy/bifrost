@@ -75,75 +75,6 @@ fn runner_config(
 }
 
 #[test]
-fn busy_default_mode_guides_external_runners_except_chatgpt_web() {
-    for (runner_id, adapter) in [
-        ("codex-main", "codex"),
-        ("traex-main", "traex"),
-        ("claude-main", "claude_code"),
-    ] {
-        let config = runner_config(runner_id, adapter);
-        assert_eq!(
-            busy_default_mode_for_agent_config(
-                &bifrost_agent::AgentConfig {
-                    runner: Some(bifrost_agent::AgentRunnerMode::Custom(
-                        runner_id.to_string(),
-                    )),
-                    ..Default::default()
-                },
-                &config,
-                Some("feishu-main"),
-            ),
-            BusyMessageDefaultMode::ExternalGuide,
-            "adapter {adapter} should default to external guide",
-        );
-    }
-
-    let config = runner_config("chatgpt-web", crate::im_gateway::chatgpt_web::ADAPTER_ID);
-    assert_eq!(
-        busy_default_mode_for_agent_config(
-            &bifrost_agent::AgentConfig {
-                runner: Some(bifrost_agent::AgentRunnerMode::Custom(
-                    "chatgpt-web".to_string(),
-                )),
-                ..Default::default()
-            },
-            &config,
-            Some("feishu-main"),
-        ),
-        BusyMessageDefaultMode::Queue
-    );
-
-    let mut default_config = runner_config("codex-main", "codex");
-    default_config.default_runner_id = "codex-main".to_string();
-    let implicit_agent_config = bifrost_agent::AgentConfig {
-        runner: None,
-        ..Default::default()
-    };
-    assert_eq!(
-        busy_default_mode_for_agent_config(
-            &implicit_agent_config,
-            &default_config,
-            Some("feishu-main"),
-        ),
-        BusyMessageDefaultMode::ExternalGuide,
-        "an implicit default runner must use the same live-guide semantics as an explicit runner",
-    );
-
-    let mut default_chatgpt =
-        runner_config("chatgpt-web", crate::im_gateway::chatgpt_web::ADAPTER_ID);
-    default_chatgpt.default_runner_id = "chatgpt-web".to_string();
-    assert_eq!(
-        busy_default_mode_for_agent_config(
-            &implicit_agent_config,
-            &default_chatgpt,
-            Some("feishu-main"),
-        ),
-        BusyMessageDefaultMode::Queue,
-        "an implicit ChatGPT Web default must retain queue semantics",
-    );
-}
-
-#[test]
 fn apply_busy_message_default_guides_messages_without_queueing() {
     let manager = SessionQueueManager::new();
 
@@ -187,7 +118,7 @@ fn apply_busy_message_default_queues_custom_runner_messages() {
     let result = apply_busy_message_default(
         &manager,
         "busy-default-queue",
-        "下一条给 ChatGPT Web",
+        "下一条给 Custom Runner",
         BusyMessageDefaultMode::Queue,
     )
     .expect("queue default should be accepted");
@@ -195,14 +126,14 @@ fn apply_busy_message_default_queues_custom_runner_messages() {
     match result {
         BusyMessageDefaultResult::Queue { items } => {
             assert_eq!(items.len(), 1);
-            assert_eq!(items[0].message, "下一条给 ChatGPT Web");
+            assert_eq!(items[0].message, "下一条给 Custom Runner");
         }
         BusyMessageDefaultResult::Guide { .. } => panic!("custom runner default should queue"),
     }
     assert!(manager.guide_status("busy-default-queue").is_empty());
     assert_eq!(
         manager.pop_queue("busy-default-queue").as_deref(),
-        Some("下一条给 ChatGPT Web")
+        Some("下一条给 Custom Runner")
     );
 }
 
@@ -866,35 +797,16 @@ fn codex_runner_metadata_does_not_override_explicit_thread() {
 }
 
 #[test]
-fn chatgpt_web_metadata_resumes_persisted_conversation() {
-    let mut request = crate::im_gateway::external_cli::ExternalCliRunRequest {
-        images: Vec::new(),
-        files: Vec::new(),
-        message: "continue".to_string(),
-        operation: "ask".to_string(),
-        params: serde_json::Value::Null,
-        provider_id: Some("provider-a".to_string()),
-        runner_id: Some("chatgpt-web".to_string()),
-        session_key: Some("im:provider-a:user-a".to_string()),
-        runtime: "external_cli".to_string(),
-        adapter: crate::im_gateway::chatgpt_web::ADAPTER_ID.to_string(),
-        work_dir: None,
-        instructions: None,
-        adapter_config: Default::default(),
-        allow_work_dirs: Vec::new(),
-        inject_bifrost_tools: true,
-        skill_paths: Vec::new(),
-    };
-    let mut metadata = std::collections::BTreeMap::new();
-    metadata.insert("conversationId".to_string(), "conv-existing".to_string());
-
-    apply_external_cli_resume_metadata(&mut request, &metadata);
-
-    assert_eq!(
-        request
-            .params
-            .get("conversationId")
-            .and_then(|value| value.as_str()),
-        Some("conv-existing")
-    );
+pub(super) fn supported_external_runners_default_to_live_guide() {
+    for adapter in ["codex", "traex", "claude_code", "custom_cli"] {
+        let config = runner_config("runner", adapter);
+        assert_eq!(
+            busy_default_mode_for_agent_config(
+                &bifrost_agent::AgentConfig::default(),
+                &config,
+                None,
+            ),
+            BusyMessageDefaultMode::ExternalGuide
+        );
+    }
 }

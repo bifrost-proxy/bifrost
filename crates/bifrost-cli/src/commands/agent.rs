@@ -205,11 +205,23 @@ fn handle_agent_run(host: &str, port: u16, options: AgentRunOptions<'_>) -> Resu
     let resp = bifrost_core::direct_ureq_agent()
         .post(&url)
         .send_json(&body)
-        .map_err(|e| {
-            bifrost_core::BifrostError::Network(format!(
-                "Failed to reach Bifrost at {}:{} — is the proxy running? ({})",
-                host, port, e
-            ))
+        .map_err(|error| match error {
+            ureq::Error::Status(status, response) => {
+                let body = response.into_string().unwrap_or_default();
+                let message = serde_json::from_str::<Value>(&body)
+                    .ok()
+                    .and_then(|value| {
+                        value
+                            .get("error")
+                            .and_then(Value::as_str)
+                            .map(str::to_string)
+                    })
+                    .unwrap_or_else(|| format!("Runner request rejected (HTTP {status})"));
+                bifrost_core::BifrostError::Config(message)
+            }
+            error => bifrost_core::BifrostError::Network(format!(
+                "Failed to reach Bifrost at {host}:{port} — is the proxy running? ({error})"
+            )),
         })?;
 
     // Read NDJSON stream
@@ -429,8 +441,22 @@ fn select_runner_interactively(host: &str, port: u16) -> Result<String> {
         ));
     }
 
+    if let Some(default_runner) = config.get("defaultRunnerId").and_then(Value::as_str) {
+        if let Some((_, adapter, _)) = runners.iter().find(|(id, _, _)| id == default_runner) {
+            bifrost_admin::im_gateway::external_cli::validate_supported_adapter(adapter)
+                .map_err(bifrost_core::BifrostError::Config)?;
+        }
+    }
+
     // Filter to enabled runners for auto-selection
-    let enabled_runners: Vec<_> = runners.iter().filter(|(_, _, enabled)| *enabled).collect();
+    let enabled_runners: Vec<_> = runners
+        .iter()
+        .filter(|(_, adapter, enabled)| {
+            *enabled
+                && bifrost_admin::im_gateway::external_cli::validate_supported_adapter(adapter)
+                    .is_ok()
+        })
+        .collect();
 
     if enabled_runners.is_empty() {
         return Err(bifrost_core::BifrostError::Config(
@@ -725,7 +751,7 @@ mod tests {
     fn select_runner_interactively_uses_single_enabled_runner_without_tty() {
         let config_body = r#"{
             "runners": {
-                "chatgpt-web": {"enabled": true, "adapter": "test-adapter"}
+                "custom-runner": {"enabled": true, "adapter": "test-adapter"}
             }
         }"#
         .to_string();
@@ -733,6 +759,22 @@ mod tests {
 
         let runner_id = select_runner_interactively("127.0.0.1", port).unwrap();
         handle.join().unwrap();
-        assert_eq!(runner_id, "chatgpt-web");
+        assert_eq!(runner_id, "custom-runner");
+    }
+    #[test]
+    fn retired_default_runner_cannot_auto_select_another_provider() {
+        let (port, server) = spawn_simple_http_server(
+            serde_json::json!({
+                "defaultRunnerId":"web", "runners":{
+                    "web":{"enabled":true,"adapter":"chatgpt_web"},
+                    "Codex":{"enabled":true,"adapter":"codex"}
+                }
+            })
+            .to_string(),
+            "application/json",
+        );
+        let error = select_runner_interactively("127.0.0.1", port).unwrap_err();
+        server.join().unwrap();
+        assert!(error.to_string().contains("no longer supported"));
     }
 }

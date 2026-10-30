@@ -435,12 +435,7 @@ fn normalize_daily_agent_item(mut item: AsrDailyAgentItem) -> AsrDailyAgentItem 
             .chatgpt_project_url
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty());
-        fanout.chatgpt_project_url = trimmed_project_url.as_deref().map(|value| {
-            crate::im_gateway::chatgpt_web::normalize_project_url(Some(value))
-                .ok()
-                .flatten()
-                .unwrap_or_else(|| value.to_string())
-        });
+        fanout.chatgpt_project_url = trimmed_project_url;
         fanout.allowed_runners = fanout
             .allowed_runners
             .into_iter()
@@ -536,21 +531,9 @@ fn validate_daily_agent_item(item: &AsrDailyAgentItem) -> Result<(), String> {
                 item.name
             ));
         }
-        if fanout.chatgpt_interface_mode != "chat" || fanout.chatgpt_model != "pro" {
-            return Err(format!(
-                "Daily Agent '{}' research fan-out requires ChatGPT interface_mode='chat' and model='pro'",
-                item.name
-            ));
-        }
-        if let Some(project_url) = fanout.chatgpt_project_url.as_deref() {
-            crate::im_gateway::chatgpt_web::normalize_project_url(Some(project_url)).map_err(
-                |error| {
-                    format!(
-                        "Daily Agent '{}' research_fanout.chatgpt_project_url is invalid: {error}",
-                        item.name
-                    )
-                },
-            )?;
+
+        if fanout.chatgpt_project_url.as_deref().is_some_and(|value| !value.trim().is_empty()) {
+            return Err("ChatGPT Web project URLs are no longer supported; remove research_fanout.chatgpt_project_url and explicitly configure a supported Runner.".to_string());
         }
         for runner in &fanout.allowed_runners {
             if runner.trim().is_empty() {

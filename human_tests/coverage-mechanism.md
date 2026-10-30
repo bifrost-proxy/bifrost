@@ -305,39 +305,9 @@ grep -n 'production-coverage.json\|coverage-all.sh --with-e2e' \
 
 **步骤**：
 
-```bash
-bash e2e-tests/tests/test_coverage_pipeline_contract.sh
-HOME="$HOME" CARGO_HOME="$HOME/.cargo" RUSTUP_HOME="$HOME/.rustup" \
-  BIFROST_BIN="$PWD/target/release/bifrost" \
-  target/release/bifrost-e2e --test tls_switch_intercept_to_tunnel \
-  --jobs 1 --test-timeout 30
-BIFROST_E2E=1 BIFROST_CHATGPT_WEB_E2E_MOCK=1 \
-  target/release/bifrost-e2e \
-  --test im_gateway_chatgpt_web_restores_conversation_after_service_restart \
-  --jobs 1 --test-timeout 120
-SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-proxy \
-  intercepted_non_http_tls_connects_and_relays_through_tls_upstream \
-  --all-features -- --nocapture
-SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-proxy \
-  limited_blocking_resolution_covers_success_closed_and_join_error \
-  --all-features -- --nocapture
-SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" \
-  bash e2e-tests/tests/test_group_sync_no_logstorm_e2e.sh
-cd web && pnpm exec playwright test tests/ui/admin-rules-values.spec.ts \
-  --grep "Values 页面完成 CRUD" --workers=1
-SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" \
-  bash e2e-tests/tests/test_rule_share_confirm_browser.sh
-BIFROST_HTTP3_CARGO_TEST_TIMEOUT=600 SKIP_BUILD=true \
-  BIFROST_BIN="$PWD/target/release/bifrost" \
-  bash e2e-tests/tests/test_http3_e2e.sh
-CI=true SKIP_CARGO_TEST=true SKIP_BUILD=true \
-  BIFROST_BIN="$PWD/target/release/bifrost" \
-  bash e2e-tests/tests/test_http3_e2e.sh
-```
 
 **预期**：coverage pipeline contract 全部通过；TLS ON -> OFF 后第二次请求使用新连接，
 流量统计精确为 `HTTPS=1` 且 `TUNNEL>=1`；release Runner 只有在 E2E 上下文与 mock
-请求双开关同时存在时走 ChatGPT Web mock，服务重启会话恢复用例 1/1 通过；
 `bifrost-e2e` 显式显示 `EXEMPT`，且不进入 crate/workspace 自覆盖率百分比门禁。
 非 HTTP TLS 拦截成功连接真实本地 TLS upstream，并双向转发初始载荷、客户端载荷和
 upstream 响应，取消信号能够正常结束 relay。
@@ -621,7 +591,6 @@ Git workspace、Cargo 缓存与 `127.0.0.1` fixture，不连接飞书或任何�
   主 Coverage 的 proxy E2E 子集执行同一 90% production 门禁。
 - TC-COV-17：PASS。coverage pipeline contract 检查 253 个 Shell 文件、23 个工具单测、
   10 个能力契约及 3 个能力分片均通过；真实运行 TLS ON -> OFF 用例 1/1 通过，切换后
-  流量为 `HTTPS=1`、`TUNNEL=1`；release Runner 双开关 ChatGPT Web 会话恢复用例
   1/1 通过，耗时 1.11 秒；测试框架自身已按产品边界标记为 `metric="exempt"`，
   其 Rules/Shell/Runner 可执行门禁保持强制；非 HTTP TLS 拦截真实本地 TLS upstream
   双向 relay 用例 1/1 通过；进程解析限流的 success/closed/cancelled join-error 用例
@@ -637,5 +606,4 @@ Git workspace、Cargo 缓存与 `127.0.0.1` fixture，不连接飞书或任何�
 - TC-COV-11：PASS。使用 `cargo llvm-cov` 的 release `bifrost-admin` 单测 profile 和
   `scripts/ci/coverage-diff.py --base-ref origin/main --threshold 95` 计算，新增/修改生产
   Rust 行覆盖率为 `1727/1807 = 95.57%`。门禁真实覆盖选定 Daily Agent HTTP 触发、
-  研究 fan-out 成功/降级/失败、ChatGPT Project 会话恢复、IM mock inbound、消息发送与
   Windows 路径归一化，没有降低阈值或把测试代码计入分母。

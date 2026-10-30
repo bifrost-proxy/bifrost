@@ -200,7 +200,7 @@ adapter 声明能力，WebUI/API 按能力显隐配置项：
 
 Schedule Agent 覆盖：以 schedule 覆盖值覆盖 Runner 默认值；`dangerFullAccess=true` 时移除模板已有 `--sandbox`；`bifrost im schedule add/update` 必须同时提供 `--target` 或 `--provider/--target-mode`。
 
-所有 External Runner 通过同一个 Bifrost schedule control plane 工作，不为 Codex、Traex、Claude Code 或 ChatGPT Web 分别实现定时器。IM 入站时注入的可信 channel context 给出锁定的 provider/destination 和稳定幂等键。自然语言建 schedule 必须执行 `bifrost im schedule preview ... --format json-pretty`，展示时区、任务、Runner、目标及未来三次运行时间，等待用户明确确认后原样执行 `schedule add`。禁止 Agent 猜测或扩大目标，也禁止绕过 Bifrost 直接调用平台 API 或 Runner 私有 scheduler。
+所有 External Runner 通过同一个 Bifrost schedule control plane 工作，不为 Codex、Traex、Claude Code  分别实现定时器。IM 入站时注入的可信 channel context 给出锁定的 provider/destination 和稳定幂等键。自然语言建 schedule 必须执行 `bifrost im schedule preview ... --format json-pretty`，展示时区、任务、Runner、目标及未来三次运行时间，等待用户明确确认后原样执行 `schedule add`。禁止 Agent 猜测或扩大目标，也禁止绕过 Bifrost 直接调用平台 API 或 Runner 私有 scheduler。
 
 ### Claude-Code adapter
 
@@ -230,7 +230,6 @@ $BIFROST_DATA_DIR/im_gateway/chat_runs/<run_id>/
 
 ### 会话状态持久化与默认续接
 
-`session_state.json` 按 `sessionKey + adapter + runnerId` scope 保存 threadId 与 modelOverride，用于跨轮 resume。FIFO queue 归主 Bifrost Service 的 `SessionQueueManager` 所有，不依赖隔离 worker 内存；运行中收到的普通后续消息默认入队，当前 turn 完成后作为独立下一轮执行，`/q` 继续提供显式排队与序号管理。只有显式 `/g` 才尝试运行中引导：Codex/Traex app-server 通过 `turn/steer` 接收 Guide，Claude Code 与自定义/exec transport 先请求 active worker capability，无法注入时完整降级 queue。ChatGPT Web 不提供 `/g`。
 
 运行中的 `/model <name>` 与 `/model clear` 先更新同一份 session override，再经 IM worker → 主进程 capability broker → external worker 控制通道更新原生会话。Codex 与 Traex app-server 使用 `thread/settings/update {threadId, model}`；Claude Code stream-json 使用 `control_request {subtype:"set_model", model}`。原生 ACK 只表示新模型对后续响应/轮次生效，不中断或重启已经发出的生成。`/model`、`/models` 查询在运行中同样可用。自定义 `exec` transport 没有原生热切换协议时，override 仍持久化供下一次 run 使用，并向用户明确报告当前 Runner 未确认热切换。
 

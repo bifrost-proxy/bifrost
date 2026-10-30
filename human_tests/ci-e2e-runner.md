@@ -12,19 +12,6 @@
 
 ## 测试用例列表
 
-### TC-CER-03：并发 runner 下 ChatGPT Web 恢复用例串行隔离
-
-操作步骤：
-
-1. 执行：`BIFROST_E2E_RUNNER_JOBS=8 cargo run -p bifrost-e2e -- --category admin --test im_gateway_chatgpt_web_restores_conversation_after_service_restart --test-timeout 180`。
-2. 观察输出中的测试结果。
-
-预期结果：
-
-- 命令退出码为 `0`。
-- 输出显示 `im_gateway_chatgpt_web_restores_conversation_after_service_restart` 通过。
-- 不出现 `Expected chatgpt_web mock run snapshot` 或 conversationId 恢复失败。
-
 ### TC-CER-04：Remote shell stdout streaming CI 阈值回归
 
 操作步骤：

@@ -453,15 +453,12 @@ async fn serve_run_connection(
     }
 }
 
-async fn cancel_brokered_session(session_key: Option<&str>, adapter: &str) {
+async fn cancel_brokered_session(session_key: Option<&str>, _adapter: &str) {
     let Some(session_key) = session_key else {
         return;
     };
-    if adapter == crate::im_gateway::chatgpt_web::ADAPTER_ID {
-        let _ = crate::im_gateway::chatgpt_web::worker::stop_session_run(session_key).await;
-    } else {
-        let _ = crate::im_gateway::external_cli::request_worker_session_stop(session_key).await;
-    }
+
+    let _ = crate::im_gateway::external_cli::request_worker_session_stop(session_key).await;
 }
 
 async fn write_frame<W, T>(writer: &mut W, frame: &T) -> Result<(), String>

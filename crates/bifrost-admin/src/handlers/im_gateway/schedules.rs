@@ -177,6 +177,15 @@ fn validate_schedule_destination(
     service: &ImGatewayService,
     schedule: &ImSchedule,
 ) -> Result<(), String> {
+    if let Some(agent) = schedule.agent.as_ref() {
+        let config = service.external_cli_config_store.load();
+        let effective = crate::im_gateway::external_cli::effective_config_for_provider_and_runner(
+            &config,
+            None,
+            agent.runner_id.as_deref(),
+        );
+        crate::im_gateway::external_cli::validate_supported_adapter(&effective.settings.adapter)?;
+    }
     crate::im_gateway::schedule_tools::validate_schedule_destination(
         schedule,
         |provider_id| {
@@ -627,17 +636,16 @@ async fn execute_external_runner_schedule_once(
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty());
-    let is_chatgpt_web = settings.adapter == crate::im_gateway::chatgpt_web::ADAPTER_ID;
-    if !is_chatgpt_web {
-        if let Some(initial_prompt) = initial_prompt {
-            settings.instructions = match settings.instructions.take() {
-                Some(existing) if !existing.trim().is_empty() => {
-                    Some(format!("{}\n\n{}", existing.trim(), initial_prompt))
-                }
-                _ => Some(initial_prompt.to_string()),
-            };
-        }
+
+    if let Some(initial_prompt) = initial_prompt {
+        settings.instructions = match settings.instructions.take() {
+            Some(existing) if !existing.trim().is_empty() => {
+                Some(format!("{}\n\n{}", existing.trim(), initial_prompt))
+            }
+            _ => Some(initial_prompt.to_string()),
+        };
     }
+
     if let Some(system_prompt) = agent_task
         .system_prompt
         .as_deref()
@@ -661,13 +669,7 @@ async fn execute_external_runner_schedule_once(
         &settings.adapter,
         agent_task.conversation_ref.as_ref(),
     );
-    let initialized = if schedule_conversation_ref.is_some() {
-        true
-    } else if is_chatgpt_web {
-        crate::im_gateway::chatgpt_web::session_conversation_exists(&session_key).await
-    } else {
-        false
-    };
+    let initialized = schedule_conversation_ref.is_some();
     let messages = schedule_external_runner_messages(
         &settings.adapter,
         initial_prompt,
@@ -916,20 +918,13 @@ fn merge_schedule_adapter_config(
 }
 
 pub(super) fn schedule_external_runner_messages(
-    adapter: &str,
-    initial_prompt: Option<&str>,
-    initialized: bool,
+    _adapter: &str,
+    _initial_prompt: Option<&str>,
+    _initialized: bool,
     prompt: &str,
 ) -> Vec<String> {
     let prompt = prompt.trim().to_string();
-    if adapter == crate::im_gateway::chatgpt_web::ADAPTER_ID && !initialized {
-        if let Some(initial_prompt) = initial_prompt
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
-            return vec![initial_prompt.to_string(), prompt];
-        }
-    }
+
     vec![prompt]
 }
 
@@ -1019,14 +1014,7 @@ fn schedule_conversation_ref_for_adapter<'a>(
     if conversation_ref.adapter != adapter {
         return None;
     }
-    if adapter == crate::im_gateway::chatgpt_web::ADAPTER_ID {
-        return conversation_ref
-            .conversation_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(|_| conversation_ref);
-    }
+
     if matches!(
         adapter,
         "codex"
@@ -1052,16 +1040,7 @@ fn apply_schedule_conversation_ref_to_request(
     else {
         return;
     };
-    if adapter == crate::im_gateway::chatgpt_web::ADAPTER_ID {
-        if let Some(conversation_id) = conversation_ref
-            .conversation_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
-            request.params = serde_json::json!({ "conversationId": conversation_id });
-        }
-    } else if matches!(
+    if matches!(
         adapter,
         "codex"
             | crate::im_gateway::external_cli::TRAEX_ADAPTER
@@ -1083,18 +1062,7 @@ pub(super) fn schedule_conversation_ref_from_external_result(
     result: &crate::im_gateway::external_cli::ExternalCliRunResult,
 ) -> Option<crate::im_gateway::types::ScheduleConversationRef> {
     let now = now_ms();
-    if adapter == crate::im_gateway::chatgpt_web::ADAPTER_ID {
-        let conversation_id = result_string_field(
-            result,
-            &["conversationId", "conversation_id", "conversationID"],
-        )?;
-        return Some(crate::im_gateway::types::ScheduleConversationRef {
-            adapter: adapter.to_string(),
-            conversation_id: Some(conversation_id),
-            thread_id: None,
-            updated_at: now,
-        });
-    }
+
     if matches!(
         adapter,
         "codex"

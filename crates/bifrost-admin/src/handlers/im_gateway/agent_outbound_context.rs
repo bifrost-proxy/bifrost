@@ -154,7 +154,7 @@ fn render_im_agent_outbound_context(
         };
         let idempotency_key = format!("im:{}", blake3::hash(event.event_id.as_bytes()).to_hex());
         lines.extend([
-            "Scheduled Agent tasks use the same configured External Runner layer as normal IM turns (for example Codex, Traex, Claude Code, or ChatGPT Web). Never invoke a runner-specific scheduler directly.".to_string(),
+            "Scheduled Agent tasks use the same configured External Runner layer as normal IM turns (for example Codex, Traex, or Claude Code). Never invoke a runner-specific scheduler directly.".to_string(),
             "When the user asks to create a schedule: collect the task, trigger, IANA timezone, runner, and destination; run preview first; show the normalized values and all upcoming_run_times; wait for explicit confirmation; only then run add with exactly the same values.".to_string(),
             format!(
                 "Trusted schedule route arguments for this conversation: --provider '{}' --target '{}' --target-mode '{}'",
@@ -338,7 +338,7 @@ mod tests {
         assert!(context.contains("--target 'oc_exact_chat' --target-mode 'source_thread'"));
         assert!(context.contains("wait for explicit confirmation"));
         assert!(context.contains("reuse the exact idempotency_key returned by that preview"));
-        assert!(context.contains("Codex, Traex, Claude Code, or ChatGPT Web"));
+        assert!(context.contains("Codex, Traex, or Claude Code"));
         assert!(!context.contains("NEVER_RENDER_THIS_SECRET"));
     }
 

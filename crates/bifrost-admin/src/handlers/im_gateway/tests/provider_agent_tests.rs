@@ -939,7 +939,7 @@ pub(super) fn im_help_for_codex_runner_lists_fast_command() {
 pub(super) fn im_help_for_unsupported_external_runner_omits_unsupported_commands() {
     let help = build_im_startup_help_for_runner(
         &ImHelpRunnerKind::External {
-            adapter: "chatgpt_web".to_string(),
+            adapter: "custom_cli".to_string(),
         },
         ImProviderType::Weixin,
     );

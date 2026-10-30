@@ -399,10 +399,7 @@ PY
 ### TC-LOD-11：日志断言类 E2E 显式启用 Console tracing（CI 回归验证）
 
 **操作步骤**：
-1. 执行 ChatGPT Web startup auth 预检脚本：
-   ```bash
-   SKIP_BUILD=true e2e-tests/tests/test_chatgpt_web_startup_auth_preflight.sh
-   ```
+
 2. 执行规则匹配日志噪声脚本：
    ```bash
    SKIP_BUILD=true e2e-tests/tests/test_rule_match_logging_noise.sh
@@ -484,7 +481,6 @@ rm -rf /tmp/bifrost-human-launchd-log
 
 | 日期 | 用例 | 实际结果 | 结论 |
 | --- | --- | --- | --- |
-| 2026-06-08 | TC-LOD-11 | 已执行 `SKIP_BUILD=true e2e-tests/tests/test_chatgpt_web_startup_auth_preflight.sh`、`SKIP_BUILD=true e2e-tests/tests/test_rule_match_logging_noise.sh`、`SKIP_BUILD=true e2e-tests/tests/test_socks5_tls_routing_exceptions.sh`；三者均通过。CI 失败 artifacts 证实旧脚本在 Linux/macOS 中依赖默认 stdout tracing，修复后这些日志断言脚本改为显式 `--log-output console,file`。 | 通过 |
 | 2026-06-12 | TC-LOD-11 | PR #225 CI 中 Linux/macOS `E2E Shell shard 3/3` 均失败于 `test_rule_match_logging_noise.sh`。已将脚本断言从旧 `rule MATCHED` 更新为 `rule matcher candidate matched` 与 `rule selected`，并执行 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 e2e-tests/tests/test_rule_match_logging_noise.sh`，结果通过。 | 通过 |
 | 2026-06-12 | TC-LOD-11 | PR #227 CI run `27423667730` macOS `E2E Shell (aarch64-apple-darwin, shard 1/3)` failed because `test_rule_match_logging_noise.sh` used fixed debug port `18888`, which was already occupied on the runner. The script now allocates info/debug ports dynamically through `allocate_free_port` while preserving `INFO_PORT` / `DEBUG_PORT` overrides; `bash -n e2e-tests/tests/test_rule_match_logging_noise.sh` passed. | 通过 |
 | 2026-06-13 | TC-LOD-12 | PR #236 CI run `27472448398` 中 macOS shard 1 先显示 `console-file admin request` 通过，随后 `test_cli_start_log_output_default_file.sh` 在停止流程卡到 900 秒 timeout。已将脚本的 `bifrost stop` 改为有界 best-effort helper，并在 stop 超时后使用 `safe_cleanup_proxy` 与端口清理兜底。执行 `bash -n e2e-tests/tests/test_cli_start_log_output_default_file.sh` 通过；执行 `BIFROST_E2E_STOP_TIMEOUT=3 SKIP_BUILD=true BIFROST_BIN="$(pwd)/target/release/bifrost" e2e-tests/tests/test_cli_start_log_output_default_file.sh` 通过，输出 10/10 passed，总耗时 7.6 秒。 | 通过 |

@@ -61,7 +61,6 @@ impl WorkerKind {
     pub fn parse(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().replace('-', "_").as_str() {
             "external_cli" => Some(Self::ExternalCli),
-            "browser" => Some(Self::Browser),
             "asr" => Some(Self::Asr),
             "im_gateway" => Some(Self::ImGateway),
             "remote_invoke" => Some(Self::RemoteInvoke),
@@ -505,7 +504,6 @@ mod tests {
     fn every_worker_kind_has_a_stable_round_trip_name() {
         for kind in [
             WorkerKind::ExternalCli,
-            WorkerKind::Browser,
             WorkerKind::Asr,
             WorkerKind::ImGateway,
             WorkerKind::RemoteInvoke,
@@ -517,6 +515,7 @@ mod tests {
                 Some(kind)
             );
         }
+        assert_eq!(WorkerKind::parse("browser"), None);
         assert_eq!(WorkerKind::parse("unknown"), None);
     }
 

@@ -504,9 +504,7 @@
    bash -n scripts/run_all_e2e.sh
    ```
 2. 静态检查所有本轮观察到 Cargo artifact lock 等待的 shell E2E 用例都登记在 `CARGO_HEAVY_TESTS`：
-   ```bash
-   rg -n 'CARGO_HEAVY_TESTS|test_asr_model_autonomy.sh|test_asr_task_pause_resume.sh|test_chatgpt_web_behavior_artifacts.sh|test_client_process_transport_attribution.sh|test_http3_e2e.sh|test_im_gateway_long_reply_delivery_regression.sh|test_qwen3_asr_local_server.sh|test_qwen3_asr_runtime_guards.sh|test_skill_creator_flow.sh|test_sync_login_direct_e2e.sh|test_utf8_safe_preview_e2e.sh|test_voice_input_runtime.sh|is_cargo_heavy|serial_tests' scripts/run_all_e2e.sh
-   ```
+
 3. 列出 CI shard 1 的 shell 用例，确认本次失败相关的 cargo-heavy 用例仍属于 shard 1：
    ```bash
    BIFROST_E2E_SHARD_INDEX=1 BIFROST_E2E_SHARD_TOTAL=3 \
@@ -522,7 +520,6 @@
 **预期结果**：
 - 语法检查通过。
 - 静态检查显示 `CARGO_HEAVY_TESTS` 包含当前 CI 失败相关和同 shard 观察到 artifact lock 等待的 Cargo 用例，且 `is_cargo_heavy` 会把它们加入 `serial_tests`。
-- shard 1 列表仍包含 `test_chatgpt_web_behavior_artifacts.sh`、`test_skill_creator_flow.sh` 等用例，说明覆盖范围不被跳过，只改变调度方式。
 - artifact 复核能定位原始失败是并发 Cargo artifact lock 竞争，而不是业务断言失败。
 - 该回归不启动 Bifrost，不使用 9900，不修改系统代理。
 
@@ -530,13 +527,7 @@
 
 **操作步骤**：
 1. 执行脚本语法检查：
-   ```bash
-   bash -n \
-     e2e-tests/tests/test_http3_e2e.sh \
-     e2e-tests/tests/test_replay_body_decode.sh \
-     e2e-tests/tests/test_chatgpt_web_startup_auth_preflight.sh \
-     scripts/run_all_e2e.sh
-   ```
+
 2. 静态检查 HTTP3/Replay 失败路径不再引用公网 `httpbin.org` 或 `echo.websocket.events`：
    ```bash
    rg -n 'httpbin\.org|echo\.websocket\.events' \
@@ -566,19 +557,13 @@
    bash e2e-tests/tests/test_replay_body_decode.sh
    ```
 5. 使用已有 Bifrost binary 执行 startup auth preflight 回归：
-   ```bash
-   BIFROST_BIN=/Users/eden/work/github/bifrost/target/debug/bifrost \
-   SKIP_BUILD=true \
-   BIFROST_CHATGPT_WEB_STARTUP_E2E_PORT=18971 \
-   bash e2e-tests/tests/test_chatgpt_web_startup_auth_preflight.sh
-   ```
+
 
 **预期结果**：
 - 语法检查通过。
 - 静态检查在 HTTP3/Replay 失败路径中无公网 `httpbin.org` 或 `echo.websocket.events` 引用。
 - HTTP3 shell 回归启动本地 HTTP/HTTPS mock，host forwarding、response body append、gzip、SSE、POST、PUT/PATCH/DELETE 等断言全部通过，最终 `Passed: 34`、`Failed: 0`。
 - Replay gzip 回归启动本地 HTTP mock，`Replay decoded gzip response body as JSON` 通过，最终 `Results: 1 passed, 0 failed`。
-- Startup auth preflight 输出 `using existing bifrost binary` 和 `[chatgpt-web-startup-auth] PASS`，不会进入 `cargo build`，避免 macOS shell shard 内 Cargo artifact lock 竞争。
 
 ### TC-CS-32: macOS shell shard ASR/history 脚本复用 CI release binary 回归
 
@@ -931,7 +916,6 @@
 
 ### TC-CS-46: 重型低频 shell 用例跳出默认 PR CI 且本地 full-shell 保留
 
-**背景**：GitHub Actions macOS shell shard 近期日志显示 `test_asr_admin_csrf.sh` 耗时约 583s，`test_chatgpt_web_shared_profile.sh` 耗时约 879s。前者在 shell 脚本内执行 Web unit test、重新构建 debug bifrost 并跑 Admin cross-site 安全链路；后者是 shell 包装的 Rust 单测。二者都属于低频模块专项回归，不应占用每次 PR 的默认 shell shard 预算。
 
 **操作步骤**：
 1. 语法检查 shell E2E 调度器：
@@ -939,17 +923,9 @@
    bash -n scripts/run_all_e2e.sh
    ```
 2. 验证默认 CI shell 列表不再收集这两个重型用例：
-   ```bash
-   bash scripts/run_all_e2e.sh --ci --full-shell --skip-rules --skip-runner --skip-ui --skip-build --list-shell-tests \
-     | rg '^(test_asr_admin_csrf|test_chatgpt_web_shared_profile)\.sh$'
-   ```
-3. 验证本地 full-shell 仍保留这两个用例，供 ASR/Admin CSRF 或 ChatGPT Web profile 相关修改专项执行：
-   ```bash
-   for script in test_asr_admin_csrf.sh test_chatgpt_web_shared_profile.sh; do
-     bash scripts/run_all_e2e.sh --full-shell --skip-rules --skip-runner --skip-ui --skip-build --list-shell-tests \
-       | rg -q "^${script}$"
-   done
-   ```
+
+3. 验证本地 full-shell 仍保留这两个用例，供 ASR/Admin CSRF  profile 相关修改专项执行：
+
 4. 验证 shell CI coverage guard 仍通过，确认被跳出的脚本已显式登记而不是遗漏：
    ```bash
    bash scripts/ci/check-e2e-shell-ci-coverage.sh
@@ -1046,9 +1022,7 @@
    BIFROST_E2E_SHELL_JOBS=2 bash scripts/run_all_e2e.sh --ci --full-shell --skip-rules --skip-runner --skip-ui --skip-build --shard 1/2 --check-shell-shard-balance
    ```
 4. 检查实测长尾脚本已有非默认权重：
-   ```bash
-   rg -n 'test_desktop_open_requests_contract\.sh\) echo 486|test_chatgpt_web_behavior_artifacts\.sh\) echo 243|test_im_gateway_long_reply_delivery_regression\.sh\) echo 142|test_skill_creator_flow\.sh\) echo 102' scripts/run_all_e2e.sh
-   ```
+
 
 **预期结果**：
 - 第 1 步语法检查通过。
@@ -1375,7 +1349,6 @@
 | TC-CS-26 | 通过 | 2026-05-12 本轮执行：CI run `25725290679` 的 `E2E Shell (Linux, shard 3/3)` 失败日志显示 `sh: 1: astro: not found` 与 `Local package.json exists, but node_modules missing`，`E2E Shell (aarch64-apple-darwin, shard 3/3)` 同 shard 上传失败 artifact；修复后执行 `rm -rf site/node_modules` 模拟缺失依赖，`bash -n e2e-tests/tests/test_site_docs_sync.sh` 通过，随后使用本机可用新版 Node 执行 `PATH="/opt/homebrew/bin:$PATH" bash e2e-tests/tests/test_site_docs_sync.sh`，输出 `Installing site dependencies for docs sync E2E...`、`Docs sync verification passed for 27 docs pages.`、探针文档加入后的 `Docs sync verification passed for 28 docs pages.`、`Site link verification passed.`、`Site docs sync E2E passed.`，确认缺少 site 依赖时会自举安装并完成 Astro build。该回归未启动 Bifrost，未使用 9900，未修改系统代理。 |
 | TC-CS-27 | 通过 | 2026-05-20 本轮执行：`bash -n` 覆盖 13 个本轮涉及的 shell E2E 脚本并通过；静态检查确认这些脚本中 `start --no-system-proxy` 的 Bifrost 启动窗口均包含 `--skip-cert-check`，且 `test_asr_task_cli.sh` 包含 `SKIP_BUILD=true` 复用 `target/release/bifrost` 的路径。随后使用 release binary 执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" bash e2e-tests/tests/test_asr_task_cli.sh`，输出 `skipping build, using .../target/release/bifrost` 与 `[asr-task-cli-e2e] PASS`；执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" bash e2e-tests/tests/test_values_hot_reload.sh`，汇总 `Total: 5 / Passed: 5 / Failed: 0`；执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" bash e2e-tests/tests/test_proxy_chain_auth_e2e.sh`，汇总 `Total: 11 / Passed: 11 / Failed: 0`，包含 absolute-form 与 `Proxy-Authorization` 断言。全部真实执行使用临时数据目录、`--no-system-proxy` 与非 9900 端口。 |
 | TC-CS-29 | 通过 | 2026-05-26 本轮执行：`bash -n scripts/run_all_e2e.sh` 退出码 0；静态检查确认现存 Cargo-heavy 用例会由 `is_cargo_heavy` 加入 `serial_tests`，避免并行争用 Cargo artifact lock；shell 列表仍覆盖这些现存用例。该回归未启动 Bifrost，未使用 9900，未修改系统代理。 |
-| TC-CS-30 | 通过 | 2026-05-28 本轮执行：`bash -n e2e-tests/tests/test_http3_e2e.sh e2e-tests/tests/test_replay_body_decode.sh e2e-tests/tests/test_chatgpt_web_startup_auth_preflight.sh scripts/run_all_e2e.sh` 通过；`rg -n 'httpbin\.org|echo\.websocket\.events' e2e-tests/tests/test_http3_e2e.sh e2e-tests/tests/test_replay_body_decode.sh e2e-tests/rules/http3/http3_e2e.txt` 无公网域名匹配。随后使用已有 debug binary 执行 `BIFROST_BIN=/Users/eden/work/github/bifrost/target/debug/bifrost SKIP_BUILD=true SKIP_CARGO_TEST=true PROXY_PORT=18991 ECHO_HTTP_PORT=18992 ECHO_HTTPS_PORT=18993 SERVER_LOG_DIR=/tmp/bifrost-http3-mock-logs bash e2e-tests/tests/test_http3_e2e.sh`，脚本启动本地 mock，host forwarding 和 body append 均返回 200，最终 `Passed: 34`、`Failed: 0`。执行 `BIFROST_BIN=/Users/eden/work/github/bifrost/target/debug/bifrost SKIP_BUILD=true PROXY_PORT=18981 MOCK_HTTP_PORT=18982 BIFROST_DATA_DIR=/tmp/bifrost-replay-body-decode-test SERVER_LOG_DIR=/tmp/bifrost-replay-body-decode-test/mock-logs bash e2e-tests/tests/test_replay_body_decode.sh`，输出 `Replay decoded gzip response body as JSON`，`Results: 1 passed, 0 failed`。执行 `BIFROST_BIN=/Users/eden/work/github/bifrost/target/debug/bifrost SKIP_BUILD=true BIFROST_CHATGPT_WEB_STARTUP_E2E_PORT=18971 bash e2e-tests/tests/test_chatgpt_web_startup_auth_preflight.sh`，输出 `using existing bifrost binary` 与 `[chatgpt-web-startup-auth] PASS`，未触发 cargo build。三条真实执行均使用临时端口、`--no-system-proxy`，未使用 9900。 |
 | TC-CS-32 | 通过 | 2026-05-29 本轮执行：`bash -n e2e-tests/tests/test_agent_history_pagination_api.sh e2e-tests/tests/test_asr_task_append_during_run.sh e2e-tests/tests/test_asr_task_startup_recovery.sh` 通过；`rg -n 'SKIP_BUILD\|target/release/bifrost\|target/debug/bifrost\|bifrost binary is not executable\|skipping build, using' ...` 显示三个脚本均在 `SKIP_BUILD=true` 分支默认 release binary、本地构建分支默认 debug binary，且 binary 不可执行时明确失败；`/tmp/job-78509089317.log` 复核确认原始失败为三个脚本并行重复触发 Cargo build 后超过 900 秒 suite timeout。随后执行 `SKIP_FRONTEND_BUILD=1 cargo build --release --bin bifrost` 生成 release binary，并分别运行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" bash e2e-tests/tests/test_agent_history_pagination_api.sh`、`SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" BIFROST_ASR_TASK_APPEND_E2E_PORT=19131 bash e2e-tests/tests/test_asr_task_append_during_run.sh`、`SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" BIFROST_ASR_TASK_RECOVERY_E2E_PORT=19132 bash e2e-tests/tests/test_asr_task_startup_recovery.sh`，三者分别输出 `agent history pagination API checks passed`、`[asr-task-append] PASS`、`[asr-task-startup-recovery] PASS`，均未进入 `cargo build`；真实执行使用临时数据目录、`--no-system-proxy` 与非 9900 端口。 |
 | TC-CS-33 | 通过 | 2026-05-29 本轮执行：`bash -n e2e-tests/tests/test_asr_task_cli.sh e2e-tests/tests/test_asr_diarization_cli.sh e2e-tests/tests/test_asr_model_autonomy.sh e2e-tests/tests/test_asr_voiceprint_enroll_cli.sh` 通过；`rg -n 'ADMIN_PORT="\$\{BIFROST_ASR_[A-Z_]+_E2E_PORT:-\$\{ADMIN_PORT:-18[0-9]+' ...` 显示四个 ASR CLI shell E2E 均优先使用显式 `BIFROST_ASR_*_E2E_PORT`，其次使用外层 `ADMIN_PORT`，最后使用本地默认固定端口；`rg -n 'Failed to connect to Bifrost admin API\|Invalid argument' /tmp/bifrost-ci-26643081691-mac-shard2/.e2e-reports/shell_test_asr_voiceprint_enroll_cli_sh.log` 复核原始失败为固定端口场景下 CLI finish enrollment 无法连接 admin API。执行 `SKIP_FRONTEND_BUILD=1 cargo build --release --bin bifrost` 时发现并修复 `web/dist-gzip` stale 目录删除 `Directory not empty` 构建竞态；修复后 release 构建通过。随后执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" ADMIN_PORT=19141 bash e2e-tests/tests/test_asr_voiceprint_enroll_cli.sh`，输出 `[asr-voiceprint-enroll-cli-e2e] ok`；真实执行使用临时数据目录、`--no-system-proxy` 与非 9900 端口。 |
 | TC-CS-34 | 通过 | 2026-06-04 本轮执行：`bash -n e2e-tests/tests/test_asr_diarization_cli.sh` 通过；`rg -n 'BIFROST_ASR_DIARIZATION_E2E_ONLINE\|skipping online model init\|diarization_ready' e2e-tests/tests/test_asr_diarization_cli.sh` 显示默认离线分支、显式联网开关和 ready 断言；`rg -n 'status code 429\|download diarization model' /tmp/bifrost-ci-26896054036-shard3/.e2e-reports/shell_test_asr_diarization_cli_sh.log` 复核原始 CI 失败为 HuggingFace 429。随后执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" ADMIN_PORT=19143 bash e2e-tests/tests/test_asr_diarization_cli.sh`，输出 `skipping online model init` 与 `[asr-diarization-cli-e2e] ok`；真实链路启动 Bifrost、调用 CLI status、创建启用 diarization 的 ASR 任务，并在默认无模型资产时断言 `diarization_ready=false`。全程使用临时数据目录、`--no-system-proxy` 与非 9900 端口。 |
@@ -1387,7 +1360,6 @@
 | TC-CS-42 | 通过 | 2026-06-13 本轮执行：Ruby YAML 解析 `.github/workflows/ci.yml` 输出 `shell layout ok`，确认 Linux shell E2E 没有 matrix/shard 环境变量且 job 名称为 `E2E Shell (Linux)`，macOS shell E2E 为 2 分片；静态执行 Linux 单 job `--list-shell-tests` 得到 133 个 CI shell tests；静态执行 `--list-shell-tests --shard N/2` 得到 `1/2 67`、`2/2 66`，总计 133 个 CI shell tests。全部命令只列测试或解析 YAML，未启动 Bifrost、未使用 9900、未修改系统代理。 |
 | TC-CS-44 | 通过 | 2026-06-17 本轮执行：GitHub Actions `CI` run `27676908356` 仅失败 `E2E Shell (aarch64-apple-darwin, shard 1/2)`，失败套件为 `shell:test_proxy_chain_auth_e2e.sh`，断言 `双代理链路请求成功` 期望 2xx 实际 502；同 run 中 `test_sync_login_direct_e2e.sh`、coverage 90% gate、Unit & Integration、Linux E2E、Windows/macOS/Linux build 与其它 E2E rules/runner 均通过。确认该 proxy chain 用例使用本机 `127.0.0.1` mock，不访问公网；随后把端口从 `$$ % 200` 固定小窗口改为 `pick_available_base_port` 动态连续端口段，并在非 2xx 时输出响应与 entry/upstream/mock 日志。执行 `bash -n e2e-tests/tests/test_proxy_chain_auth_e2e.sh` 通过；执行 `BIFROST_DISABLE_TRAY=1 BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 bash e2e-tests/tests/test_proxy_chain_auth_e2e.sh`，输出 HTTP echo、proxy echo、Bifrost ready，双代理链路与下游代理鉴权全部通过，汇总 `Total: 11 / Passed: 11 / Failed: 0`，实际端口为动态非 9900 端口。 |
 | TC-CS-45 | 通过 | 2026-06-22 本轮执行：GitHub Actions `CI` run `27924364360` 的 `E2E Shell (Linux)` 失败套件为 `shell:test_socks5_tls_routing_exceptions.sh`，失败原因为 `Network error: Failed to bind to 0.0.0.0:19379: Address already in use`。完整 job log 显示 runner 分配 `PROXY_PORT=19373`、`SOCKS5_PORT=19379`，脚本旧的 `DOWNSTREAM_PROXY_PORT=18890 + ($$ % 500)` 在 PID `36489` 下也算成 `19379`，下游代理和独立 SOCKS5 listener 端口碰撞。修复为 `DOWNSTREAM_PROXY_PORT` 优先使用 runner 注入的 `ECHO_PROXY_PORT` / `MOCK_ECHO_PROXY_PORT`，再 fallback 到 `PROXY_PORT+7`。执行 `bash -n e2e-tests/tests/test_socks5_tls_routing_exceptions.sh` 通过；执行静态 `rg` 确认默认值链路存在；随后使用 `PROXY_PORT=19373 SOCKS5_PORT=19379 ECHO_PROXY_PORT=19380 MOCK_ECHO_PROXY_PORT=19380 ECHO_HTTP_PORT=19374 ECHO_HTTPS_PORT=19375 SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" bash e2e-tests/tests/test_socks5_tls_routing_exceptions.sh` 真实复现 CI 端口形态，脚本完成所有 routing exception 断言并退出 0，全程未使用 9900，未修改系统代理。 |
-| TC-CS-46 | 通过 | 2026-07-01 本轮执行：`bash -n scripts/run_all_e2e.sh` 通过；`bash scripts/run_all_e2e.sh --ci --full-shell --skip-rules --skip-runner --skip-ui --skip-build --list-shell-tests | rg '^(test_asr_admin_csrf|test_chatgpt_web_shared_profile)\\.sh$'` 无输出且退出码为 1，确认默认 PR CI shell shard 不再收集两个重型低频脚本；随后分别确认 `bash scripts/run_all_e2e.sh --full-shell --skip-rules --skip-runner --skip-ui --skip-build --list-shell-tests | rg -q '^test_asr_admin_csrf\\.sh$'` 和同命令匹配 `test_chatgpt_web_shared_profile.sh` 均通过，说明本地 full-shell 专项入口仍保留；`bash scripts/ci/check-e2e-shell-ci-coverage.sh` 输出 selected/skipped 统计并以 `OK: every test_*.sh shell E2E script is selected by CI or explicitly skipped.` 结束。全部命令只列测试或做静态校验，未启动 Bifrost，未使用 9900，未修改系统代理。 |
 | TC-CS-47 | 通过 | 2026-07-01 本轮执行：`bash -n scripts/run_all_e2e.sh` 通过；`bash scripts/run_all_e2e.sh --ci --full-shell --skip-rules --skip-runner --skip-ui --skip-build --list-shell-tests | rg '^test_security_hardening\\.sh$'` 无输出且退出码为 1，确认默认 PR CI shell shard 不再收集安全聚合 wrapper；`bash scripts/run_all_e2e.sh --ci --full-shell --skip-rules --skip-runner --skip-ui --skip-build --list-shell-tests | rg -q '^test_security_hardening_functional\\.sh$'` 通过，确认安全功能子路径仍在默认 CI shell 覆盖中；`bash scripts/run_all_e2e.sh --full-shell --skip-rules --skip-runner --skip-ui --skip-build --list-shell-tests | rg -q '^test_security_hardening\\.sh$'` 通过，确认本地 full-shell / release-gate 仍保留聚合入口；`bash scripts/ci/check-e2e-shell-ci-coverage.sh` 输出 selected/skipped 统计并以 `OK: every test_*.sh shell E2E script is selected by CI or explicitly skipped.` 结束。全部命令只列测试或做静态校验，未启动 Bifrost，未使用 9900，未修改系统代理。 |
 | TC-CS-48 | 通过 | 2026-07-06 新增回归：先用 GitHub Actions run `28751216421` artifact 确认原失败为 `test_stop_restart_shutdown_marker.sh` 14/14 业务断言通过后 cleanup `rm: ... Directory not empty`；本轮修复 cleanup retry/best-effort 后执行 `bash -n e2e-tests/tests/test_stop_restart_shutdown_marker.sh` 通过，并执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_stop_restart_shutdown_marker.sh`，输出 `Total: 14 / Passed: 14 / Failed: 0`，退出码 0；全程使用随机端口和临时数据目录，未使用 9900，未修改真实系统代理。 |
 | TC-CS-49 | 通过 | 2026-07-08 本轮执行：`bash -n scripts/run_all_e2e.sh scripts/ci/run-e2e-shell.sh` 通过；`BIFROST_E2E_SHELL_JOBS=2` 下 CI full-shell 全量列表与两个 shard 合并列表一致且无重叠；权重门禁输出 `pct_of_avg=0.1%`。GitHub Actions `CI` run `28881027276` attempt 2 全绿。全部本地命令只列出或静态校验 shell 测试，未启动 Bifrost，未使用 9900，未修改系统代理。 |

@@ -3766,59 +3766,6 @@ print(json.dumps({"type":"result","subtype":"success","is_error":False,"result":
 }
 
 #[tokio::test]
-async fn external_cli_runtime_persists_chatgpt_web_adapter_errors() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let runtime = ExternalCliRuntime::new(temp_dir.path());
-    let request = ExternalCliRunRequest {
-        images: Vec::new(),
-        files: Vec::new(),
-        message: "hello from daily agent".to_string(),
-        operation: "unsupported-test-operation".to_string(),
-        params: serde_json::Value::Null,
-        provider_id: None,
-        runner_id: Some("web".to_string()),
-        session_key: None,
-        runtime: DEFAULT_RUNTIME.to_string(),
-        adapter: crate::im_gateway::chatgpt_web::ADAPTER_ID.to_string(),
-        work_dir: None,
-        instructions: None,
-        adapter_config: ExternalCliAdapterConfig {
-            timeout_secs: Some(1),
-            extra: BTreeMap::from([("browser".to_string(), serde_json::json!("invalid"))]),
-            ..Default::default()
-        },
-        allow_work_dirs: Vec::new(),
-        inject_bifrost_tools: false,
-        skill_paths: Vec::new(),
-    };
-
-    let result = runtime.run(request).await.unwrap();
-
-    assert_eq!(result.status, ExternalCliRunStatus::Failed);
-    assert!(result.response.contains("ChatGPT Web run failed"));
-    assert!(result
-        .response
-        .contains("parse chatgpt_web adapter config failed"));
-    assert!(Path::new(&result.artifacts.command_snapshot).exists());
-    assert!(Path::new(&result.artifacts.stdout).exists());
-    assert!(Path::new(&result.artifacts.stderr).exists());
-    assert!(Path::new(&result.artifacts.normalized_events).exists());
-    assert!(!Path::new(&result.artifacts.last_message).exists());
-    let stderr = tokio::fs::read_to_string(&result.artifacts.stderr)
-        .await
-        .unwrap();
-    assert!(stderr.contains("parse chatgpt_web adapter config failed"));
-    assert!(Path::new(&result.artifacts.run_dir)
-        .join("result.json")
-        .exists());
-    assert!(result.metadata.contains_key("failureDiagnostics"));
-    assert_eq!(
-        result.events[0].event_type,
-        ExternalCliProgressEventType::RunFailed
-    );
-}
-
-#[tokio::test]
 async fn external_cli_runtime_streams_stdout_before_process_exit() {
     let temp_dir = tempfile::tempdir().unwrap();
     let runtime = ExternalCliRuntime::new(temp_dir.path());
@@ -7031,4 +6978,106 @@ fn queued_worker_guard_removes_only_the_owned_registration() {
         queue_id: "newer".to_string(),
     });
     assert!(!QUEUED_WORKER_SESSIONS.contains_key(&session));
+}
+
+#[tokio::test]
+async fn retired_web_adapter_rejects_all_entries_without_touching_data() {
+    let temp = tempfile::tempdir().unwrap();
+    let runs = temp.path().join("runs");
+    std::fs::create_dir_all(&runs).unwrap();
+    let history = runs.join("existing-history.json");
+    std::fs::write(&history, "preserve history").unwrap();
+    let credentials = temp.path().join("auth_state.json");
+    std::fs::write(&credentials, "preserve credentials").unwrap();
+    let runtime = ExternalCliRuntime::new(&runs);
+    for adapter in [
+        "chatgpt_web",
+        "chatgpt-web",
+        "gpt-web",
+        "gpt_web",
+        "GPT Web",
+        "ChatGPTWeb",
+    ] {
+        let request: ExternalCliRunRequest = serde_json::from_value(serde_json::json!({
+            "message": "must not execute", "adapter": adapter,
+            "adapterConfig": { "executable": "/bin/sh", "args": ["-c", "exit 99"] }
+        }))
+        .unwrap();
+        let error = runtime.run(request.clone()).await.unwrap_err();
+        assert!(error.contains("no longer supported"), "{adapter}: {error}");
+        assert!(error.contains("explicitly"));
+        assert!(runtime
+            .run_in_current_process_with_progress(request.clone(), None)
+            .await
+            .unwrap_err()
+            .contains("removed"));
+        assert!(build_command_spec(&request, &runs.join("last.md"))
+            .unwrap_err()
+            .contains("removed"));
+    }
+    assert_eq!(
+        std::fs::read_to_string(history).unwrap(),
+        "preserve history"
+    );
+    assert_eq!(
+        std::fs::read_to_string(credentials).unwrap(),
+        "preserve credentials"
+    );
+    assert_eq!(std::fs::read_dir(runs).unwrap().count(), 1);
+}
+
+#[test]
+fn retired_web_config_remains_readable_but_cannot_be_saved_or_replaced_implicitly() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("admin").join(CONFIG_FILENAME);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let legacy = serde_json::json!({
+        "version": 2, "defaultRunnerId": "web", "runners": {
+            "web": {"enabled": true, "adapter": "chatgpt_web", "adapterConfig": {"auth": {"statePath": "keep.json"}}}
+        }, "channels": {"legacy": {"runnerId": "web"}}
+    });
+    std::fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+    let store = ExternalCliConfigStore::new(temp.path());
+    let loaded = store.load();
+    let effective = effective_config_for_provider(&loaded, Some("legacy"));
+    assert_eq!(effective.runner_id, "web");
+    assert_eq!(effective.settings.adapter, "chatgpt_web");
+    assert!(validate_supported_adapter(&effective.settings.adapter).is_err());
+    let before = std::fs::read(&path).unwrap();
+    assert!(store.save(loaded.clone()).unwrap_err().contains("removed"));
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert_eq!(store.load(), loaded);
+    assert!(store
+        .update_channel(
+            "new-channel",
+            ExternalCliChannelSettings {
+                runner_id: Some("web".into()),
+                ..Default::default()
+            }
+        )
+        .unwrap_err()
+        .contains("removed"));
+    assert!(!store.load().channels.contains_key("new-channel"));
+    for adapter in ["codex", TRAEX_ADAPTER, CLAUDE_CODE_ADAPTER, "custom_cli"] {
+        assert!(validate_supported_adapter(adapter).is_ok());
+    }
+    let mut migrated = loaded;
+    migrated.runners.get_mut("web").unwrap().adapter = "custom_cli".into();
+    store.save(migrated).unwrap();
+    assert_eq!(store.load().default_runner_id, "web");
+}
+
+#[test]
+fn missing_retired_runner_reference_never_falls_back_to_codex() {
+    let config = normalized_gateway_config(ExternalCliGatewayConfig {
+        default_runner_id: "gpt-web".into(),
+        ..Default::default()
+    });
+    let effective = effective_config_for_provider(&config, None);
+    assert_eq!(effective.runner_id, "gpt-web");
+    assert_eq!(effective.settings.adapter, "gpt-web");
+    assert!(validate_supported_adapter(&effective.settings.adapter).is_err());
+    let missing = effective_config_for_provider_and_runner(&config, None, Some("chatgpt-web"));
+    assert_eq!(missing.settings.adapter, "chatgpt-web");
+    assert!(!missing.settings.enabled);
 }

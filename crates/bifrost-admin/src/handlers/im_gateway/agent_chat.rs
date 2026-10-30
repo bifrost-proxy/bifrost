@@ -517,9 +517,9 @@ pub(super) fn build_im_channel_help_sections(
     match runner_kind {
         ImHelpRunnerKind::External { adapter } => {
             let mut runner_lines = Vec::new();
-            if adapter != crate::im_gateway::chatgpt_web::ADAPTER_ID {
-                runner_lines.push("普通后续消息默认按引导处理，使用 /q 才排队");
-            }
+
+            runner_lines.push("普通后续消息默认按引导处理，使用 /q 才排队");
+
             if crate::im_gateway::external_cli::supports_external_cli_model_slash(adapter) {
                 runner_lines
                     .push("/model         查看当前 Codex/Traex/Claude Code Runner 可选模型");

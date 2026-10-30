@@ -76,7 +76,7 @@ def report_content(report_path, prompt):
         return """# Research manifest
 
 ```json
-{"questions":[{"id":"github-question","original_question":"IBKR 仓库如何计算成交成本？","source_excerpt":"帮我记录一下并研究 IBKR 成交成本","background":"日报中的投资研究问题","runner":"web-research","github_repositories":["ibkr-portfolio-dashboard"],"research_prompt":"列出实际读取的仓库文件"},{"id":"product-question","original_question":"日报研究问题如何做到每题独立会话？","source_excerpt":"帮我记录一下自动研究流程","background":"日报 Agent 产品设计","runner":"web-research","research_prompt":"给出直接结论"}]}
+{"questions":[{"id":"github-question","original_question":"IBKR 仓库如何计算成交成本？","source_excerpt":"帮我记录一下并研究 IBKR 成交成本","background":"日报中的投资研究问题","runner":"cli-research","github_repositories":["ibkr-portfolio-dashboard"],"research_prompt":"列出实际读取的仓库文件"},{"id":"product-question","original_question":"日报研究问题如何做到每题独立会话？","source_excerpt":"帮我记录一下自动研究流程","background":"日报 Agent 产品设计","runner":"cli-research","research_prompt":"给出直接结论"}]}
 ```
 """
     if "/research_seed/" in report_path:
@@ -96,16 +96,7 @@ def report_content(report_path, prompt):
     if "/research_digest/" in report_path:
         if "2026-07-14-report.md" in report_path:
             return "# Research digest\n\n本日报未识别到需要外部研究的问题。\n"
-        links = []
-        for upstream in pathlib.Path.cwd().glob("input/upstream/research_fanout/*-report.md"):
-            links.extend(re.findall(r"https://chatgpt\.com/c/[A-Za-z0-9_-]+", upstream.read_text(encoding="utf-8")))
-        unique_links = sorted(set(links))
-        return (
-            "# Research digest\n\n"
-            "## IBKR 仓库如何计算成交成本？\n\n"
-            "- 核心结论：已由独立研究会话处理。\n"
-            + "".join(f"- 完整研究：{link}\n" for link in unique_links)
-        )
+        return "# Research digest\n\nIBKR 仓库如何计算成交成本？\n\n日报研究问题如何做到每题独立会话？\n"
     return (
         "# Daily report\n\n"
         "- 原始问题：帮我记录一下并研究 IBKR 成交成本。\n"
@@ -129,7 +120,11 @@ for line in sys.stdin:
         send({"jsonrpc":"2.0","id":request_id,"result":{"turn":{"id":turn_id}}})
         match = re.search(r"report=([^\n\r]+)", prompt)
         if not match:
-            message = "mock daily runner received a prompt without a report target"
+            question = re.search(r"## 原始问题\n([^\n]+)", prompt).group(1)
+            message = "## 原始问题\n" + question + "\n"
+            for heading in ["核心结论", "事实与证据", "推断与不确定性", "对原始问题的直接回答"]:
+                message += "\n## " + heading + "\n" + "公开合成资料用于验证研究流水线，未访问真实账号和仓库。" * 8 + "\n"
+            message += "\nGITHUB_CONNECTOR_STATUS: unavailable\n"
         else:
             report_path = match.group(1).strip().strip("` ")
             path = pathlib.Path(report_path)
@@ -147,8 +142,7 @@ if [[ "${SKIP_BUILD:-false}" != "true" ]]; then
   SKIP_FRONTEND_BUILD=1 cargo build --bin bifrost
 fi
 
-BIFROST_DATA_DIR="$DATA_DIR" BIFROST_E2E=1 BIFROST_CHATGPT_WEB_E2E_MOCK=1 \
-  BIFROST_CHATGPT_WEB_E2E_MOCK_PLANNING_FIRST=1 \
+BIFROST_DATA_DIR="$DATA_DIR" BIFROST_E2E=1 \
   "$BIFROST_BIN" start \
   --host 127.0.0.1 \
   -p "$BIFROST_PORT" \
@@ -235,10 +229,10 @@ request("PATCH", "/im-gateway/chat/config", {
             "workDir": repo_dir,
             "deliveryMode": "final_reply",
         },
-        "web-research": {
+        "cli-research": {
             "enabled": True,
-            "adapter": "chatgpt_web",
-            "adapterConfig": {},
+            "adapter": "codex",
+            "adapterConfig": {"executable": executable, "transport": "app_server", "timeoutSecs": 60},
             "injectBifrostTools": False,
             "skillPaths": [],
             "deliveryMode": "final_reply",
@@ -286,13 +280,12 @@ agents = [
     agent("research_digest", "daily-codex", "research_digest", ["research_fanout"]),
     agent(
         "research_fanout",
-        "web-research",
+        "cli-research",
         "research_result",
         ["research_dispatcher"],
         {
             "max_questions": 8,
-            "chatgpt_project_url": "https://chatgpt.com/g/g-p-daily-research/project",
-            "allowed_runners": ["web-research"],
+            "allowed_runners": ["cli-research"],
             "context_profiles": {},
         },
     ),
@@ -305,8 +298,6 @@ updated = request("PUT", f"/asr/tasks/{task_id}/daily-agent", {
     "agents": agents,
 })
 stored = {item["id"]: item for item in updated["config"]["agents"]}
-assert stored["research_fanout"]["research_fanout"]["chatgpt_interface_mode"] == "chat", stored
-assert stored["research_fanout"]["research_fanout"]["chatgpt_model"] == "pro", stored
 
 invalid = list(agents)
 invalid[0] = dict(invalid[0], dependencies=[{"agent_id":"missing-agent","include_output":True}])
@@ -365,10 +356,10 @@ github_report = (children_dir / "github-question.md").read_text(encoding="utf-8"
 product_report = (children_dir / "product-question.md").read_text(encoding="utf-8")
 assert github["original_question"] == "IBKR 仓库如何计算成交成本？", github
 assert product["original_question"] == "日报研究问题如何做到每题独立会话？", product
-assert github["conversation_id"] != product["conversation_id"], (github, product)
-assert github["full_report_link"].startswith("https://chatgpt.com/c/"), github
-assert product["full_report_link"].startswith("https://chatgpt.com/c/"), product
-assert github["github_connector_status"] == "missing", github
+assert github["run_id"] != product["run_id"], (github, product)
+assert "full_report_link" not in github, github
+assert "full_report_link" not in product, product
+assert github["github_connector_status"] == "unavailable", github
 for report in (github_report, product_report):
     assert "## 原始问题" in report, report
     assert "## 核心结论" in report, report
@@ -383,16 +374,16 @@ assert len(prompt_summaries) >= 4, prompt_summaries
 assert all(item.get("_bifrost_compacted") is True for item in prompt_summaries), prompt_summaries
 
 fanout_report = (fanout_dir / f"{date}-report.md").read_text(encoding="utf-8")
-assert github["full_report_link"] in fanout_report, fanout_report
-assert product["full_report_link"] in fanout_report, fanout_report
+assert github["original_question"] in fanout_report, fanout_report
+assert product["original_question"] in fanout_report, fanout_report
 digest_upstream = daily_dir / "agents" / "research_digest" / "input" / "upstream" / "research_fanout" / f"{date}-report.md"
 digest_input = digest_upstream.read_text(encoding="utf-8")
-assert github["full_report_link"] in digest_input, digest_input
-assert product["full_report_link"] in digest_input, digest_input
+assert github["original_question"] in digest_input, digest_input
+assert product["original_question"] in digest_input, digest_input
 digest_path = daily_dir / "agents" / "research_digest" / "output" / "research_digest" / f"{date}-report.md"
 digest = digest_path.read_text(encoding="utf-8")
-assert github["full_report_link"] in digest, digest
-assert product["full_report_link"] in digest, digest
+assert github["original_question"] in digest, digest
+assert product["original_question"] in digest, digest
 
 empty_date = "2026-07-14"
 (daily_dir / f"{empty_date}.md").write_text(

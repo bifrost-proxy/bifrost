@@ -208,7 +208,6 @@ CA 未就绪：
 
 - 断言 foreground 启动输出 `MOBILE AVAILABILITY CHECK` 与 `y` / `n` 审批入口。
 - 断言 target 不含 `127.0.0.1`。
-- 断言启动输出无 Demo / process check / ChatGPT Web startup auth 噪声。
 - 断言 HTTPS 探测在命中 `tlsIntercept://` 时 200，不出现 502/UnknownIssuer。
 
 ### human_tests（`human_tests/mobile-availability-terminal.md`）

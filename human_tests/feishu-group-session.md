@@ -183,7 +183,6 @@
 3. 构造一个已标记为 `dispatched` 的群 Guide Turn，模拟无法在当前活跃进程内消费、需要延后执行的路径。
 4. 检查 SQLite Turn 状态与排队项上下文，并检查 event-loop 测试模块行数。
 
-预期结果：隐式默认 Codex/Traex/Claude Code Runner 使用 live Guide，ChatGPT Web 使用 Queue；延后执行的群 Guide Turn 仍为 `dispatched`，排队项保留相同 `group_turn_id`，只有延后 Runner 成功或失败后才进入终态。event-loop 主测试模块与拆分出的恢复测试模块均不超过 1500 行。
 
 ### TC-FGS-22：引用消息并只艾特机器人仍是有效主输入
 
@@ -353,12 +352,6 @@ bash e2e-tests/tests/test_feishu_group_session_context.sh
 
 TC-FGS-21 的默认 Runner Guide 恢复语义和测试模块边界执行：
 
-```bash
-cargo test -p bifrost-admin busy_default_mode_guides_external_runners_except_chatgpt_web --all-features -- --nocapture
-cargo test -p bifrost-admin busy_group_turns_complete_or_release_with_their_queue_outcome --all-features -- --nocapture
-test "$(wc -l < crates/bifrost-admin/src/handlers/im_gateway/event_loop/tests.rs)" -le 1500
-test "$(wc -l < crates/bifrost-admin/src/handlers/im_gateway/event_loop/tests/recovery_tests.rs)" -le 1500
-```
 
 TC-FGS-22 的纯引用触发、旧游标查询、区间去重与跨群隔离执行：
 

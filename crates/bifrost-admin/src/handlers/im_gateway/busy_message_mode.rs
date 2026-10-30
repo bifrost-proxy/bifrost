@@ -23,6 +23,7 @@ pub(super) struct BusyMessageContext<'a> {
 pub(super) enum BusyMessageDefaultMode {
     Guide,
     ExternalGuide,
+    #[allow(dead_code)] // Explicit queue paths and tests retain this mode.
     Queue,
 }
 
@@ -53,12 +54,8 @@ pub(super) fn busy_default_mode_for_agent_config(
     busy_default_mode_for_external_adapter(&effective.settings.adapter)
 }
 
-pub(super) fn busy_default_mode_for_external_adapter(adapter: &str) -> BusyMessageDefaultMode {
-    if adapter == crate::im_gateway::chatgpt_web::ADAPTER_ID {
-        BusyMessageDefaultMode::Queue
-    } else {
-        BusyMessageDefaultMode::ExternalGuide
-    }
+pub(super) fn busy_default_mode_for_external_adapter(_adapter: &str) -> BusyMessageDefaultMode {
+    BusyMessageDefaultMode::ExternalGuide
 }
 
 #[cfg(test)]

@@ -186,7 +186,6 @@
 
 **操作步骤：**
 
-1. 使用已扫码授权的 `weixin` provider，确保 Agent runner 指向 ChatGPT Web 或其他会生成本地图片文件并返回 Markdown 图片引用的 runner。
 2. 从微信 ClawBot 发送：`帮我生成4张可爱的小猫咪`。
 3. 等待 Agent 最终回复完成，观察 Bifrost 日志、消息日志和微信侧收到的消息。
 4. 如无真实微信环境，使用 Weixin mock 服务执行 provider 图片发送子路径，记录 mock `getuploadurl`、CDN upload 和 `sendmessage` 请求。

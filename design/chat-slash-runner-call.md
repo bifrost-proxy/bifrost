@@ -2,7 +2,6 @@
 
 ## 背景
 
-Bifrost Web 端 Agent Chat 只能与当前会话默认 Runner 单点对话；用户想临时借用另一个 Runner（例如 Codex 会话中借 ChatGPT Web / Claude Code）时，必须切换 provider/channel 或另开线程，导致上下文断裂。
 
 本方案引入 slash runner call：在输入框输入 `/` 后展示 Runner 选择面板；选中后输入框展示 `Run with <runner>` chip，用户继续输入消息并发送。发送不切换当前会话默认 Runner，而是发起一次用户显式触发的 Runner 调用：后端把当前会话上下文和本次消息打包给目标 Runner，目标 Runner 执行完成后，结果以一条 Runner Call 消息回到当前会话，并成为当前 Runner 后续对话可消费的上下文。
 
@@ -41,8 +40,6 @@ Bifrost Web 端 Agent Chat 只能与当前会话默认 Runner 单点对话；用
 
 Chip 视觉与消息气泡颜色都必须让用户能看出这是一次借用而不是切换。
 
-
-- 外部 Runner（`codex / custom / mock / chatgpt_web` 等）：通过 chat gateway `/runner-calls/stream` 打进 external runner 执行链路，`callerMessages` 直接进入 prompt bundle。
 
 ### 结果消费
 

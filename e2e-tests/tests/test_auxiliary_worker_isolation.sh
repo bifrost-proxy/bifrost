@@ -114,7 +114,6 @@ mark_e2e_data_root "$BIFROST_DATA_DIR"
 BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 \
 BIFROST_DISABLE_TRAY=1 \
 BIFROST_E2E=1 \
-BIFROST_CHATGPT_WEB_E2E_MOCK=1 \
 BIFROST_FEISHU_DRY_RUN_FILE="$TEST_ROOT/feishu-dry-run.ndjson" \
 BIFROST_FEISHU_DRY_RUN_PROVIDER_ID="awi-provider" \
 BIFROST_DATA_DIR="$BIFROST_DATA_DIR" \
@@ -176,9 +175,9 @@ curl -fsS --noproxy '*' \
 "$PYTHON_BIN" - "$TEST_ROOT/modes.json" <<'PY'
 import json, sys
 modes = json.load(open(sys.argv[1], encoding="utf-8"))
-assert len(modes) == 6, modes
+assert len(modes) == 5, modes
 assert {item["workerKind"] for item in modes} == {
-    "external_cli", "browser", "asr", "im_gateway", "remote_invoke", "remote_execution"
+    "external_cli", "asr", "im_gateway", "remote_invoke", "remote_execution"
 }, modes
 assert all(item["executionMode"] == "worker" for item in modes), modes
 assert all(item["environmentVariable"].startswith("BIFROST_") for item in modes), modes
@@ -360,24 +359,6 @@ clean_roundtrip("remote_execution")
 # Exercise one real operation for each reusable worker family. These requests
 # stay inside the worker process and make protocol/dispatch regressions visible
 # without requiring a real model, browser account, IM account, or relay.
-proc, stderr, _ = start_worker(
-    "browser",
-    "browser-operation.stderr.log",
-    {"BIFROST_E2E": "1", "BIFROST_CHATGPT_WEB_E2E_MOCK": "1"},
-)
-response = request(
-    proc,
-    "browser-clear",
-    "browser.clear_session_conversation",
-    {"sessionKey": "awi-browser-session"},
-)
-assert response["ok"] is True and response["payload"]["cleared"] is True, response
-send(proc, {"type": "shutdown", "request_id": "browser-shutdown"})
-assert wait_response(proc, "browser-shutdown")["ok"] is True
-proc.stdin.close()
-assert proc.wait(timeout=10) == 0
-stderr.close()
-
 proc, stderr, _ = start_worker("asr", "asr-operation.stderr.log")
 response = request(
     proc,
@@ -521,7 +502,6 @@ def proxy_probe(phase):
 
 chaos_workers = []
 for kind, env in [
-    ("browser", {"BIFROST_E2E": "1", "BIFROST_CHATGPT_WEB_E2E_MOCK": "1"}),
     ("asr", {}),
     ("im_gateway", {}),
     ("remote_invoke", remote_env),
@@ -611,26 +591,6 @@ def run_payload(message, session_key):
             "timeoutSecs": 45,
         },
     }
-
-# Exercise the reusable Browser worker through the same Admin API used by IM
-# messages. Both the parent and worker inherit the explicit E2E mock, so this
-# validates process/spool/result isolation without opening a real browser.
-_, browser_result = request_json(
-    "/im-gateway/chat",
-    method="POST",
-    payload={
-        "message": "BROWSER_WORKER_E2E",
-        "sessionKey": "awi-browser-success",
-        "runtime": "external_cli",
-        "adapter": "chatgpt_web",
-        "workDir": repo_dir,
-        "allowWorkDirs": [repo_dir],
-        "injectBifrostTools": False,
-        "adapterConfig": {"timeoutSecs": 30},
-    },
-)
-assert browser_result["status"] == "succeeded", browser_result
-assert browser_result["response"], browser_result
 
 _, result = request_json(
     "/im-gateway/chat",

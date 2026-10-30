@@ -56,7 +56,6 @@ async fn handle_workers_with_supervisor<B>(
         }
         let modes = [
             WorkerKind::ExternalCli,
-            WorkerKind::Browser,
             WorkerKind::Asr,
             WorkerKind::ImGateway,
             WorkerKind::RemoteInvoke,
@@ -222,7 +221,8 @@ mod tests {
         let body = response.into_body().collect().await.unwrap().to_bytes();
         let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
         let modes = value.as_array().unwrap();
-        assert_eq!(modes.len(), 6);
+        assert_eq!(modes.len(), 5);
+        assert!(modes.iter().all(|mode| mode["workerKind"] != "browser"));
         assert!(modes.iter().all(|mode| {
             mode["executionMode"] == "worker"
                 && mode["environmentVariable"]
@@ -268,27 +268,27 @@ mod tests {
             StatusCode::METHOD_NOT_ALLOWED
         );
         assert_eq!(
-            request(Method::GET, "/api/workers/browser").await.status(),
+            request(Method::GET, "/api/workers/asr").await.status(),
             StatusCode::OK
         );
         assert_eq!(
-            request(Method::GET, "/api/workers/browser/extra/path")
+            request(Method::GET, "/api/workers/asr/extra/path")
                 .await
                 .status(),
             StatusCode::NOT_FOUND
         );
         assert_eq!(
-            request(Method::POST, "/api/workers/browser").await.status(),
+            request(Method::POST, "/api/workers/asr").await.status(),
             StatusCode::METHOD_NOT_ALLOWED
         );
         assert_eq!(
-            request(Method::GET, "/api/workers/browser/start")
+            request(Method::GET, "/api/workers/asr/start")
                 .await
                 .status(),
             StatusCode::METHOD_NOT_ALLOWED
         );
         assert_eq!(
-            request(Method::DELETE, "/api/workers/browser/reset-circuit")
+            request(Method::DELETE, "/api/workers/asr/reset-circuit")
                 .await
                 .status(),
             StatusCode::METHOD_NOT_ALLOWED
@@ -360,34 +360,30 @@ mod tests {
         assert!(value["errors"].as_array().unwrap().is_empty());
 
         assert_eq!(
-            local_request(&supervisor, Method::POST, "/api/workers/browser/start")
+            local_request(&supervisor, Method::POST, "/api/workers/asr/start")
                 .await
                 .status(),
             StatusCode::CONFLICT
         );
         assert_eq!(
-            local_request(&supervisor, Method::POST, "/api/workers/browser/restart",)
+            local_request(&supervisor, Method::POST, "/api/workers/asr/restart",)
                 .await
                 .status(),
             StatusCode::CONFLICT
         );
 
-        let reset = local_request(
-            &supervisor,
-            Method::POST,
-            "/api/workers/browser/reset-circuit",
-        )
-        .await;
+        let reset =
+            local_request(&supervisor, Method::POST, "/api/workers/asr/reset-circuit").await;
         assert_eq!(reset.status(), StatusCode::OK);
         let body = reset.into_body().collect().await.unwrap().to_bytes();
         let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(value["action"], "reset_circuit");
         assert_eq!(value["affected"], 0);
 
-        let stop = local_request(&supervisor, Method::POST, "/api/workers/browser/stop").await;
+        let stop = local_request(&supervisor, Method::POST, "/api/workers/asr/stop").await;
         assert_eq!(stop.status(), StatusCode::OK);
-        assert!(supervisor.is_kind_suspended(WorkerKind::Browser));
-        supervisor.resume_kind(WorkerKind::Browser);
+        assert!(supervisor.is_kind_suspended(WorkerKind::Asr));
+        supervisor.resume_kind(WorkerKind::Asr);
 
         let external_stop =
             local_request(&supervisor, Method::POST, "/api/workers/external-cli/stop").await;

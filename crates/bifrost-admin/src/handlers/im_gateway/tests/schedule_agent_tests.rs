@@ -149,32 +149,6 @@ pub(super) fn schedule_run_state_counts_only_execution_failures() {
 }
 
 #[test]
-pub(super) fn schedule_chatgpt_web_initial_prompt_is_sent_as_first_message_only() {
-    assert_eq!(
-        schedule_external_runner_messages(
-            crate::im_gateway::chatgpt_web::ADAPTER_ID,
-            Some("INIT_MARKER"),
-            false,
-            "TASK_MARKER",
-        ),
-        vec!["INIT_MARKER".to_string(), "TASK_MARKER".to_string()]
-    );
-    assert_eq!(
-        schedule_external_runner_messages(
-            crate::im_gateway::chatgpt_web::ADAPTER_ID,
-            Some("INIT_MARKER"),
-            true,
-            "TASK_MARKER",
-        ),
-        vec!["TASK_MARKER".to_string()]
-    );
-    assert_eq!(
-        schedule_external_runner_messages("mock", Some("INIT_MARKER"), false, "TASK_MARKER"),
-        vec!["TASK_MARKER".to_string()]
-    );
-}
-
-#[test]
 pub(super) fn schedule_patch_merges_agent_adapter_config_without_dropping_prompt() {
     let mut schedule = ImSchedule {
         id: "schedule-patch".to_string(),
@@ -255,29 +229,6 @@ pub(super) fn schedule_patch_merges_agent_adapter_config_without_dropping_prompt
         Some("/tmp/schema.json")
     );
     assert_eq!(adapter_config.color.as_deref(), Some("never"));
-}
-
-#[tokio::test(flavor = "current_thread")]
-pub(super) async fn schedule_chatgpt_web_session_exists_requires_non_empty_conversation() {
-    let temp_dir = tempfile::tempdir().expect("temp data dir");
-    let _env_guard = EnvGuard::set_data_dir(temp_dir.path());
-    let sessions_path = bifrost_agent::config::agent_home_dir()
-        .join("im_gateway")
-        .join("chatgpt_web")
-        .join("sessions.json");
-    tokio::fs::create_dir_all(sessions_path.parent().expect("sessions parent"))
-        .await
-        .expect("create sessions parent");
-    tokio::fs::write(
-        &sessions_path,
-        r#"{"schedule:empty":"  ","schedule:ready":"conv-ready"}"#,
-    )
-    .await
-    .expect("write sessions map");
-
-    assert!(crate::im_gateway::chatgpt_web::session_conversation_exists("schedule:ready").await);
-    assert!(!crate::im_gateway::chatgpt_web::session_conversation_exists("schedule:empty").await);
-    assert!(!crate::im_gateway::chatgpt_web::session_conversation_exists("schedule:missing").await);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -743,51 +694,5 @@ pub(super) async fn schedule_agent_persists_codex_thread_id_for_next_run() {
     assert_eq!(
         conversation_ref.thread_id.as_deref(),
         Some("thread-schedule-1")
-    );
-}
-
-#[test]
-pub(super) fn schedule_external_result_extracts_chatgpt_conversation_id() {
-    let result = crate::im_gateway::external_cli::ExternalCliRunResult {
-        run_id: "run-1".to_string(),
-        session_key: Some("schedule:one".to_string()),
-        runtime: "external_cli".to_string(),
-        adapter: crate::im_gateway::chatgpt_web::ADAPTER_ID.to_string(),
-        status: crate::im_gateway::external_cli::ExternalCliRunStatus::Succeeded,
-        exit_code: Some(0),
-        response: "ok".to_string(),
-        responses: vec!["ok".to_string()],
-        started_at: 1,
-        finished_at: 2,
-        duration_ms: 1,
-        artifacts: crate::im_gateway::external_cli::ExternalCliRunArtifacts {
-            run_dir: "".to_string(),
-            prompt: "".to_string(),
-            command_snapshot: "".to_string(),
-            stdout: "".to_string(),
-            stderr: "".to_string(),
-            normalized_events: "".to_string(),
-            last_message: "".to_string(),
-        },
-        events: Vec::new(),
-        metadata: std::collections::BTreeMap::from([(
-            "conversationId".to_string(),
-            "conv-schedule-1".to_string(),
-        )]),
-    };
-
-    let conversation_ref = schedule_conversation_ref_from_external_result(
-        crate::im_gateway::chatgpt_web::ADAPTER_ID,
-        &result,
-    )
-    .expect("conversation ref");
-
-    assert_eq!(
-        conversation_ref.conversation_id.as_deref(),
-        Some("conv-schedule-1")
-    );
-    assert_eq!(
-        conversation_ref.adapter,
-        crate::im_gateway::chatgpt_web::ADAPTER_ID
     );
 }

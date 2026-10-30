@@ -455,6 +455,7 @@ async function installDailyAgentMocks(page: Page) {
             skillPaths: [],
             deliveryMode: "final_reply",
           },
+          claude: { enabled: true, adapter: "claude_code", adapterConfig: {}, injectBifrostTools: false, skillPaths: [], deliveryMode: "final_reply" },
           web: {
             enabled: true,
             adapter: "chatgpt_web",
@@ -569,15 +570,16 @@ test("ASR Daily Agent uses simple Runner and IM Channel dropdowns", async ({ pag
   const dropdown = page.locator(".ant-select-dropdown:not(.ant-select-dropdown-hidden)").last();
   await expect(dropdown).toContainText("codex");
   await expect(dropdown).toContainText("codex");
-  await expect(dropdown).toContainText("web");
+  await expect(dropdown).not.toContainText("web");
+  await expect(dropdown).toContainText("claude");
   const runnerConfigReload = waitForDailyAgentConfigReload(page);
-  await dropdown.getByTitle("web").click();
+  await dropdown.getByTitle("claude").click();
   await waitForToast(page, "Configuration saved");
   await runnerConfigReload;
 
   expect(updates.at(-1)).toMatchObject({
     agents: expect.arrayContaining([
-      expect.objectContaining({ id: "custom_agent_2", runner: "web" }),
+      expect.objectContaining({ id: "custom_agent_2", runner: "claude" }),
     ]),
   });
 
@@ -623,58 +625,21 @@ test("ASR Daily Agent uses simple Runner and IM Channel dropdowns", async ({ pag
   await waitForToast(page, "Synced 2 copied, 0 skipped");
 });
 
-test("ASR Daily Agent saves a ChatGPT Project for independent research", async ({
+test("ASR research no longer offers the retired ChatGPT Project setting", async ({
   page,
 }) => {
-  const { updates } = await installDailyAgentMocks(page);
-  const projectUrl =
-    "https://chatgpt.com/g/g-p-daily-research/project";
-
+  await installDailyAgentMocks(page);
   await openPage(page, `ai?aiSection=tools-asr&asrTask=${taskId}`);
   await page.getByRole("tab", { name: "Daily Agent", exact: true }).click();
   await page.getByTestId("asr-daily-agent-edit-daily_report").click();
-
   await page.getByTestId("asr-daily-agent-research-fanout-switch").click();
   await waitForToast(page, "Configuration saved");
-  const projectInput = page.getByTestId(
-    "asr-daily-agent-research-project-url",
-  );
-  await expect(projectInput).toBeVisible();
-  await expect(projectInput).toHaveAttribute(
-    "placeholder",
-    "https://chatgpt.com/g/g-p-.../project",
-  );
-  await projectInput.fill(projectUrl);
-  expect(updates.at(-1)).not.toMatchObject({
-    agents: expect.arrayContaining([
-      expect.objectContaining({
-        research_fanout: expect.objectContaining({
-          chatgpt_project_url: projectUrl,
-        }),
-      }),
-    ]),
-  });
-  await projectInput.press("Enter");
-  await waitForToast(page, "Configuration saved");
-
   await expect(
-    page.getByText(
-      "When a Project URL is configured, every new research conversation is created inside that ChatGPT Project.",
-      { exact: false },
-    ),
+    page.getByTestId("asr-daily-agent-research-runners"),
   ).toBeVisible();
-  expect(updates.at(-1)).toMatchObject({
-    agents: expect.arrayContaining([
-      expect.objectContaining({
-        id: "daily_report",
-        research_fanout: expect.objectContaining({
-          chatgpt_interface_mode: "chat",
-          chatgpt_model: "pro",
-          chatgpt_project_url: projectUrl,
-        }),
-      }),
-    ]),
-  });
+  await expect(
+    page.getByTestId("asr-daily-agent-research-project-url"),
+  ).toHaveCount(0);
 });
 
 test("ASR Daily Agent opens processed reports as full-page Markdown details", async ({

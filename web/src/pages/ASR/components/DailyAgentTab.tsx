@@ -197,9 +197,9 @@ function TaskDailyAgentTab({ taskId }: DailyAgentTabProps) {
   };
 
   const runnerOptions = useMemo(() => {
-    const runnerIds = Object.keys(runnerConfig?.runners || {}).sort();
+    const runnerIds = imGatewayApi.selectableRunnerIds(runnerConfig);
     return runnerIds.map((id) => ({ label: id, value: id }));
-  }, [runnerConfig?.runners]);
+  }, [runnerConfig]);
 
   const agents = useMemo(
     () => configData?.config.agents || [],
@@ -671,9 +671,6 @@ function TaskDailyAgentTab({ taskId }: DailyAgentTabProps) {
                     research_fanout: enabled
                       ? {
                           max_questions: 8,
-                          chatgpt_interface_mode: "chat",
-                          chatgpt_model: "pro",
-                          chatgpt_project_url: undefined,
                           allowed_runners: selectedAgent.runner
                             ? [selectedAgent.runner]
                             : [],
@@ -701,37 +698,6 @@ function TaskDailyAgentTab({ taskId }: DailyAgentTabProps) {
                         },
                       })
                     }
-                  />
-                </Descriptions.Item>
-                <Descriptions.Item label={t("asrTasks.dailyAgent.chatgptProjectUrl")} span={2}>
-                  <Input
-                    key={`${selectedAgent.id}-project-url-${
-                      selectedAgent.research_fanout.chatgpt_project_url || ""
-                    }`}
-                    data-testid="asr-daily-agent-research-project-url"
-                    size="small"
-                    defaultValue={
-                      selectedAgent.research_fanout.chatgpt_project_url || ""
-                    }
-                    placeholder="https://chatgpt.com/g/g-p-.../project"
-                    onBlur={(event) => {
-                      const chatgptProjectUrl = event.target.value.trim();
-                      if (
-                        chatgptProjectUrl ===
-                        (selectedAgent.research_fanout!
-                          .chatgpt_project_url || "")
-                      ) {
-                        return;
-                      }
-                      updateAgent(selectedAgent.id, {
-                        research_fanout: {
-                          ...selectedAgent.research_fanout!,
-                          chatgpt_project_url:
-                            chatgptProjectUrl || undefined,
-                        },
-                      });
-                    }}
-                    onPressEnter={(event) => event.currentTarget.blur()}
                   />
                 </Descriptions.Item>
                 <Descriptions.Item label={t("asrTasks.dailyAgent.allowedResearchRunners")} span={2}>

@@ -21,7 +21,6 @@ Provider 底座 iLink：`https://ilinkai.weixin.qq.com`，CDN 底座：`https://
 - Weixin 入站消息不使用 owner 过滤；`owner_open_id` 只记录扫码登录账号。Feishu provider 继续保持 owner 安全边界。
 - 微信通道支持所有 Agent `/xxx` 命令，行为与飞书 IM 通道一致。
 - 微信图片消息解析 `image_item/media`，下载图片，必要时按 AES-128-ECB + PKCS7 解密，并以 base64 data URL 送入模型多模态输入。
-- Agent / ChatGPT Web 生成的本地图片按原图通过微信通道独立发送为图片消息，不能只退化为 Markdown 文本或卡片正文。
 - 最终回复直接发送模型最终文本，不添加 `Bifrost AI`、`等待任务说明` 等卡片前缀。
 - 当 Weixin `sendmessage` 对长文本返回失败（`ret` 或 `errcode` 非零，或网络错误）时，必须按字符边界拆分成多条 `[i/N]` 前缀的小文本按序补发，不能丢弃最终回复。切分保留全部 Unicode 内容和换行。
 
@@ -213,7 +212,6 @@ Provider 秘密不在响应体里出现；接口只返回 `secret_configured`。
 7. 调用 Weixin provider 图片发送路径，断言 mock `getuploadurl` 收到原始大小、MD5、目标用户和 AES key，mock CDN 收到非空密文，解密后等于原图字节，最终 mock `sendmessage` 收到 `item_list[].type=2` 与 `image_item.media.encrypt_query_param`。
 8. 删除 provider 后确认 `getupdates` 停止（`UPDATES_BEFORE_DELETE` vs `UPDATES_AFTER_DELETE`）。
 
-`e2e-tests/tests/test_im_gateway_long_reply_delivery_regression.sh` 覆盖长回复回归：ChatGPT Web DOM 提取不截断保护、Weixin 长文本首次失败后拆分补发。
 
 ### human_tests
 

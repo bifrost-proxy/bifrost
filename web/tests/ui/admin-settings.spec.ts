@@ -2427,6 +2427,7 @@ test("Settings Agent 三层 instructions 使用大窗口编辑", async ({ page }
 });
 
 test("Agent Runners 新增弹窗只展示当前支持的 Adapter", async ({ page }) => {
+  let configUpdates = 0;
   await page.route("**/_bifrost/api/im-gateway/agent", async (route) => {
     await route.fulfill({
       status: 200,
@@ -2443,11 +2444,12 @@ test("Agent Runners 新增弹窗只展示当前支持的 Adapter", async ({ page
     await route.fulfill({ status: 200, contentType: "application/json", body: "[]" });
   });
   await page.route("**/_bifrost/api/im-gateway/chat/config", async (route) => {
+    if (route.request().method() === "PATCH") configUpdates += 1;
     await route.fulfill({
       status: 200,
       contentType: "application/json",
       body: JSON.stringify({
-        defaultRunnerId: "codex",
+        defaultRunnerId: "web",
         runners: {
           codex: { enabled: true, adapter: "codex", adapterConfig: {} },
           traex: { enabled: true, adapter: "traex", adapterConfig: {} },
@@ -2465,6 +2467,18 @@ test("Agent Runners 新增弹窗只展示当前支持的 Adapter", async ({ page
   await openPage(page, "ai?aiSection=agent-runners&agentSection=runners");
   await expect(page.getByTestId("agent-settings-section-runners")).toBeVisible();
 
+  await expect(page.getByText("Removed Runner — choose another Adapter", { exact: true })).toBeVisible();
+  const retiredRow = page.getByRole("row").filter({ has: page.getByText("web", { exact: true }) });
+  await retiredRow.getByRole("button", { name: /Delete$/ }).click();
+  const deletionConfirm = page.locator(".ant-popover:not(.ant-popover-hidden)");
+  await expect(deletionConfirm).toBeVisible();
+  await deletionConfirm.getByRole("button", { name: "Delete", exact: true }).click();
+  await expect(page.getByText(
+    "Explicitly configure a supported Adapter or update all bindings before deleting this retired Runner.",
+    { exact: true },
+  )).toBeVisible();
+  expect(configUpdates).toBe(0);
+
   await page.getByRole("button", { name: "Add Runner" }).click();
   const dialog = page.getByRole("dialog", { name: "Add Runner" });
   await expect(dialog).toBeVisible();
@@ -2474,7 +2488,7 @@ test("Agent Runners 新增弹窗只展示当前支持的 Adapter", async ({ page
   await expect(adapterDropdown).toContainText("Codex CLI");
   await expect(adapterDropdown).toContainText("Traex CLI");
   await expect(adapterDropdown).toContainText("Claude Code");
-  await expect(adapterDropdown).toContainText("ChatGPT Web");
+  await expect(adapterDropdown).not.toContainText("ChatGPT Web");
   await expect(adapterDropdown).not.toContainText("Custom");
   await expect(adapterDropdown).not.toContainText("Mock");
   await page.keyboard.press("Escape");
