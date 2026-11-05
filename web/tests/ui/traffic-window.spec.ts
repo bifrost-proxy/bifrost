@@ -1,6 +1,7 @@
 // Legacy traffic suite: extract focused fixture modules as lifecycle ownership
 // is isolated, preserving the registered end-to-end cases and assertions.
 import { test, expect } from "@playwright/test";
+import { gotoIsolatedTraffic } from "./helpers/isolated-locale";
 import {
   startMockServer,
   sendProxyRequest,
@@ -176,7 +177,7 @@ test("Network 大历史使用 1000 条双向滑动窗口且服务端统计保持
     ).records[0]?.p;
     expect(oldestPath).toBeTruthy();
     expect(newestPath).toBeTruthy();
-    await page.goto(`${backend.baseUrl}/_bifrost/traffic`);
+    await gotoIsolatedTraffic(page, backend.baseUrl);
 
     const table = page.getByTestId("traffic-table");
     const scroll = page.getByTestId("traffic-table-scroll");
@@ -274,7 +275,7 @@ test("Traffic 统计通过 WebSocket 按变化推送且突发流量每秒最多�
   let seedWindow: { startedAt: number; finishedAt?: number } | undefined;
   try {
     await installTrafficStatisticsRecorder(page);
-    await page.goto(`${backend.baseUrl}/_bifrost/traffic`);
+    await gotoIsolatedTraffic(page, backend.baseUrl);
     await expect(page.getByTestId("traffic-table")).toBeVisible();
     await expect
       .poll(async () => (await readTrafficStatisticsFrames(page)).length)
@@ -367,7 +368,7 @@ test("Search 在组合条件下按 WebSocket 变更实时增量重算且定向�
       server.port,
       backend.proxyUrl,
     );
-    await page.goto(`${backend.baseUrl}/_bifrost/traffic`);
+    await gotoIsolatedTraffic(page, backend.baseUrl);
     await expect(page.getByTestId("traffic-table")).toBeVisible();
     await page.getByRole("button", { name: "Fuzzy Search" }).click();
     const input = page.getByPlaceholder(
@@ -545,7 +546,7 @@ test("服务端滚动淘汰后休眠恢复洪峰仍保持有界且可交互", as
     const initialPush = page.waitForEvent("websocket", (socket) =>
       socket.url().includes("/api/push"),
     );
-    await page.goto(`${backend.baseUrl}/_bifrost/traffic`);
+    await gotoIsolatedTraffic(page, backend.baseUrl);
     await initialPush;
     const table = page.getByTestId("traffic-table");
     await expect(table).toBeVisible();

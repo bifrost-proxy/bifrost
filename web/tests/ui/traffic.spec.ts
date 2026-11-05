@@ -1,6 +1,7 @@
 // Legacy traffic suite: extract focused fixture modules as lifecycle ownership
 // is isolated, preserving the registered end-to-end cases and assertions.
 import { test, expect } from "@playwright/test";
+import { gotoIsolatedTraffic } from "./helpers/isolated-locale";
 import {
   execFileAsync,
   proxyUrl,
@@ -548,7 +549,7 @@ test("主筛选器支持按代理端口过滤 Traffic", async ({ page }) => {
       otherPortPath,
     );
 
-    await page.goto(`${backend.baseUrl}/_bifrost/traffic`);
+    await gotoIsolatedTraffic(page, backend.baseUrl);
     await expect(page.getByTestId("traffic-table")).toBeVisible();
     await expect(
       page.getByTestId("traffic-row").filter({ hasText: mainPortPath }).first(),
@@ -607,7 +608,7 @@ test("左侧筛选器仅在多代理端口时展示 Proxy port 并同步到 URL"
       mainPortPath,
     );
 
-    await page.goto(`${backend.baseUrl}/_bifrost/traffic`);
+    await gotoIsolatedTraffic(page, backend.baseUrl);
     await expect(page.getByTestId("traffic-table")).toBeVisible();
     await expect(
       page.getByTestId("traffic-row").filter({ hasText: mainPortPath }).first(),
@@ -699,7 +700,7 @@ test("主筛选器支持临时停用单条条件", async ({ page }) => {
     await waitForTrafficRecordByApi(backend.baseApi, targetPath);
     await waitForTrafficRecordByApi(backend.baseApi, otherPath);
 
-    await page.goto(`${backend.baseUrl}/_bifrost/traffic`);
+    await gotoIsolatedTraffic(page, backend.baseUrl);
     await expect(page.getByTestId("traffic-table")).toBeVisible();
     await expect(
       page.getByTestId("traffic-row").filter({ hasText: targetPath }).first(),
