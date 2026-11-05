@@ -118,3 +118,10 @@ lsof -nP -iTCP:18889 -sTCP:LISTEN || true
 - `TC-SPRS-03`：通过，HTTP/HTTPS/SOCKS 均恢复为 off，18889 无监听残留，共享 9900 仍为 PID 5988。
 - 额外诊断：历史全生命周期脚本执行 21 项时 15 项通过、6 项失败，暴露出脚本内部 Desktop ownership 环境泄漏和失败退出恢复不完整；已立即按执行前快照恢复 OS 状态。本次性能门禁使用独立 focused E2E，不削弱 Desktop ownership 保护。
 - `TC-SPRS-04`：本地纯解析回归 1/1 PASS；真实空 dormant endpoint 场景由 macOS CI focused E2E 执行，首次运行准确捕获 `Enabled: No` 但 server/port 残留隔离端口的缺陷，修复后结果以同 MR 最新 CI 为准。
+
+## 空 bypass 列表回归（Issue #559）
+
+- 自动化：`cargo test -p bifrost-core --all-features system_proxy::macos_command` 与 `python3 -m unittest discover -s scripts/ci/tests -p test_native_proxy_acceptance.py`。成功的空白输出和英文无 bypass 提示均应读为 `[]`；非零退出码（包括无输出）、权限错误、超时、成功退出但含错误文本、非 UTF-8 输出仍须报错。非空列表顺序和值保持不变。
+- 原生验收仅在一次性 macOS runner 执行，不在个人设备执行：记录 Wi-Fi HTTP/HTTPS/bypass 原值，以空 bypass 为前置条件，使用隔离目录与端口执行上述 TC-SPRS-02；确认启用、停用均成功，停用后 bypass 仍为空，HTTP/HTTPS 原值恢复。随后以非空 bypass 重复，确认原列表恢复。所有修改必须由已有 snapshot/cleanup trap 兜底。
+- 本次云端环境为 Linux，未执行此原生验收；命令响应注入测试不能证明具体 macOS 版本的真实 `networksetup` 行为。
+- 生命周期回归 `newline_only_bypass_survives_acquire_and_release` 通过注入命令 runner 驱动真实适配器与 ownership 引擎，覆盖目标 bypass 为空及非空；首次快照和恢复后的空列表均读回精确 `"\n"`，接管后两协议启用并指向目标，释放后 HTTP/HTTPS 原 endpoint、禁用状态及空 bypass 恢复，pending 写入清空。该测试不执行原生命令，不验证 manager 的 journal 文件持久化或删除。

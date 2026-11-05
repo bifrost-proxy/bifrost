@@ -425,13 +425,10 @@ pub(super) fn parse_protocol(text: &str) -> Result<Protocol> {
 
 pub(super) fn parse_bypass(text: &str) -> Result<Vec<String>> {
     let text = text.trim();
-    if text.starts_with("There aren't any bypass domains set on ") {
+    // A successful query may return no bytes when ExceptionsList is empty.
+    // Process failures are rejected by the runner before parsing.
+    if text.is_empty() || text.starts_with("There aren't any bypass domains set on ") {
         return Ok(Vec::new());
-    }
-    if text.is_empty() {
-        return Err(BifrostError::Config(
-            "networksetup returned empty bypass output".into(),
-        ));
     }
     Ok(text
         .lines()

@@ -52,10 +52,12 @@ class NativeReadbackTests(unittest.TestCase):
             with self.subTest(invalid=invalid), self.assertRaises(ValueError):
                 MODULE.parse_protocol(invalid)
 
-    def test_bypass_preserves_values_and_rejects_empty_error(self):
+    def test_bypass_preserves_values_and_accepts_empty_list(self):
         self.assertEqual(MODULE.parse_bypass("localhost\n*.corp.example\n"), ["localhost", "*.corp.example"])
         self.assertEqual(MODULE.parse_bypass("There aren't any bypass domains set on Wi-Fi.\n"), [])
-        for invalid in ("", "** Error: permission denied"):
+        for empty in ("", "\n", " \n\t"):
+            self.assertEqual(MODULE.parse_bypass(empty), [])
+        for invalid in ("** Error: permission denied", "Error: invalid service"):
             with self.subTest(invalid=invalid), self.assertRaises(ValueError):
                 MODULE.parse_bypass(invalid)
 
@@ -66,6 +68,13 @@ class NativeReadbackTests(unittest.TestCase):
                 MODULE.native_read("-getwebproxy", "Wi-Fi")
             self.assertEqual(run.call_args.args[0], ["/usr/sbin/networksetup", "-getwebproxy", "Wi-Fi"])
             self.assertEqual(run.call_args.kwargs["env"]["LC_ALL"], "C")
+
+    def test_failed_empty_bypass_command_is_rejected(self):
+        with patch.object(MODULE.subprocess, "run", side_effect=subprocess.CalledProcessError(
+                1, ["networksetup"], output="", stderr="")) as run:
+            with self.assertRaises(subprocess.CalledProcessError):
+                MODULE.native_read("-getproxybypassdomains", "Wi-Fi")
+            self.assertTrue(run.call_args.kwargs["check"])
 
     def test_capture_only_uses_read_queries(self):
         calls = []

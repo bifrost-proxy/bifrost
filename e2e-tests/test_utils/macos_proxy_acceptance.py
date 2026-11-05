@@ -48,9 +48,9 @@ def parse_protocol(text: str) -> dict:
 def parse_bypass(text: str) -> list[str]:
     reject_native_errors(text)
     lines = text.strip().splitlines()
-    if len(lines) == 1 and lines[0].startswith("There aren't any bypass domains set on "):
+    if not lines or (len(lines) == 1 and lines[0].startswith("There aren't any bypass domains set on ")):
         return []
-    if not lines or any(not line or line.startswith("**") for line in lines):
+    if any(not line or line.startswith("**") for line in lines):
         raise ValueError("invalid networksetup bypass readback")
     return lines
 
