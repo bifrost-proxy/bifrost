@@ -594,21 +594,26 @@ test_domain_passthrough_over_app_force_intercept() {
     log_pass "Domain passthrough kept a curl App Force Intercept request as a CONNECT tunnel without Badge injection"
 
     local browser_client="$BIFROST_DATA_DIR/TestBrowserHelper"
-    if is_windows; then
-        browser_client+=".exe"
-    fi
-    cp "$(type -P curl)" "$browser_client" || return 1
+    local proxy_url="http://127.0.0.1:$PROXY_PORT"
+    local ca_file="$BIFROST_DATA_DIR/certs/ca.crt"
+    local test_url="https://127.0.0.1:$MOCK_HTTPS_PORT/test/app-wildcard"
+    local -a client_args
     if [[ "$(uname -s)" == Darwin ]]; then
-        codesign --force --sign - "$browser_client" || return 1
+        cc "$PROJECT_ROOT/e2e-tests/test_utils/tls_app_client.c" -lcurl -o "$browser_client" || return 1
+        client_args=("$proxy_url" "$ca_file" "$test_url")
+    else
+        if is_windows; then
+            browser_client+=".exe"
+        fi
+        cp "$(type -P curl)" "$browser_client" || return 1
+        client_args=(--http1.1 -fsS "${CURL_COMMON_ARGS[@]}" --cacert "$ca_file" -x "$proxy_url" "$test_url")
     fi
 
     env NO_PROXY="*" no_proxy="*" curl -fsS "${CURL_COMMON_ARGS[@]}" -X PUT \
         -H "Content-Type: application/json" -d '{"intercept_exclude":[],"app_intercept_include":["*Browser*"]}' \
         "http://127.0.0.1:$ADMIN_PORT/_bifrost/api/config/tls" >/dev/null || return 1
-    response=$(env NO_PROXY="" no_proxy="" "$browser_client" --http1.1 -fsS "${CURL_COMMON_ARGS[@]}" \
-        --cacert "$BIFROST_DATA_DIR/certs/ca.crt" -x "http://127.0.0.1:$PROXY_PORT" \
-        "https://127.0.0.1:$MOCK_HTTPS_PORT/test/app-wildcard") || {
-        log_fail "The app-intercepted HTTPS request failed"
+    response=$(env NO_PROXY="" no_proxy="" "$browser_client" "${client_args[@]}") || {
+        log_fail "The app-intercepted HTTPS request failed (exit $?)"
         tail -30 /tmp/proxy_server.log
         return 1
     }
