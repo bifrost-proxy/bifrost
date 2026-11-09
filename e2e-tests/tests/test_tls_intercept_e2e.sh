@@ -592,6 +592,31 @@ test_domain_passthrough_over_app_force_intercept() {
     fi
 
     log_pass "Domain passthrough kept a curl App Force Intercept request as a CONNECT tunnel without Badge injection"
+
+    local browser_client="$BIFROST_DATA_DIR/TestBrowserHelper"
+    if is_windows; then
+        browser_client+=".exe"
+    fi
+    cp "$(type -P curl)" "$browser_client" || return 1
+    if [[ "$(uname -s)" == Darwin ]]; then
+        codesign --force --sign - "$browser_client" || return 1
+    fi
+
+    env NO_PROXY="*" no_proxy="*" curl -fsS "${CURL_COMMON_ARGS[@]}" -X PUT \
+        -H "Content-Type: application/json" -d '{"intercept_exclude":[],"app_intercept_include":["*Browser*"]}' \
+        "http://127.0.0.1:$ADMIN_PORT/_bifrost/api/config/tls" >/dev/null || return 1
+    response=$(env NO_PROXY="" no_proxy="" "$browser_client" --http1.1 -fsS "${CURL_COMMON_ARGS[@]}" \
+        --cacert "$BIFROST_DATA_DIR/certs/ca.crt" -x "http://127.0.0.1:$PROXY_PORT" \
+        "https://127.0.0.1:$MOCK_HTTPS_PORT/test/app-wildcard") || {
+        log_fail "The app-intercepted HTTPS request failed"
+        tail -30 /tmp/proxy_server.log
+        return 1
+    }
+    if ! jq -e '.path == "/test/app-wildcard"' <<< "$response" >/dev/null; then
+        log_fail "Expected the HTTPS mock response through the app-intercepted connection"
+        return 1
+    fi
+    log_pass "The *Browser* app rule presented a Bifrost-signed certificate with global interception off"
     return 0
 }
 
