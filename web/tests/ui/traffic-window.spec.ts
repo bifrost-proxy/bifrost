@@ -352,7 +352,7 @@ test("Traffic 统计通过 WebSocket 按变化推送且突发流量每秒最多�
   }
 });
 
-test("Search 在组合条件下按 WebSocket 变更实时增量重算且定向查询有界", async ({
+test("Search 完成后保持结果稳定，手动重搜纳入新流量且定向查询有界", async ({
   page,
 }) => {
   const server = await startMockServer();
@@ -361,6 +361,16 @@ test("Search 在组合条件下按 WebSocket 变更实时增量重算且定向�
   const initialPath = `/live-search-${token}-initial`;
   const livePath = `/live-search-${token}-pushed`;
   const nonMatchingPath = `/unrelated-${Date.now()}`;
+  const isSearchUrl = (url: string) =>
+    ["/_bifrost/api/search/stream", "/_bifrost/api/search"].includes(
+      new URL(url).pathname,
+    );
+  const searchRequests: string[] = [];
+  page.on("request", (request) => {
+    if (request.method() === "POST" && isSearchUrl(request.url())) {
+      searchRequests.push(request.url());
+    }
+  });
 
   try {
     await seedTrafficBatch(
@@ -375,16 +385,76 @@ test("Search 在组合条件下按 WebSocket 变更实时增量重算且定向�
       "Enter keyword to search all content...",
     );
     await input.fill(`live-search-${token}`);
+    const firstSearch = page.waitForResponse(
+      (response) =>
+        response.request().method() === "POST" && isSearchUrl(response.url()),
+    );
     await page.getByTestId("search-mode-submit").click();
+    const firstResponse = await firstSearch;
+    expect(firstResponse.ok()).toBeTruthy();
+    expect(await firstResponse.finished()).toBeNull();
     await expect(
       page.getByText(initialPath, { exact: false }).first(),
     ).toBeVisible();
+    const rows = page.getByTestId("search-result-row");
+    await expect(rows).toHaveCount(1);
+    const initialResultIds = await rows.evaluateAll((elements) =>
+      elements.map((element) => element.getAttribute("data-record-id")),
+    );
 
     await seedTrafficBatch(
       [livePath, `/unrelated-live-${token}`],
       server.port,
       backend.proxyUrl,
     );
+    await expect
+      .poll(async () =>
+        (
+          await queryTraffic(backend.baseApi, {
+            limit: "100",
+            direction: "backward",
+          })
+        ).records.map((record) => record.p),
+      )
+      .toEqual(
+        expect.arrayContaining([
+          initialPath,
+          livePath,
+          `/unrelated-live-${token}`,
+        ]),
+      );
+
+    // Observe the same five-second live-update window as the old assertion:
+    // completed results and their identities stay fixed, with no auto-search.
+    const stableUntil = Date.now() + 5_000;
+    do {
+      expect(searchRequests).toHaveLength(1);
+      await expect(rows).toHaveCount(1);
+      expect(
+        await rows.evaluateAll((elements) =>
+          elements.map((element) => element.getAttribute("data-record-id")),
+        ),
+      ).toEqual(initialResultIds);
+      await expect(
+        page.getByText(initialPath, { exact: false }).first(),
+      ).toBeVisible();
+      await expect(page.getByText(livePath, { exact: false })).toHaveCount(0);
+      await page.waitForTimeout(100);
+    } while (Date.now() < stableUntil);
+
+    const repeatedSearch = page.waitForResponse(
+      (response) =>
+        response.request().method() === "POST" && isSearchUrl(response.url()),
+    );
+    await page.getByTestId("search-mode-submit").click();
+    const repeatedResponse = await repeatedSearch;
+    expect(repeatedResponse.ok()).toBeTruthy();
+    expect(await repeatedResponse.finished()).toBeNull();
+    expect(searchRequests).toHaveLength(2);
+    await expect(rows).toHaveCount(2);
+    await expect(
+      page.getByText(initialPath, { exact: false }).first(),
+    ).toBeVisible();
     await expect(
       page.getByText(livePath, { exact: false }).first(),
     ).toBeVisible({
@@ -393,6 +463,9 @@ test("Search 在组合条件下按 WebSocket 变更实时增量重算且定向�
     await expect(
       page.getByText(`/unrelated-live-${token}`, { exact: false }),
     ).toHaveCount(0);
+    await expect(page.getByText(nonMatchingPath, { exact: false })).toHaveCount(
+      0,
+    );
 
     const records = await queryTraffic(backend.baseApi, {
       limit: "100",
