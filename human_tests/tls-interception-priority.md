@@ -98,6 +98,38 @@
 
 本次执行结果：通过。执行聚焦 Playwright 用例，最终结果为 `1 passed`，用例耗时 2.8 秒、总耗时 10.4 秒；浅色和暗色主题均显示完整优先级与同层 Passthrough 优先说明。前三次执行被本机真实连接 iPad 的延迟 CA 安装提示遮罩阻挡，测试已改为等待该明确命名的 dialog 并点击 `Not now`，产品优先级断言保持不变；修复后复跑通过。
 
+### TC-TIP-05：按应用名称包含 `Browser` 强制解包 HTTPS（macOS）
+
+旧版只去掉开头的星号，把剩下的 `Browser*` 当作字面后缀，因而无法匹配 `TestBrowserHelper`。验证时保持全局 TLS 解包关闭，使内层请求只能由应用规则触发。
+
+1. 用独立数据目录启动桌面测试实例，将代理端口设为 `19780`，关闭系统代理。在 Settings → Proxy 中关闭全局 TLS 解包，清空应用强制拦截及跳过列表；确保没有匹配本机的规则、域名或 IP 策略。仅在此实例允许自签名上游证书。
+2. 在仓库根目录的另一个终端运行 `python3 e2e-tests/mock_servers/https_echo_server.py 19783`。在测试终端准备一个名称可控的真实客户端：
+
+   ```bash
+   client_dir=$(mktemp -d)
+   cp "$(command -v curl)" "$client_dir/TestBrowserHelper"
+   codesign --force --sign - "$client_dir/TestBrowserHelper"
+   ```
+
+3. 先在没有应用规则时发一次请求。在桌面的 Traffic 中确认应用是 `TestBrowserHelper`，有 CONNECT，但看不到内层路径 `/wildcard-control`。此处的 `-k` 用于接受回显服务自身的证书。
+
+   ```bash
+   "$client_dir/TestBrowserHelper" --noproxy '' -ksS -x http://127.0.0.1:19780 https://127.0.0.1:19783/wildcard-control
+   ```
+
+4. 在 Settings → Proxy → 按应用筛选 → 强制拦截中只添加 `*Browser*`。把下列 `ca` 指向**此测试实例**的 CA，再发一个新请求。这次不使用 `-k`：
+
+   ```bash
+   ca="<测试实例数据目录>/certs/ca.crt"
+   "$client_dir/TestBrowserHelper" --noproxy '' --cacert "$ca" -fsS -x http://127.0.0.1:19780 https://127.0.0.1:19783/wildcard-match
+   ```
+
+预期结果：旧版第 4 步仍透传，客户端只信任 Bifrost CA 时会拒绝上游自签名证书。修复版第 4 步成功返回回显内容；Traffic 中能看到 `TestBrowserHelper` 的内层 `GET /wildcard-match` 和 HTTP 200。仅有 CONNECT 或加 `-k` 后能访问都不能判定为通过。
+
+本次执行结果（2026-11-09，macOS arm64）：在已安装的旧版内核上，应用名识别正确，但配置 `*Browser*` 后仍只有 CONNECT，校验证书返回 curl 错误 60。本次修复版验证使用隔离代理端口 19780，通过桌面测试实例的 Admin API 切换同一设置：空规则时只有 CONNECT；添加规则后，客户端通过证书校验，Traffic 记录了 `TestBrowserHelper` 的 `GET /wildcard-match`，状态为 200。
+
+测试结束后退出测试实例，停止回显服务，删除临时客户端。
+
 ## 清理步骤
 
 - E2E 脚本和 Playwright teardown 停止各自启动的隔离服务。

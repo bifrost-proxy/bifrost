@@ -6308,23 +6308,20 @@ fn is_app_matched(client_app: Option<&str>, patterns: &[String]) -> bool {
     };
 
     let app_lower = app.to_lowercase();
-    for pattern in patterns {
+    patterns.iter().any(|pattern| {
         let pattern_lower = pattern.to_lowercase();
 
-        if let Some(suffix) = pattern_lower.strip_prefix('*') {
-            if app_lower.ends_with(&suffix) {
-                return true;
+        if let Some(rest) = pattern_lower.strip_prefix('*') {
+            if let Some(fragment) = rest.strip_suffix('*') {
+                return app_lower.contains(fragment);
             }
+            app_lower.ends_with(rest)
         } else if let Some(prefix) = pattern_lower.strip_suffix('*') {
-            if app_lower.starts_with(prefix) {
-                return true;
-            }
-        } else if app_lower == pattern_lower {
-            return true;
+            app_lower.starts_with(prefix)
+        } else {
+            app_lower == pattern_lower
         }
-    }
-
-    false
+    })
 }
 
 fn is_app_excluded(client_app: Option<&str>, exclude_list: &[String]) -> bool {
@@ -7610,6 +7607,7 @@ mod tests {
             "Safari".to_string(),
             "Chrome*".to_string(),
             "*Firefox".to_string(),
+            "*Browser*".to_string(),
         ];
         assert!(is_app_matched(Some("Safari"), &patterns));
         assert!(is_app_matched(Some("safari"), &patterns));
@@ -7617,6 +7615,10 @@ mod tests {
         assert!(is_app_matched(Some("Chrome Beta"), &patterns));
         assert!(is_app_matched(Some("Firefox"), &patterns));
         assert!(is_app_matched(Some("Mozilla Firefox"), &patterns));
+        assert!(is_app_matched(Some("Browser Helper"), &patterns));
+        assert!(is_app_matched(Some("Browser"), &patterns));
+        assert!(is_app_matched(Some("Test BROWSER Helper"), &patterns));
+        assert!(is_app_matched(Some("Test Browser"), &patterns));
         assert!(!is_app_matched(Some("Edge"), &patterns));
         assert!(!is_app_matched(None, &patterns));
         assert!(!is_app_matched(Some(""), &patterns));
