@@ -1057,6 +1057,31 @@
 - `web/src/pages/Rules/routerNavigation.test.tsx` 使用真实 BrowserRouter/HashRouter 覆盖路由片段、编码规则名、无关参数、初始深链和实际 history 后退/前进；路由片段回归在 helper 修复前复现选中态错误。
 - 现有 `web/tests/ui/admin-rules-values.spec.ts` 中 Rules/Values 键盘用例及全部选中态断言保持不变，真实浏览器结果需由后续 CI 确认。
 
+### TC-WRU-53-规则目录展开收起状态记忆
+
+**前置条件**：使用隔离后端与全新浏览器存储，保留 Default，创建 `team/service/child`、`team/sibling`、`other/child`。后端必须以 `--no-system-proxy` 启动。
+
+**操作步骤**：
+1. 在亮色主题打开 Rules 并选中 Default，确认首次所有目录展开。
+2. 收起 `team/service`，再收起 `team` 和 `other`；刷新列表、刷新浏览器，切到 Values 再返回 Rules。
+3. 展开 `team`，刷新浏览器；确认 `team/service` 仍独立保持收起。
+4. 搜索 `team/service/child`，点击被临时展开的目录，清空搜索。
+5. 新增 `new-folder/child` 并刷新列表。
+6. 通过深链打开 `team/service/child`，点击被自动展开的目录，再选择 Default。
+7. 手动展开 `team/service`，刷新浏览器。
+8. 在暗色主题完整重复以上步骤，检查目录箭头、子规则可见性与布局。
+
+**预期结果**：
+- 列表刷新、浏览器刷新、页面切换均保留手动展开/收起状态，包括所有目录收起与嵌套目录独立状态。
+- 搜索和选中规则可临时展开父目录，但不会覆盖记忆；搜索结束或选择 Default 后恢复原状态。
+- 新目录默认展开，旧目录的状态不受新增规则影响。
+- 手动重新展开后刷新仍展开；亮暗主题行为一致。
+- 状态保存在当前浏览器 origin 的 localStorage，不跨浏览器或设备同步。
+
+**执行命令**：`BIFROST_UI_TEST_PREBUILT_BINARY=<已有 bifrost 可执行文件绝对路径> pnpm --dir web exec playwright test tests/ui/rules-tree-memory.spec.ts --workers=1`。
+
+**执行结果（2026-11-15）**：PASS，真实 Chrome + 隔离后端，亮暗主题 2/2 通过，逐条验证上述操作并检查两种主题截图。首次受沙箱端口限制及缺失 Playwright Chromium 影响；允许本地隔离端口并通过 `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` 使用本机 Chrome 后通过。
+
 ## 清理
 
 测试完成后清理临时数据：

@@ -41,11 +41,13 @@ Bifrost 从 rules 树状视图落地起，把规则名按 `/` 拆分为“文件
 - 树在前端 `RuleList` 渲染前根据 `filteredRules` 构造，等价于对现有排序结果做一次 group-by-path 的可视化包装。
 - 拖拽、rename、批量移动**不改变** flat 规则名；后续如要引入“按目录移动”，需要单独设计。
 
-### 展开状态是运行时前端状态
+### 展开状态在浏览器本地持久化
 
-- 展开集合 `expandedFolders` 保存在 `RuleList` 组件 state 中；首次进入或数据刷新后默认展开全部一级 folder 路径，交由用户按需折叠。
+- `useRuleTreeStore` 使用 Zustand persist 将手动收起的目录路径保存到 localStorage 的 `bifrost-rule-tree`。未被手动收起的目录默认展开，包括新出现的目录。列表刷新、页面切换和浏览器重新加载不会重置偏好。
+- 以 `JSON.stringify(activeGroupId)` 隔离我的规则（null）和每个组，相同目录路径互不影响；浏览器 origin 天然隔离不同管理端，不跨设备同步。
+- 仅目录点击更新偏好。数据加载、搜索过滤、目录暂时消失都不删除偏好，避免异步列表或切组时覆盖已保存状态。删除后重建同路径目录会沿用该路径的偏好。
 - 搜索关键词非空时，构建后的 tree 会强制展开全部 folder；用户清空搜索后恢复到用户手动折叠/展开的状态。
-- 选中叶子时，`getRuleParentPaths(rule.name)` 计算出所有父路径并加入展开集合，保证选中项一定可见。
+- 选中叶子时，`getRuleParentPaths(rule.name)` 计算出所有父路径并临时加入可见展开集合，保证选中项可见。搜索期间或选中项父目录处于强制展开状态时，目录点击不更改偏好；解除强制展开后恢复记忆。
 
 ### Default、Group 规则的展示
 
@@ -99,8 +101,8 @@ export function flattenVisibleRuleNames(
 
 - 引入 `buildRuleTree`、`collectFolderPaths`、`flattenVisibleRuleNames`。
 - `const ruleTree = useMemo(() => buildRuleTree(filteredRules), [filteredRules])`。
-- `expandedFolders` 存放于 `useState<string[]>([])`，用 `useMemo` 派生 `expandedFolderSet`。
-- 数据首次装载或 `allFolderPaths` 增加时，用 `allFolderPaths = collectFolderPaths(ruleTree)` 补齐默认展开状态，避免新出现的 folder 默认折叠。
+- 从 `useRuleTreeStore` 读取当前组的 `collapsedFolders`，用 `useMemo` 派生 `expandedFolderSet`。
+- 从 `allFolderPaths = collectFolderPaths(ruleTree)` 排除当前组持久化的收起路径，得到手动展开集合；不依赖数据装载 effect 写入存储，避免空列表或搜索结果覆盖偏好。
 - 搜索关键词非空时把展开集合替换为 `new Set(allFolderPaths)`，保证结果全部可见。
 - Folder 行 dom 使用 `data-testid="rule-folder-item"`、`data-folder-expanded="true|false"`，供 Playwright 断言。
 - 叶子节点保留原 `role="option"`，`aria-selected` 与旧扁平列表一致。
@@ -212,5 +214,6 @@ export function flattenVisibleRuleNames(
 - **规则名冲突**：出现 `A` 和 `A/B` 时，`A` 是顶层叶子、`A/B` 会在名为 `A` 的 folder 下。UI 将 folder 与顶层叶子并排渲染，folder 行图标区分；后续若造成困惑可考虑给 folder 加 badge。
 - **深路径体验**：极深路径（≥ 6 层）会占用较多水平空间，缩进用固定像素而不是相对宽度，滚动可继续查看；如后期问题突出再引入水平滚动或路径省略。
 - **默认全展开的性能**：在超大规则量下默认展开会导致 DOM 节点较多；`RuleList` 已使用虚拟化的场景下，folder 节点也需要计入高度。当前规模在 100~500 规则内表现良好。
-- **折叠状态未持久化**：刷新页面后回到默认展开状态，避免与 push 更新叠加时状态漂移。若后续需要，可将折叠状态存 `localStorage`。
+- **本地状态范围**：折叠状态仅在当前浏览器 origin 内持久化，清理站点存储会恢复默认展开。搜索/选中带来的临时展开不写入存储。
+- **回归验证**：`web/src/stores/useRuleTreeStore.test.ts` 验证重新加载、嵌套路径、组隔离和损坏 JSON；`web/tests/ui/rules-tree-memory.spec.ts` 与 `human_tests/webui-rules.md` TC-WRU-53 验证真实刷新、页面切换、搜索、深链、新目录和亮暗主题。
 - **未来若上马 rename/move**：应先在 storage 层增加 `move`/`rename-under` 语义并给 Default/系统规则加保护；本设计不做。
