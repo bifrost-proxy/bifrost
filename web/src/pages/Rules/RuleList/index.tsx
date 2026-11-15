@@ -31,6 +31,7 @@ import {
   FolderOpenOutlined,
 } from '@ant-design/icons';
 import { useRulesStore } from '../../../stores/useRulesStore';
+import { useRuleTreeStore } from '../../../stores/useRuleTreeStore';
 import { ImportBifrostButton } from '../../../components/ImportBifrostButton';
 import { useExportBifrost } from '../../../hooks/useExportBifrost';
 import { useSyncStore } from '../../../stores/useSyncStore';
@@ -129,8 +130,10 @@ export default function RuleList() {
     name: string;
     position: 'before' | 'after';
   } | null>(null);
-  const [expandedFolders, setExpandedFolders] = useState<string[]>([]);
-  const expandedFolderManualSet = useMemo(() => new Set(expandedFolders), [expandedFolders]);
+  const collapsedFolders = useRuleTreeStore(
+    (state) => state.collapsedFoldersByGroup[JSON.stringify(activeGroupId)]
+  );
+  const toggleFolder = useRuleTreeStore((state) => state.toggleFolder);
   const listContainerRef = useRef<HTMLDivElement | null>(null);
   const autoScrollFrameRef = useRef<number | null>(null);
   const autoScrollVelocityRef = useRef(0);
@@ -210,7 +213,6 @@ export default function RuleList() {
   }, []);
 
   const handleGroupChange = useCallback((value: string) => {
-    setExpandedFolders([]);
     setSelectedRules([]);
     lastClickedIndexRef.current = null;
 
@@ -361,12 +363,13 @@ export default function RuleList() {
       return new Set(allFolderPaths);
     }
 
-    const next = new Set(expandedFolderManualSet);
+    const collapsed = new Set(collapsedFolders);
+    const next = new Set(allFolderPaths.filter((path) => !collapsed.has(path)));
     for (const path of forcedExpandedFolderSet) {
       next.add(path);
     }
     return next;
-  }, [searchKeyword, allFolderPaths, expandedFolderManualSet, forcedExpandedFolderSet]);
+  }, [searchKeyword, allFolderPaths, collapsedFolders, forcedExpandedFolderSet]);
 
   const visibleRuleNames = useMemo(
     () => flattenVisibleRuleNames(ruleTree, expandedFolderSet),
@@ -859,16 +862,11 @@ export default function RuleList() {
   }, [selectedRuleName, filteredRules]);
 
   const handleToggleFolder = useCallback((path: string) => {
-    setExpandedFolders((prev) => {
-      const next = new Set(prev);
-      if (next.has(path)) {
-        next.delete(path);
-      } else {
-        next.add(path);
-      }
-      return Array.from(next);
-    });
-  }, []);
+    if (searchKeyword || forcedExpandedFolderSet.has(path)) {
+      return;
+    }
+    toggleFolder(activeGroupId, path);
+  }, [activeGroupId, forcedExpandedFolderSet, searchKeyword, toggleFolder]);
 
   const renderTreeNodes = (folder: RuleTreeFolderNode, depth: number): ReactNode[] => {
     const nodes: ReactNode[] = [];
